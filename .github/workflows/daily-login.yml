@@ -1,0 +1,33 @@
+name: Daily Kotak Login at 9 AM IST
+
+# Runs Mon-Fri at 9:00 AM IST (3:30 AM UTC)
+# Skips weekends (Indian stock market closed)
+
+on:
+  schedule:
+    - cron: '30 3 * * 1-5'
+  workflow_dispatch:  # allows manual trigger from GitHub UI for testing
+
+jobs:
+  trigger-login:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render dashboard to trigger login
+        run: |
+          echo "Waking Render app and triggering fresh login..."
+          # First hit wakes up the service if sleeping (takes ~30s)
+          curl -s -o /dev/null -w "Wake ping: HTTP %{http_code}\n" \
+            --max-time 60 \
+            "${{ secrets.RENDER_APP_URL }}/" || true
+
+          # Give it a moment to wake
+          sleep 10
+
+          # POST /refresh clears session and forces fresh TOTP login
+          curl -s -w "\nRefresh: HTTP %{http_code}\n" \
+            -X POST \
+            --max-time 120 \
+            -L \
+            "${{ secrets.RENDER_APP_URL }}/refresh"
+
+          echo "Done. Check Render logs for login result."
