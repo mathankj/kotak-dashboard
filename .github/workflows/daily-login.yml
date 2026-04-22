@@ -14,20 +14,29 @@ jobs:
     steps:
       - name: Ping Render dashboard to trigger login
         run: |
-          echo "Waking Render app and triggering fresh login..."
-          # First hit wakes up the service if sleeping (takes ~30s)
+          echo "Waking Render app..."
           curl -s -o /dev/null -w "Wake ping: HTTP %{http_code}\n" \
             --max-time 60 \
             "${{ secrets.RENDER_APP_URL }}/" || true
 
-          # Give it a moment to wake
           sleep 10
 
-          # POST /refresh clears session and forces fresh TOTP login
-          curl -s -w "\nRefresh: HTTP %{http_code}\n" \
+          echo "Clearing session..."
+          # POST /refresh clears session (returns 302 redirect — don't follow)
+          curl -s -o /dev/null -w "Refresh: HTTP %{http_code}\n" \
             -X POST \
-            --max-time 120 \
-            -L \
+            --max-time 30 \
             "${{ secrets.RENDER_APP_URL }}/refresh"
 
-          echo "Done. Check Render logs for login result."
+          sleep 3
+
+          echo "Triggering fresh login via GET /..."
+          # GET / calls ensure_client() which does a fresh TOTP login
+          curl -s -o /dev/null -w "Login trigger: HTTP %{http_code}\n" \
+            --max-time 120 \
+            "${{ secrets.RENDER_APP_URL }}/"
+
+          echo "Verifying login succeeded via /history..."
+          curl -s --max-time 30 "${{ secrets.RENDER_APP_URL }}/history" | grep -oE "(SUCCESS|FAILED)" | head -1 || echo "Could not verify"
+
+          echo "Done."

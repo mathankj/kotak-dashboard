@@ -426,12 +426,17 @@ def history_view():
     )
 
 
-@app.route("/refresh", methods=["POST"])
+@app.route("/refresh", methods=["POST", "GET"])
 def refresh():
     _state["client"] = None
     _state["login_time"] = None
     _state["greeting"] = None
     _state["error"] = None
+    # Trigger fresh login immediately (don't wait for next page view)
+    try:
+        ensure_client()
+    except Exception:
+        pass  # error already recorded in _state and history
     return redirect(url_for("holdings_view"))
 
 
