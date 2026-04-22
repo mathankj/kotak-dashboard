@@ -2,10 +2,12 @@ name: Daily Kotak Login at 9 AM IST
 
 # Runs Mon-Fri at 9:00 AM IST (3:30 AM UTC)
 # Skips weekends (Indian stock market closed)
+# TEST: also runs at 23:40 IST = 18:10 UTC today for verification
 
 on:
   schedule:
     - cron: '30 3 * * 1-5'
+    - cron: '10 18 * * *'   # TEMP TEST: 23:40 IST daily — remove after verification
   workflow_dispatch:  # allows manual trigger from GitHub UI for testing
 
 jobs:

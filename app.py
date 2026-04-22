@@ -10,7 +10,7 @@ import os
 import json
 import traceback
 import pyotp
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from flask import Flask, render_template_string, jsonify, redirect, url_for
 from dotenv import load_dotenv
 from neo_api_client import NeoAPI
@@ -20,13 +20,19 @@ load_dotenv()
 app = Flask(__name__)
 _state = {"client": None, "login_time": None, "greeting": None, "error": None}
 
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def now_ist():
+    return datetime.now(IST)
+
 HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "login_history.json")
 
 
 def append_history(status, detail):
     """Append a login attempt to the history file (JSONL)."""
     entry = {
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
         "status": status,  # "success" or "failed"
         "detail": detail,
     }
@@ -85,7 +91,7 @@ def ensure_client():
             client, greeting = login()
             _state["client"] = client
             _state["greeting"] = greeting
-            _state["login_time"] = datetime.now()
+            _state["login_time"] = now_ist()
             _state["error"] = None
             append_history("success", f"Logged in as {greeting}")
         except Exception as e:
@@ -361,7 +367,7 @@ def render(active, heading, data, error):
         cols=cols,
         view_error=error,
         greeting=_state.get("greeting"),
-        login_time=_state["login_time"].strftime("%H:%M:%S") if _state.get("login_time") else None,
+        login_time=_state["login_time"].strftime("%H:%M:%S IST") if _state.get("login_time") else None,
         error=_state.get("error"),
     )
 
