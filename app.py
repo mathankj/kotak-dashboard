@@ -8,6 +8,8 @@ Open: http://localhost:5000
 """
 import os
 import json
+import math
+import time
 import traceback
 import pyotp
 from datetime import datetime, timezone, timedelta
@@ -125,6 +127,152 @@ def safe_call(fn, *args, **kwargs):
         return resp, None
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
+
+
+# ---------- Gann Trader: scrips, levels, quote cache ----------
+SCRIPS = [
+    {"symbol": "NIFTY 50",  "token": "Nifty 50",   "exchange": "nse_cm", "is_index": True},
+    {"symbol": "BANKNIFTY", "token": "Nifty Bank", "exchange": "nse_cm", "is_index": True},
+    {"symbol": "SENSEX",    "token": "BSE Sensex", "exchange": "bse_cm", "is_index": True},
+    {"symbol": "RELIANCE",  "token": "2885",       "exchange": "nse_cm", "is_index": False},
+    {"symbol": "TCS",       "token": "11536",      "exchange": "nse_cm", "is_index": False},
+    {"symbol": "INFOSYS",   "token": "1594",       "exchange": "nse_cm", "is_index": False},
+    {"symbol": "HDFCBANK",  "token": "1333",       "exchange": "nse_cm", "is_index": False},
+    {"symbol": "ICICIBANK", "token": "4963",       "exchange": "nse_cm", "is_index": False},
+    {"symbol": "SBIN",      "token": "3045",       "exchange": "nse_cm", "is_index": False},
+]
+
+# Gann Square of 9 step = 22.5° in sqrt-space
+GANN_STEP = 0.0625
+
+SELL_LEVELS = ["S3", "S2", "S1", "SELL_WA", "SELL"]   # n = -5..-1
+BUY_LEVELS  = ["BUY", "BUY_WA", "T1", "T2", "T3"]      # n = +1..+5
+
+LEVEL_COLORS = {
+    "S3": "#B71C1C", "S2": "#C62828", "S1": "#D32F2F",
+    "SELL_WA": "#FF9800", "SELL": "#EF9A9A",
+    "BUY": "#A5D6A7", "BUY_WA": "#FF9800",
+    "T1": "#81C784", "T2": "#66BB6A", "T3": "#388E3C",
+}
+
+
+def gann_levels(open_price):
+    """Compute Gann Square of 9 levels from the opening price.
+    Returns dict {sell: {S3..SELL}, buy: {BUY..T3}}.
+    Sell levels are 5..1 steps below open, buy levels are 1..5 steps above."""
+    if not open_price or open_price <= 0:
+        return {"sell": {k: None for k in SELL_LEVELS},
+                "buy":  {k: None for k in BUY_LEVELS}}
+    sq = math.sqrt(open_price)
+    sell = {}
+    for i, name in enumerate(SELL_LEVELS):
+        # S3=-6, S2=-5, S1=-4, SELL_WA=-3, SELL=-2 (matches Square-of-9 reference)
+        n = -(6 - i)
+        sell[name] = round((sq + n * GANN_STEP) ** 2, 2)
+    buy = {}
+    for i, name in enumerate(BUY_LEVELS):
+        # BUY=+2, BUY_WA=+3, T1=+4, T2=+5, T3=+6
+        n = i + 2
+        buy[name] = round((sq + n * GANN_STEP) ** 2, 2)
+    return {"sell": sell, "buy": buy}
+
+
+# ---- quote cache (refresh on demand, TTL 2 sec) ----
+_quote_cache = {"data": {}, "ts": 0, "error": None}
+QUOTE_TTL = 2.0  # seconds
+
+
+def _extract_ohlc(quote_obj):
+    """Pull (ltp, open, low, high) from a Kotak quote response item.
+    Tolerant of various key shapes the SDK might return."""
+    if not isinstance(quote_obj, dict):
+        return None, None, None, None
+    def pick(*keys):
+        for k in keys:
+            if k in quote_obj and quote_obj[k] not in (None, "", "0"):
+                try:
+                    return float(quote_obj[k])
+                except (ValueError, TypeError):
+                    pass
+        return None
+    ltp  = pick("ltp", "last_traded_price", "lastPrice", "lp")
+    op   = pick("open", "openPrice", "op", "o")
+    low  = pick("low", "lowPrice", "lo", "l")
+    high = pick("high", "highPrice", "hp", "h")
+    return ltp, op, low, high
+
+
+def fetch_quotes(force=False):
+    """Fetch quotes for all SCRIPS via Kotak. Returns dict {symbol: {...}}.
+    Uses TTL cache."""
+    now = time.time()
+    if not force and (now - _quote_cache["ts"]) < QUOTE_TTL and _quote_cache["data"]:
+        return _quote_cache["data"], _quote_cache["error"]
+
+    try:
+        client = ensure_client()
+    except Exception as e:
+        _quote_cache["error"] = f"login: {e}"
+        return _quote_cache["data"], _quote_cache["error"]
+
+    out = {}
+    last_err = None
+    # Kotak SDK quotes() takes a list of {instrument_token, exchange_segment}
+    # Indices and equities have different isIndex flag, so call separately
+    by_index = {True: [], False: []}
+    for s in SCRIPS:
+        by_index[s["is_index"]].append(s)
+
+    for is_index, group in by_index.items():
+        if not group:
+            continue
+        tokens = [{"instrument_token": s["token"], "exchange_segment": s["exchange"]} for s in group]
+        try:
+            resp = client.quotes(instrument_tokens=tokens, quote_type="ohlc", isIndex=is_index)
+        except Exception as e:
+            last_err = f"quotes({'idx' if is_index else 'eq'}): {type(e).__name__}: {e}"
+            continue
+        # Response shape varies; usually resp = {"message": [ {tk, ltp, ohlc...}, ...]}
+        # or {"data": [...]}.
+        items = []
+        if isinstance(resp, dict):
+            items = resp.get("message") or resp.get("data") or resp.get("d") or []
+            if isinstance(items, dict):
+                items = [items]
+        elif isinstance(resp, list):
+            items = resp
+        # match by token (string compare, case-insensitive for indices)
+        for s in group:
+            wanted = str(s["token"]).strip().lower()
+            match = None
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                tk = str(it.get("instrument_token") or it.get("tk") or it.get("token") or "").strip().lower()
+                # Indices: token is name like "Nifty 50"; might be returned as "nifty 50" or in trKey
+                trkey = str(it.get("trKey") or it.get("tradingSymbol") or it.get("symbol") or "").strip().lower()
+                if tk == wanted or trkey == wanted:
+                    match = it
+                    break
+            ltp = op = low = high = None
+            if match is not None:
+                # OHLC may be nested under 'ohlc'
+                ohlc = match.get("ohlc") if isinstance(match.get("ohlc"), dict) else match
+                ltp, op, low, high = _extract_ohlc({**match, **ohlc} if ohlc is not match else match)
+            out[s["symbol"]] = {
+                "symbol": s["symbol"],
+                "token": s["token"],
+                "ltp": ltp,
+                "open": op,
+                "low": low,
+                "high": high,
+                "levels": gann_levels(op) if op else {"sell": {}, "buy": {}},
+            }
+
+    _quote_cache["data"] = out
+    _quote_cache["ts"] = now
+    _quote_cache["error"] = last_err
+    return out, last_err
 
 
 # ---------- HTML template (single-file, dark theme) ----------
@@ -256,6 +404,7 @@ PAGE = """
 """
 
 TABS = [
+    {"key": "gann", "url": "/gann", "label": "Gann Trader"},
     {"key": "holdings", "url": "/", "label": "Holdings"},
     {"key": "positions", "url": "/positions", "label": "Positions"},
     {"key": "orders", "url": "/orders", "label": "Orders"},
@@ -263,6 +412,222 @@ TABS = [
     {"key": "limits", "url": "/limits", "label": "Limits"},
     {"key": "history", "url": "/history", "label": "Login History"},
 ]
+
+
+GANN_PAGE = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Gann Trader - Kotak Neo</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif;
+         background: #f5f6f8; color: #1f2937; margin: 0; padding: 16px; }
+  header { display: flex; justify-content: space-between; align-items: center;
+           background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+           padding: 12px 16px; margin-bottom: 12px; }
+  .title { font-weight: 700; font-size: 18px; }
+  .live { color: #16a34a; font-size: 12px; margin-left: 8px; }
+  .stale { color: #dc2626; font-size: 12px; margin-left: 8px; }
+  .clock { font-family: monospace; background: #f3f4f6; padding: 6px 10px;
+           border-radius: 6px; font-size: 14px; }
+  .ucc { background: #f3f4f6; padding: 6px 10px; border-radius: 6px;
+         font-size: 13px; color: #374151; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tabs a { padding: 6px 12px; background: #fff; color: #6b7280;
+            text-decoration: none; border-radius: 6px; font-size: 13px;
+            border: 1px solid #e5e7eb; }
+  .tabs a.active { background: #2563eb; color: white; border-color: #2563eb; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+          overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 1400px; }
+  th { text-align: center; padding: 8px 6px; background: #f9fafb;
+       color: #6b7280; font-weight: 600; font-size: 10px;
+       text-transform: uppercase; border-bottom: 1px solid #e5e7eb;
+       position: sticky; top: 0; }
+  td { padding: 8px 6px; border-bottom: 1px solid #f3f4f6;
+       color: #1f2937; text-align: center; font-variant-numeric: tabular-nums; }
+  td.scrip { text-align: left; font-weight: 600; }
+  td.ltp { font-weight: 700; background: #f9fafb; font-size: 13px; }
+  td.pnl { background: #dcfce7; color: #166534; font-weight: 600; }
+  td.pnl.neg { background: #fee2e2; color: #991b1b; }
+  th.group-sell { background: #6b7280; color: #fff; }
+  th.group-buy  { background: #6b7280; color: #fff; }
+  th.group-ltp  { background: #1f2937; color: #fff; }
+  .legend { display: flex; gap: 16px; justify-content: center;
+            padding: 12px; font-size: 12px; color: #6b7280; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+  .err-banner { background: #fef3c7; border: 1px solid #fbbf24; color: #78350f;
+                padding: 10px 14px; border-radius: 8px; margin-bottom: 12px;
+                font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <span class="title">Gann Trader</span>
+    <span id="livedot" class="live">● Live</span>
+  </div>
+  <div style="display:flex; gap:8px; align-items:center;">
+    <span class="clock" id="clock">--:--:--</span>
+    <span class="ucc">UCC: {{ ucc }}</span>
+    <form method="post" action="/refresh" style="margin:0">
+      <button style="padding:6px 12px;background:#16a34a;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;">Refresh Login</button>
+    </form>
+  </div>
+</header>
+
+<div class="tabs">
+  {% for t in tabs %}
+    <a href="{{ t.url }}" class="{% if t.key == active %}active{% endif %}">{{ t.label }}</a>
+  {% endfor %}
+</div>
+
+<div id="errbox"></div>
+
+<div class="card">
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2">SCRIP</th>
+      <th rowspan="2">P&amp;L</th>
+      <th rowspan="2">LIVE P&amp;L</th>
+      <th rowspan="2">QTY</th>
+      <th rowspan="2">OPEN</th>
+      <th rowspan="2">LOW</th>
+      <th rowspan="2">HIGH</th>
+      <th colspan="5" class="group-sell">SELL LEVELS</th>
+      <th rowspan="2" class="group-ltp">LTP</th>
+      <th colspan="5" class="group-buy">BUY LEVELS</th>
+    </tr>
+    <tr>
+      <th>S3</th><th>S2</th><th>S1</th><th>WA</th><th>SELL</th>
+      <th>BUY</th><th>WA</th><th>T1</th><th>T2</th><th>T3</th>
+    </tr>
+  </thead>
+  <tbody id="rows">
+    {% for s in scrips %}
+    <tr data-symbol="{{ s.symbol }}">
+      <td class="scrip">{{ s.symbol }}</td>
+      <td class="pnl" data-col="pnl">+0.00</td>
+      <td class="pnl" data-col="livepnl">+0.00</td>
+      <td data-col="qty">0</td>
+      <td data-col="open">-</td>
+      <td data-col="low">-</td>
+      <td data-col="high">-</td>
+      <td data-col="S3">-</td>
+      <td data-col="S2">-</td>
+      <td data-col="S1">-</td>
+      <td data-col="SELL_WA">-</td>
+      <td data-col="SELL">-</td>
+      <td class="ltp" data-col="ltp">-</td>
+      <td data-col="BUY">-</td>
+      <td data-col="BUY_WA">-</td>
+      <td data-col="T1">-</td>
+      <td data-col="T2">-</td>
+      <td data-col="T3">-</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<div class="legend">
+  <span><span class="swatch" style="background:#EF9A9A"></span>Sell Levels (Darker = Far from LTP)</span>
+  <span><span class="swatch" style="background:#FF9800"></span>WA (Watch Area)</span>
+  <span><span class="swatch" style="background:#A5D6A7"></span>Buy Levels (Darker = Far from LTP)</span>
+</div>
+</div>
+
+<script>
+const LEVEL_COLORS = {{ level_colors|tojson }};
+const SELL_LVLS = ["S3","S2","S1","SELL_WA","SELL"];
+const BUY_LVLS  = ["BUY","BUY_WA","T1","T2","T3"];
+
+function fmt(v) {
+  if (v === null || v === undefined || v === "") return "-";
+  const n = Number(v);
+  if (!isFinite(n)) return "-";
+  return n.toFixed(2);
+}
+
+function paintCell(td, level, value, ltp) {
+  if (value === null || value === undefined) {
+    td.textContent = "-";
+    td.style.background = "";
+    td.style.color = "";
+    return;
+  }
+  td.textContent = fmt(value);
+  // Distance shading: closer to LTP = lighter
+  if (ltp && value) {
+    const distAbs = Math.abs(value - ltp);
+    // small distance => light, large => dark (use base color from LEVEL_COLORS)
+    td.style.background = LEVEL_COLORS[level] || "";
+    td.style.color = "#000";
+    // Lighten if close to LTP (within ~0.3% of LTP)
+    if (distAbs / ltp < 0.003) {
+      td.style.opacity = "0.55";
+    } else {
+      td.style.opacity = "1";
+    }
+  } else {
+    td.style.background = "";
+    td.style.color = "";
+  }
+}
+
+async function refresh() {
+  try {
+    const r = await fetch("/api/gann-prices");
+    const data = await r.json();
+    const ebox = document.getElementById("errbox");
+    if (data.error) {
+      ebox.innerHTML = '<div class="err-banner">Data error: ' + data.error + '</div>';
+    } else {
+      ebox.innerHTML = "";
+    }
+    document.getElementById("livedot").className = data.error ? "stale" : "live";
+    document.getElementById("livedot").textContent = data.error ? "● Stale" : "● Live";
+
+    for (const s of data.scrips) {
+      const tr = document.querySelector('tr[data-symbol="' + s.symbol + '"]');
+      if (!tr) continue;
+      const ltp = s.ltp;
+      tr.querySelector('[data-col=ltp]').textContent = fmt(ltp);
+      tr.querySelector('[data-col=open]').textContent = fmt(s.open);
+      tr.querySelector('[data-col=low]').textContent  = fmt(s.low);
+      tr.querySelector('[data-col=high]').textContent = fmt(s.high);
+      const sell = (s.levels && s.levels.sell) || {};
+      const buy  = (s.levels && s.levels.buy)  || {};
+      for (const lvl of SELL_LVLS) {
+        paintCell(tr.querySelector('[data-col=' + lvl + ']'), lvl, sell[lvl], ltp);
+      }
+      for (const lvl of BUY_LVLS) {
+        paintCell(tr.querySelector('[data-col=' + lvl + ']'), lvl, buy[lvl], ltp);
+      }
+    }
+  } catch (e) {
+    document.getElementById("livedot").className = "stale";
+    document.getElementById("livedot").textContent = "● Offline";
+  }
+}
+
+function tickClock() {
+  const now = new Date();
+  const ist = new Date(now.getTime() + (now.getTimezoneOffset() + 330) * 60000);
+  const hh = String(ist.getHours()).padStart(2,'0');
+  const mm = String(ist.getMinutes()).padStart(2,'0');
+  const ss = String(ist.getSeconds()).padStart(2,'0');
+  document.getElementById("clock").textContent = hh+":"+mm+":"+ss + " IST";
+}
+
+setInterval(tickClock, 1000); tickClock();
+setInterval(refresh, 2500); refresh();
+</script>
+</body>
+</html>
+"""
 
 
 HISTORY_PAGE = """
@@ -430,6 +795,29 @@ def history_view():
         active="history",
         history=read_history(),
     )
+
+
+@app.route("/gann")
+def gann_view():
+    return render_template_string(
+        GANN_PAGE,
+        tabs=TABS,
+        active="gann",
+        scrips=SCRIPS,
+        ucc=os.getenv("KOTAK_UCC", ""),
+        level_colors=LEVEL_COLORS,
+    )
+
+
+@app.route("/api/gann-prices")
+def gann_prices_api():
+    data, err = fetch_quotes()
+    # Preserve scrip order
+    ordered = [data.get(s["symbol"], {
+        "symbol": s["symbol"], "ltp": None, "open": None,
+        "low": None, "high": None, "levels": {"sell": {}, "buy": {}},
+    }) for s in SCRIPS]
+    return jsonify({"scrips": ordered, "error": err, "ts": now_ist().strftime("%H:%M:%S IST")})
 
 
 @app.route("/refresh", methods=["POST", "GET"])
