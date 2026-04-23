@@ -131,15 +131,15 @@ def safe_call(fn, *args, **kwargs):
 
 # ---------- Gann Trader: scrips, levels, quote cache ----------
 SCRIPS = [
-    {"symbol": "NIFTY 50",  "token": "Nifty 50",   "exchange": "nse_cm", "is_index": True},
-    {"symbol": "BANKNIFTY", "token": "Nifty Bank", "exchange": "nse_cm", "is_index": True},
-    {"symbol": "SENSEX",    "token": "BSE Sensex", "exchange": "bse_cm", "is_index": True},
-    {"symbol": "RELIANCE",  "token": "2885",       "exchange": "nse_cm", "is_index": False},
-    {"symbol": "TCS",       "token": "11536",      "exchange": "nse_cm", "is_index": False},
-    {"symbol": "INFOSYS",   "token": "1594",       "exchange": "nse_cm", "is_index": False},
-    {"symbol": "HDFCBANK",  "token": "1333",       "exchange": "nse_cm", "is_index": False},
-    {"symbol": "ICICIBANK", "token": "4963",       "exchange": "nse_cm", "is_index": False},
-    {"symbol": "SBIN",      "token": "3045",       "exchange": "nse_cm", "is_index": False},
+    {"symbol": "NIFTY 50",  "token": "Nifty 50",   "exchange": "nse_cm"},
+    {"symbol": "BANKNIFTY", "token": "Nifty Bank", "exchange": "nse_cm"},
+    {"symbol": "SENSEX",    "token": "SENSEX",     "exchange": "bse_cm"},
+    {"symbol": "RELIANCE",  "token": "2885",       "exchange": "nse_cm"},
+    {"symbol": "TCS",       "token": "11536",      "exchange": "nse_cm"},
+    {"symbol": "INFOSYS",   "token": "1594",       "exchange": "nse_cm"},
+    {"symbol": "HDFCBANK",  "token": "1333",       "exchange": "nse_cm"},
+    {"symbol": "ICICIBANK", "token": "4963",       "exchange": "nse_cm"},
+    {"symbol": "SBIN",      "token": "3045",       "exchange": "nse_cm"},
 ]
 
 # Gann Square of 9 step = 22.5° in sqrt-space
@@ -217,57 +217,65 @@ def fetch_quotes(force=False):
 
     out = {}
     last_err = None
-    # Kotak SDK quotes() takes a list of {instrument_token, exchange_segment}
-    # Indices and equities have different isIndex flag, so call separately
-    by_index = {True: [], False: []}
-    for s in SCRIPS:
-        by_index[s["is_index"]].append(s)
+    tokens = [{"instrument_token": s["token"], "exchange_segment": s["exchange"]} for s in SCRIPS]
 
-    for is_index, group in by_index.items():
-        if not group:
-            continue
-        tokens = [{"instrument_token": s["token"], "exchange_segment": s["exchange"]} for s in group]
+    def _call(qt):
         try:
-            resp = client.quotes(instrument_tokens=tokens, quote_type="ohlc", isIndex=is_index)
+            r = client.quotes(instrument_tokens=tokens, quote_type=qt)
         except Exception as e:
-            last_err = f"quotes({'idx' if is_index else 'eq'}): {type(e).__name__}: {e}"
-            continue
-        # Response shape varies; usually resp = {"message": [ {tk, ltp, ohlc...}, ...]}
-        # or {"data": [...]}.
-        items = []
-        if isinstance(resp, dict):
-            items = resp.get("message") or resp.get("data") or resp.get("d") or []
-            if isinstance(items, dict):
-                items = [items]
-        elif isinstance(resp, list):
-            items = resp
-        # match by token (string compare, case-insensitive for indices)
-        for s in group:
-            wanted = str(s["token"]).strip().lower()
-            match = None
-            for it in items:
-                if not isinstance(it, dict):
-                    continue
-                tk = str(it.get("instrument_token") or it.get("tk") or it.get("token") or "").strip().lower()
-                # Indices: token is name like "Nifty 50"; might be returned as "nifty 50" or in trKey
-                trkey = str(it.get("trKey") or it.get("tradingSymbol") or it.get("symbol") or "").strip().lower()
-                if tk == wanted or trkey == wanted:
-                    match = it
-                    break
-            ltp = op = low = high = None
-            if match is not None:
-                # OHLC may be nested under 'ohlc'
-                ohlc = match.get("ohlc") if isinstance(match.get("ohlc"), dict) else match
-                ltp, op, low, high = _extract_ohlc({**match, **ohlc} if ohlc is not match else match)
-            out[s["symbol"]] = {
-                "symbol": s["symbol"],
-                "token": s["token"],
-                "ltp": ltp,
-                "open": op,
-                "low": low,
-                "high": high,
-                "levels": gann_levels(op) if op else {"sell": {}, "buy": {}},
-            }
+            return None, f"{qt}: {type(e).__name__}: {e}"
+        if isinstance(r, dict) and "fault" in r:
+            return None, f"{qt}: {r['fault'].get('message','fault')}"
+        if isinstance(r, list):
+            return r, None
+        return [], f"{qt}: unexpected response shape"
+
+    ohlc_items, e1 = _call("ohlc")
+    ltp_items, e2  = _call("ltp")
+    last_err = e1 or e2
+
+    # Index responses by (exchange, exchange_token) — Kotak echoes these back
+    def index_by_key(items):
+        idx = {}
+        for it in (items or []):
+            if not isinstance(it, dict):
+                continue
+            key = (str(it.get("exchange","")).strip().lower(),
+                   str(it.get("exchange_token","")).strip().lower())
+            idx[key] = it
+        return idx
+
+    ohlc_idx = index_by_key(ohlc_items)
+    ltp_idx  = index_by_key(ltp_items)
+
+    for s in SCRIPS:
+        key = (s["exchange"].lower(), str(s["token"]).lower())
+        ohlc_it = ohlc_idx.get(key, {})
+        ltp_it  = ltp_idx.get(key, {})
+        ohlc    = ohlc_it.get("ohlc") if isinstance(ohlc_it.get("ohlc"), dict) else {}
+        ltp_v   = None
+        try:
+            ltp_v = float(ltp_it.get("ltp")) if ltp_it.get("ltp") not in (None, "", "0") else None
+        except (TypeError, ValueError):
+            pass
+        op   = float(ohlc.get("open"))  if ohlc.get("open")  not in (None, "", "0") else None
+        low  = float(ohlc.get("low"))   if ohlc.get("low")   not in (None, "", "0") else None
+        high = float(ohlc.get("high"))  if ohlc.get("high")  not in (None, "", "0") else None
+        # If LTP missing (market closed), fall back to ohlc.close
+        if ltp_v is None:
+            try:
+                ltp_v = float(ohlc.get("close")) if ohlc.get("close") not in (None, "", "0") else None
+            except (TypeError, ValueError):
+                pass
+        out[s["symbol"]] = {
+            "symbol": s["symbol"],
+            "token": s["token"],
+            "ltp": ltp_v,
+            "open": op,
+            "low": low,
+            "high": high,
+            "levels": gann_levels(op) if op else {"sell": {}, "buy": {}},
+        }
 
     _quote_cache["data"] = out
     _quote_cache["ts"] = now

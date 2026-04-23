@@ -6,3 +6,4 @@ __pycache__/
 login_history.log
 login_history.json
 
+.gstack/
