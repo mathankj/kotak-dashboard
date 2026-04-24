@@ -1697,8 +1697,12 @@ function fmtChg(c) {
 
 function render(d) {
   if (!d) return;
-  const chain = d.chains && d.chains[currentIdx];
   const body = document.getElementById('chainBody');
+  if (d.loading) {
+    body.innerHTML = '<tr><td colspan="5" class="loading">Warming option universe (first load ~60-90s on cold start)…</td></tr>';
+    return;
+  }
+  const chain = d.chains && d.chains[currentIdx];
   if (!chain) { body.innerHTML = '<tr><td colspan="5" class="loading">No data</td></tr>'; return; }
   document.getElementById('mSpot').textContent = fmt(chain.spot);
   document.getElementById('mAtm').textContent = chain.atm ?? '-';
