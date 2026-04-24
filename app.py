@@ -905,6 +905,146 @@ def auto_strategy_tick(quotes):
             write_paper_trades(trades)
 
 
+# ---------- Option auto-strategy (paper) ----------
+# Same Gann-level crossing concept as stock strategy, applied to index options:
+#   - Index spot crosses BUY level UP    -> paper BUY 1 lot ATM CE
+#   - Index spot crosses SELL level DOWN -> paper BUY 1 lot ATM PE
+# Exits:
+#   - CE: spot >= T1 (target) OR spot < SELL level (SL) OR 15:15 square-off
+#   - PE: spot <= S1 (target) OR spot > BUY level  (SL) OR 15:15 square-off
+# Entry price / exit price = option LTP at that moment (paper).
+AUTO_OPTION_STRATEGY_ENABLED = True
+
+_option_auto_state = {
+    "last_spot": {},  # index_name -> last seen spot
+    "lock": threading.Lock(),
+}
+
+
+def option_auto_strategy_tick(option_data, option_index_meta):
+    """Called after each /api/option-prices fetch.
+    option_data: {key: {index, strike, option_type, ltp, ...}}
+    option_index_meta: {index_name: {spot, atm, expiry, ...}}"""
+    if not AUTO_OPTION_STRATEGY_ENABLED or not option_index_meta:
+        return
+    now = now_ist()
+    gann_quotes, _ = fetch_quotes()
+
+    with _option_auto_state["lock"]:
+        trades = read_paper_trades()
+        modified = False
+
+        # 1. Square off option positions at/after 15:15
+        if _auto_at_or_after_squareoff(now):
+            for t in trades:
+                if t.get("status") != "OPEN" or t.get("asset_type") != "option":
+                    continue
+                q = option_data.get(t.get("option_key"))
+                if not q or q.get("ltp") is None:
+                    continue
+                _auto_close(t, float(q["ltp"]), now, "AUTO_SQUARE_OFF")
+                modified = True
+            if modified:
+                write_paper_trades(trades)
+            return
+
+        if not _auto_in_hours(now):
+            return
+
+        today = now.strftime("%Y-%m-%d")
+        counts = {}
+        for t in trades:
+            if t.get("date") == today and t.get("asset_type") == "option":
+                u = t.get("underlying", "")
+                counts[u] = counts.get(u, 0) + 1
+        open_by_underlying = {
+            t["underlying"]: t for t in trades
+            if t.get("status") == "OPEN" and t.get("asset_type") == "option"
+        }
+
+        for idx_name, m in option_index_meta.items():
+            spot = m.get("spot")
+            atm  = m.get("atm")
+            if spot is None or atm is None:
+                continue
+            gann_sym = INDEX_OPTIONS_CONFIG[idx_name]["spot_symbol_key"]
+            gq = gann_quotes.get(gann_sym) or {}
+            levels  = gq.get("levels") or {}
+            buy_lvl = (levels.get("buy")  or {}).get("BUY")
+            sell_lvl= (levels.get("sell") or {}).get("SELL")
+            t1_lvl  = (levels.get("buy")  or {}).get("T1")
+            s1_lvl  = (levels.get("sell") or {}).get("S1")
+            prev_spot = _option_auto_state["last_spot"].get(idx_name)
+
+            # Exit open position (based on spot level hits)
+            open_t = open_by_underlying.get(idx_name)
+            if open_t:
+                opt_q = option_data.get(open_t.get("option_key"))
+                opt_ltp = (opt_q or {}).get("ltp")
+                reason = None
+                if open_t.get("option_type") == "CE":
+                    if t1_lvl is not None and spot >= t1_lvl:     reason = "TARGET_T1"
+                    elif sell_lvl is not None and spot < sell_lvl: reason = "SL_SELL_LVL"
+                else:  # PE
+                    if s1_lvl is not None and spot <= s1_lvl:     reason = "TARGET_S1"
+                    elif buy_lvl is not None and spot > buy_lvl:  reason = "SL_BUY_LVL"
+                if reason and opt_ltp is not None:
+                    _auto_close(open_t, float(opt_ltp), now, reason)
+                    modified = True
+                    open_by_underlying.pop(idx_name, None)
+                    _option_auto_state["last_spot"][idx_name] = spot
+                    continue
+
+            # Entry check — spot crossing
+            if (idx_name not in open_by_underlying
+                    and counts.get(idx_name, 0) < AUTO_MAX_TRADES_PER_SCRIP
+                    and prev_spot is not None):
+                option_type = None
+                if buy_lvl is not None and prev_spot <= buy_lvl < spot:
+                    option_type = "CE"
+                elif sell_lvl is not None and prev_spot >= sell_lvl > spot:
+                    option_type = "PE"
+
+                if option_type:
+                    opt_key = f"{idx_name} {atm} {option_type}"
+                    opt_q = option_data.get(opt_key)
+                    opt_ltp = (opt_q or {}).get("ltp")
+                    if opt_ltp is not None:
+                        t = {
+                            "id": _next_paper_id(trades),
+                            "date": now.strftime("%Y-%m-%d"),
+                            "scrip": opt_key,
+                            "option_key": opt_key,
+                            "asset_type": "option",
+                            "underlying": idx_name,
+                            "strike": atm,
+                            "option_type": option_type,
+                            "expiry": m.get("expiry"),
+                            "order_type": "BUY",
+                            "entry_time": now.strftime("%H:%M:%S"),
+                            "entry_ts": now.timestamp(),
+                            "entry_price": round(float(opt_ltp), 2),
+                            "qty": 1,
+                            "trigger_spot": round(float(spot), 2),
+                            "trigger_level": "BUY" if option_type == "CE" else "SELL",
+                            "max_min_target_price": round(float(opt_ltp), 2),
+                            "target_level_reached": None,
+                            "exit_time": None, "exit_ts": None, "exit_price": None,
+                            "exit_reason": None, "pnl_points": None, "pnl_pct": None,
+                            "duration_seconds": None,
+                            "status": "OPEN",
+                            "auto": True,
+                        }
+                        trades.insert(0, t)
+                        modified = True
+                        counts[idx_name] = counts.get(idx_name, 0) + 1
+
+            _option_auto_state["last_spot"][idx_name] = spot
+
+        if modified:
+            write_paper_trades(trades)
+
+
 # ---------- HTML template (single-file, dark theme) ----------
 PAGE = """
 <!DOCTYPE html>
@@ -1672,6 +1812,30 @@ OPTIONS_PAGE = """
 
 <div class="hint" id="hint">Select an index above. Auto-refreshes every 3s.</div>
 
+<div style="margin-top:24px;">
+  <h3 style="margin:0 0 8px 0; font-size:15px;">Auto Option Trades (paper) — today</h3>
+  <div style="font-size:12px; color:#666; margin-bottom:8px;">
+    Strategy auto-buys ATM CE when index spot crosses Gann BUY level up, or ATM PE when spot crosses SELL level down. Exits at T1/S1 target or opposite-level SL. Squares off at 15:15.
+  </div>
+  <table style="width:100%; border-collapse:collapse; font-size:13px;">
+    <thead>
+      <tr style="background:#f5f5f5; text-align:left;">
+        <th style="padding:6px;">Time</th>
+        <th style="padding:6px;">Underlying</th>
+        <th style="padding:6px;">Contract</th>
+        <th style="padding:6px;">Trigger</th>
+        <th style="padding:6px; text-align:right;">Entry</th>
+        <th style="padding:6px; text-align:right;">Current / Exit</th>
+        <th style="padding:6px; text-align:right;">P&amp;L pts</th>
+        <th style="padding:6px;">Status</th>
+      </tr>
+    </thead>
+    <tbody id="tradesBody">
+      <tr><td colspan="8" style="padding:12px; text-align:center; color:#888;">Monitoring index spot crossings…</td></tr>
+    </tbody>
+  </table>
+</div>
+
 <script>
 let currentIdx = "{{ indices[0].key if indices else '' }}";
 let lastData = null;
@@ -1729,6 +1893,37 @@ function render(d) {
       <td class="strike">${r.strike}</td>
       <td class="ltp-pe">${fmt(pe.ltp)}</td>
       <td class="${peChg.cls}">${peChg.text}</td>
+    </tr>`;
+  }).join('');
+  renderTrades(d.option_trades || []);
+}
+
+function renderTrades(trades) {
+  const tb = document.getElementById('tradesBody');
+  if (!tb) return;
+  if (!trades.length) {
+    tb.innerHTML = '<tr><td colspan="8" style="padding:12px; text-align:center; color:#888;">Monitoring index spot crossings…</td></tr>';
+    return;
+  }
+  tb.innerHTML = trades.map(t => {
+    const isOpen = t.status === 'OPEN';
+    const cur = isOpen ? (t.live_ltp ?? '-') : (t.exit_price ?? '-');
+    const pnl = isOpen ? (t.live_pnl_points ?? 0) : (t.pnl_points ?? 0);
+    const pnlCls = pnl > 0 ? 'chg-pos' : (pnl < 0 ? 'chg-neg' : '');
+    const reason = isOpen ? '—' : (t.exit_reason || '');
+    const contract = `${t.strike} ${t.option_type}`;
+    const statusHtml = isOpen
+      ? '<span style="color:#1976d2; font-weight:600;">OPEN</span>'
+      : `<span style="color:#666;">CLOSED</span> <span style="font-size:11px; color:#888;">(${reason})</span>`;
+    return `<tr>
+      <td style="padding:6px;">${t.entry_time}${!isOpen && t.exit_time ? ' → ' + t.exit_time : ''}</td>
+      <td style="padding:6px;">${t.underlying}</td>
+      <td style="padding:6px;">${contract}</td>
+      <td style="padding:6px; font-size:11px; color:#666;">${t.trigger_level || ''} @ ${fmt(t.trigger_spot)}</td>
+      <td style="padding:6px; text-align:right;">${fmt(t.entry_price)}</td>
+      <td style="padding:6px; text-align:right;">${fmt(cur)}</td>
+      <td style="padding:6px; text-align:right;" class="${pnlCls}">${fmt(pnl)}</td>
+      <td style="padding:6px;">${statusHtml}</td>
     </tr>`;
   }).join('');
 }
@@ -2100,6 +2295,11 @@ def option_prices_api():
             "ts": now_ist().strftime("%H:%M:%S IST"),
         })
     data, meta, err = fetch_option_quotes()
+    # Run paper auto-strategy on each tick
+    try:
+        option_auto_strategy_tick(data, meta)
+    except Exception as e:
+        print(f"[option_auto] tick failed: {type(e).__name__}: {e}")
     # Group by index: chains[index] = {spot, atm, expiry, rows:[{strike, ce:{...}, pe:{...}, is_atm}]}
     chains = {}
     for idx_name, m in meta.items():
@@ -2130,9 +2330,26 @@ def option_prices_api():
                 "ce": legs.get("CE"),
                 "pe": legs.get("PE"),
             })
+    # Attach live option trades (open + today's closed) so Options UI can show them
+    today = now_ist().strftime("%Y-%m-%d")
+    all_trades = read_paper_trades()
+    option_trades = [
+        t for t in all_trades
+        if t.get("asset_type") == "option"
+        and (t.get("status") == "OPEN" or t.get("date") == today)
+    ]
+    # Live MFE for open positions
+    for t in option_trades:
+        if t.get("status") == "OPEN":
+            q = data.get(t.get("option_key"))
+            if q and q.get("ltp") is not None:
+                t["live_ltp"] = q["ltp"]
+                t["live_pnl_points"] = round(float(q["ltp"]) - float(t["entry_price"]), 2)
+
     return jsonify({
         "chains": chains,
         "error": err,
+        "option_trades": option_trades,
         "ts": now_ist().strftime("%H:%M:%S IST"),
     })
 
