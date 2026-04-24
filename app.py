@@ -2095,6 +2095,8 @@ def option_prices_api():
             "chains": {},
             "error": None,
             "loading": True,
+            "preload_status": _option_universe.get("preload_status") or {},
+            "loaded_indices": list(_option_universe.get("by_index", {}).keys()),
             "ts": now_ist().strftime("%H:%M:%S IST"),
         })
     data, meta, err = fetch_option_quotes()
@@ -2496,13 +2498,17 @@ def refresh():
 def _preload_option_universe():
     """Warm up the F&O universe cache in background so first /options visit
     is fast instead of waiting 90s for 3 sequential search_scrip calls."""
+    _option_universe["preload_status"] = {}
     for idx_name in INDEX_OPTIONS_CONFIG:
         try:
             items, err = _fetch_index_fo_universe(idx_name)
-            print(f"[options] preloaded {idx_name}: {len(items)} contracts"
-                  + (f" (err: {err})" if err else ""))
+            msg = f"{len(items)} contracts" + (f" (err: {err})" if err else "")
+            _option_universe["preload_status"][idx_name] = msg
+            print(f"[options] preloaded {idx_name}: {msg}")
         except Exception as e:
-            print(f"[options] preload {idx_name} failed: {e}")
+            msg = f"EXCEPTION: {type(e).__name__}: {e}"
+            _option_universe["preload_status"][idx_name] = msg
+            print(f"[options] preload {idx_name} failed: {msg}")
 
 
 if __name__ == "__main__":
