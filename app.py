@@ -2501,19 +2501,6 @@ def _preload_option_universe():
             print(f"[options] preload {idx_name} failed: {e}")
 
 
-# Warm options cache in background so first /options visit is fast.
-# Started at module import time so it runs under both `python app.py` AND
-# gunicorn (Render). Guarded so it only fires once per process.
-if not _option_universe.get("loading"):
-    _option_universe["loading"] = True
-    def _boot_warm():
-        try:
-            _preload_option_universe()
-        finally:
-            _option_universe["loading"] = False
-    threading.Thread(target=_boot_warm, daemon=True).start()
-
-
 if __name__ == "__main__":
     print("=" * 60)
     print("Kotak Neo Dashboard starting...")
