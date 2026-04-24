@@ -2067,7 +2067,32 @@ def options_view():
 
 @app.route("/api/option-prices")
 def option_prices_api():
-    """Returns option chains for all configured indices."""
+    """Returns option chains for all configured indices.
+    Non-blocking: if the per-day F&O universe cache isn't warm yet, return a
+    quick 'loading' payload so the worker isn't held for 60-90s (which would
+    trip Render's ~30s proxy timeout and return 502)."""
+    today = now_ist().strftime("%Y-%m-%d")
+    universe_ready = (
+        _option_universe["date"] == today
+        and all(i in _option_universe["by_index"] for i in INDEX_OPTIONS_CONFIG)
+    )
+    if not universe_ready:
+        # Kick the preload in background (idempotent — daily cache guards it)
+        # and return immediately so the frontend keeps polling.
+        if not _option_universe.get("loading"):
+            _option_universe["loading"] = True
+            def _warm():
+                try:
+                    _preload_option_universe()
+                finally:
+                    _option_universe["loading"] = False
+            threading.Thread(target=_warm, daemon=True).start()
+        return jsonify({
+            "chains": {},
+            "error": None,
+            "loading": True,
+            "ts": now_ist().strftime("%H:%M:%S IST"),
+        })
     data, meta, err = fetch_option_quotes()
     # Group by index: chains[index] = {spot, atm, expiry, rows:[{strike, ce:{...}, pe:{...}, is_atm}]}
     chains = {}
@@ -2476,12 +2501,23 @@ def _preload_option_universe():
             print(f"[options] preload {idx_name} failed: {e}")
 
 
+# Warm options cache in background so first /options visit is fast.
+# Started at module import time so it runs under both `python app.py` AND
+# gunicorn (Render). Guarded so it only fires once per process.
+if not _option_universe.get("loading"):
+    _option_universe["loading"] = True
+    def _boot_warm():
+        try:
+            _preload_option_universe()
+        finally:
+            _option_universe["loading"] = False
+    threading.Thread(target=_boot_warm, daemon=True).start()
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("Kotak Neo Dashboard starting...")
     print("Open http://localhost:5000 in your browser")
     print("=" * 60)
-    # Warm options cache in background so first /options visit is fast
-    threading.Thread(target=_preload_option_universe, daemon=True).start()
     # threaded=True: don't block other requests while a slow search_scrip runs
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
