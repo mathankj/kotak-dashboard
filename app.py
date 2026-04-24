@@ -286,6 +286,263 @@ def fetch_quotes(force=False):
     return out, last_err
 
 
+# ---------- Options (F&O) ----------
+# Index option chains. Each index renders an ATM ± window chain (CE+Strike+PE)
+# and resolves the nearest future expiry dynamically via search_scrip.
+INDEX_OPTIONS_CONFIG = {
+    "NIFTY": {
+        "label": "NIFTY 50",
+        "spot_symbol_key": "NIFTY 50",       # key in SCRIPS / fetch_quotes out
+        "exchange_segment": "nse_fo",
+        "strike_step": 50,
+        "atm_window": 5,                     # ± strikes (11 total incl ATM)
+    },
+    "BANKNIFTY": {
+        "label": "BANK NIFTY",
+        "spot_symbol_key": "BANKNIFTY",
+        "exchange_segment": "nse_fo",
+        "strike_step": 100,
+        "atm_window": 5,
+    },
+    "SENSEX": {
+        "label": "SENSEX",
+        "spot_symbol_key": "SENSEX",
+        "exchange_segment": "bse_fo",
+        "strike_step": 100,
+        "atm_window": 5,
+    },
+}
+
+# Per-day cache of F&O universe per index (list of all option contract records)
+_option_universe = {"date": None, "by_index": {}, "error": None}
+# TTL cache of live quotes
+_option_quote_cache = {"ts": 0.0, "data": {}, "error": None, "meta": {}}
+
+
+def _fetch_index_fo_universe(index_name):
+    """Returns (items, err) of all OPTIDX records for an index, cached per day."""
+    cfg = INDEX_OPTIONS_CONFIG[index_name]
+    today = now_ist().strftime("%Y-%m-%d")
+    if (_option_universe["date"] == today
+            and index_name in _option_universe["by_index"]):
+        return _option_universe["by_index"][index_name], None
+    try:
+        client = ensure_client()
+    except Exception as e:
+        return [], f"login: {e}"
+    try:
+        r = client.search_scrip(
+            exchange_segment=cfg["exchange_segment"],
+            symbol=index_name,
+        )
+    except Exception as e:
+        return [], f"search_scrip {index_name}: {type(e).__name__}: {e}"
+    # NSE uses pInstType="OPTIDX", BSE uses "IO" — accept both
+    items = [
+        x for x in (r or []) if isinstance(x, dict)
+        and str(x.get("pSymbolName", "")).strip().upper() == index_name.upper()
+        and str(x.get("pInstType", "")).strip().upper() in ("OPTIDX", "IO")
+    ]
+    if _option_universe["date"] != today:
+        _option_universe["date"] = today
+        _option_universe["by_index"] = {}
+    _option_universe["by_index"][index_name] = items
+    return items, None
+
+
+def _parse_item_strike(item):
+    """dStrikePrice; field is scaled x100 and has a trailing semicolon in key."""
+    raw = item.get("dStrikePrice;", item.get("dStrikePrice"))
+    try:
+        return int(round(float(raw) / 100.0))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_item_expiry_date(item):
+    """Returns a date object parsed from pExpiryDate (e.g. '28Apr2026'), or None."""
+    s = str(item.get("pExpiryDate", "")).strip()
+    try:
+        return datetime.strptime(s, "%d%b%Y").date()
+    except (ValueError, TypeError):
+        return None
+
+
+def build_option_chain(index_name):
+    """Returns (rows, meta) for one index.
+    rows: [{strike, ce: item_or_None, pe: item_or_None, is_atm}]
+    meta: {atm, expiry, spot, error?}"""
+    cfg = INDEX_OPTIONS_CONFIG[index_name]
+    meta = {"atm": None, "expiry": None, "spot": None, "error": None}
+    # 1. Spot
+    spot_quotes, _ = fetch_quotes()
+    spot_row = spot_quotes.get(cfg["spot_symbol_key"])
+    if not spot_row or spot_row.get("ltp") is None:
+        meta["error"] = f"no spot for {cfg['spot_symbol_key']}"
+        return [], meta
+    spot = float(spot_row["ltp"])
+    meta["spot"] = spot
+    # 2. Universe
+    items, err = _fetch_index_fo_universe(index_name)
+    if err:
+        meta["error"] = err
+    if not items:
+        return [], meta
+    # 3. Nearest future expiry
+    today = now_ist().date()
+    parsed = []
+    for it in items:
+        d = _parse_item_expiry_date(it)
+        if d and d >= today:
+            parsed.append((d, str(it.get("pExpiryDate", "")).strip()))
+    if not parsed:
+        meta["error"] = "no future expiry"
+        return [], meta
+    nearest_date, nearest_str = min(parsed, key=lambda p: p[0])
+    meta["expiry"] = nearest_str
+    # 4. ATM strike + window
+    step = cfg["strike_step"]
+    atm = int(round(spot / step) * step)
+    meta["atm"] = atm
+    wanted = [atm + i * step for i in range(-cfg["atm_window"], cfg["atm_window"] + 1)]
+    # 5. Lookup
+    look = {}
+    for it in items:
+        if str(it.get("pExpiryDate", "")).strip() != nearest_str:
+            continue
+        s = _parse_item_strike(it)
+        if s is None or s not in wanted:
+            continue
+        t = str(it.get("pOptionType", "")).strip().upper()
+        if t in ("CE", "PE"):
+            look[(s, t)] = it
+    rows = []
+    for s in wanted:
+        rows.append({
+            "strike": s,
+            "ce": look.get((s, "CE")),
+            "pe": look.get((s, "PE")),
+            "is_atm": s == atm,
+        })
+    return rows, meta
+
+
+def build_all_option_tokens():
+    """Flat list of {key, token, exchange, ...} for all configured index chains.
+    Also returns per-index meta {atm, expiry, spot, error}."""
+    all_resolved = []
+    meta = {}
+    for idx_name, cfg in INDEX_OPTIONS_CONFIG.items():
+        rows, m = build_option_chain(idx_name)
+        meta[idx_name] = m
+        for row in rows:
+            for t, item in (("CE", row.get("ce")), ("PE", row.get("pe"))):
+                if not item:
+                    continue
+                token = item.get("pSymbol") or item.get("instrument_token")
+                if not token:
+                    continue
+                all_resolved.append({
+                    "key": f"{idx_name} {row['strike']} {t}",
+                    "index": idx_name,
+                    "strike": row["strike"],
+                    "option_type": t,
+                    "token": str(token),
+                    "exchange": cfg["exchange_segment"],
+                    "trading_symbol": item.get("pTrdSymbol", ""),
+                    "expiry": m.get("expiry", ""),
+                    "is_atm": row.get("is_atm", False),
+                    "lot_size": item.get("lLotSize"),
+                })
+    return all_resolved, meta
+
+
+def fetch_option_quotes(force=False):
+    """Live quotes for all configured index option chains. TTL-cached."""
+    now = time.time()
+    if (not force
+            and (now - _option_quote_cache["ts"]) < QUOTE_TTL
+            and _option_quote_cache["data"]):
+        return (_option_quote_cache["data"],
+                _option_quote_cache["meta"],
+                _option_quote_cache["error"])
+    insts, idx_meta = build_all_option_tokens()
+    if not insts:
+        err = next((m.get("error") for m in idx_meta.values() if m.get("error")), None)
+        return {}, idx_meta, err or "no option instruments resolved"
+    try:
+        client = ensure_client()
+    except Exception as e:
+        return {}, idx_meta, f"login: {e}"
+    tokens = [{"instrument_token": i["token"], "exchange_segment": i["exchange"]}
+              for i in insts]
+
+    def _call(qt):
+        try:
+            r = client.quotes(instrument_tokens=tokens, quote_type=qt)
+        except Exception as e:
+            return None, f"{qt}: {type(e).__name__}: {e}"
+        if isinstance(r, dict) and "fault" in r:
+            return None, f"{qt}: {r['fault'].get('message', 'fault')}"
+        if isinstance(r, list):
+            return r, None
+        return [], f"{qt}: unexpected response shape"
+
+    ohlc_items, e1 = _call("ohlc")
+    ltp_items,  e2 = _call("ltp")
+    last_err = e1 or e2
+
+    def index_by_key(items):
+        idx = {}
+        for it in (items or []):
+            if not isinstance(it, dict):
+                continue
+            k = (str(it.get("exchange", "")).strip().lower(),
+                 str(it.get("exchange_token", "")).strip().lower())
+            idx[k] = it
+        return idx
+
+    ohlc_idx = index_by_key(ohlc_items)
+    ltp_idx  = index_by_key(ltp_items)
+    out = {}
+    for i in insts:
+        k = (i["exchange"].lower(), str(i["token"]).lower())
+        ohlc_it = ohlc_idx.get(k, {})
+        ltp_it  = ltp_idx.get(k, {})
+        ohlc    = ohlc_it.get("ohlc") if isinstance(ohlc_it.get("ohlc"), dict) else {}
+        ltp_v = None
+        try:
+            ltp_v = float(ltp_it.get("ltp")) if ltp_it.get("ltp") not in (None, "", "0") else None
+        except (TypeError, ValueError):
+            pass
+        close = float(ohlc.get("close")) if ohlc.get("close") not in (None, "", "0") else None
+        if ltp_v is None and close is not None:
+            ltp_v = close
+        change_pct = None
+        if ltp_v is not None and close not in (None, 0):
+            try:
+                change_pct = round(((ltp_v - close) / close) * 100, 2)
+            except ZeroDivisionError:
+                pass
+        out[i["key"]] = {
+            "key": i["key"],
+            "index": i["index"],
+            "strike": i["strike"],
+            "option_type": i["option_type"],
+            "trading_symbol": i["trading_symbol"],
+            "expiry": i["expiry"],
+            "is_atm": i["is_atm"],
+            "ltp": ltp_v,
+            "close": close,
+            "change_pct": change_pct,
+        }
+    _option_quote_cache["data"] = out
+    _option_quote_cache["ts"] = now
+    _option_quote_cache["meta"] = idx_meta
+    _option_quote_cache["error"] = last_err
+    return out, idx_meta, last_err
+
+
 # ---------- Order placement + audit log ----------
 ORDERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "orders_log.json")
 
@@ -778,6 +1035,7 @@ PAGE = """
 
 TABS = [
     {"key": "gann", "url": "/gann", "label": "Gann Trader"},
+    {"key": "options", "url": "/options", "label": "Options"},
     {"key": "holdings", "url": "/", "label": "Holdings"},
     {"key": "positions", "url": "/positions", "label": "Positions"},
     {"key": "orders", "url": "/orders", "label": "Orders"},
@@ -1294,6 +1552,213 @@ setInterval(refresh, 2500); refresh();
 """
 
 
+OPTIONS_PAGE = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Options - Kotak Neo</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif;
+         background: #f5f6f8; color: #1f2937; margin: 0; padding: 16px; }
+  header { display: flex; justify-content: space-between; align-items: center;
+           background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+           padding: 12px 16px; margin-bottom: 12px; }
+  .title { font-weight: 700; font-size: 18px; }
+  .live { color: #16a34a; font-size: 12px; margin-left: 8px; }
+  .stale { color: #dc2626; font-size: 12px; margin-left: 8px; }
+  .clock { font-family: monospace; background: #f3f4f6; padding: 6px 10px;
+           border-radius: 6px; font-size: 14px; }
+  .ucc { background: #f3f4f6; padding: 6px 10px; border-radius: 6px;
+         font-size: 13px; color: #374151; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tabs a { padding: 6px 12px; background: #fff; color: #6b7280;
+            text-decoration: none; border-radius: 6px; font-size: 13px;
+            border: 1px solid #e5e7eb; }
+  .tabs a.active { background: #2563eb; color: white; border-color: #2563eb; }
+  .idx-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+  .idx-tabs button { padding: 8px 16px; background: #fff; color: #374151;
+                     border: 1px solid #e5e7eb; border-radius: 6px;
+                     cursor: pointer; font-size: 13px; font-weight: 600; }
+  .idx-tabs button.active { background: #1f2937; color: #fff;
+                            border-color: #1f2937; }
+  .meta-bar { display: flex; gap: 18px; padding: 12px 16px; background: #fff;
+              border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 8px;
+              font-size: 13px; flex-wrap: wrap; align-items: center; }
+  .meta-bar .m { display: flex; gap: 6px; align-items: baseline; }
+  .meta-bar .k { color: #6b7280; font-size: 11px; text-transform: uppercase; }
+  .meta-bar .v { font-weight: 700; font-family: monospace; font-size: 14px; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+          overflow-x: auto; }
+  table.chain { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.chain th { text-align: center; padding: 10px 8px; background: #f9fafb;
+       color: #6b7280; font-weight: 600; font-size: 11px;
+       text-transform: uppercase; border-bottom: 1px solid #e5e7eb; }
+  table.chain th.ce-grp { background: #065f46; color: #fff; }
+  table.chain th.pe-grp { background: #991b1b; color: #fff; }
+  table.chain th.strike-col { background: #1f2937; color: #fff; }
+  table.chain td { padding: 10px 8px; border-bottom: 1px solid #f3f4f6;
+       color: #1f2937; text-align: center;
+       font-variant-numeric: tabular-nums; }
+  table.chain td.strike { font-weight: 700; background: #f3f4f6;
+                          font-family: monospace; font-size: 14px; }
+  table.chain td.ltp-ce, table.chain td.ltp-pe {
+       font-weight: 700; font-size: 14px; }
+  table.chain td.ltp-ce { background: #d1fae5; color: #065f46; }
+  table.chain td.ltp-pe { background: #fee2e2; color: #991b1b; }
+  table.chain tr.atm td { background: #fffbeb !important; }
+  table.chain tr.atm td.strike { background: #f59e0b !important; color: #fff; }
+  table.chain td.chg-pos { color: #16a34a; font-weight: 600; }
+  table.chain td.chg-neg { color: #dc2626; font-weight: 600; }
+  .err { background: #fee2e2; color: #991b1b; padding: 8px 12px;
+         border-radius: 6px; font-size: 12px; margin-bottom: 10px;
+         display: none; }
+  .err.show { display: block; }
+  .hint { color: #6b7280; font-size: 11px; padding: 10px 16px; }
+  .loading { padding: 60px; text-align: center; color: #6b7280; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <span class="title">Options Chain</span>
+    <span id="live" class="live">● live</span>
+  </div>
+  <div style="display:flex;gap:10px;align-items:center;">
+    <span class="clock" id="clock">00:00:00 IST</span>
+    {% if ucc %}<span class="ucc">UCC: {{ ucc }}</span>{% endif %}
+  </div>
+</header>
+
+<div class="tabs">
+  {% for t in tabs %}
+    <a href="{{ t.url }}" class="{{ 'active' if t.key == active else '' }}">{{ t.label }}</a>
+  {% endfor %}
+</div>
+
+<div class="idx-tabs" id="idxTabs">
+  {% for i in indices %}
+    <button data-idx="{{ i.key }}" class="{{ 'active' if loop.first else '' }}">{{ i.label }}</button>
+  {% endfor %}
+</div>
+
+<div class="err" id="err"></div>
+
+<div class="meta-bar" id="metaBar">
+  <div class="m"><span class="k">Spot</span><span class="v" id="mSpot">-</span></div>
+  <div class="m"><span class="k">ATM</span><span class="v" id="mAtm">-</span></div>
+  <div class="m"><span class="k">Expiry</span><span class="v" id="mExpiry">-</span></div>
+</div>
+
+<div class="card">
+  <table class="chain" id="chainTable">
+    <thead>
+      <tr>
+        <th class="ce-grp" colspan="2">CALL (CE)</th>
+        <th class="strike-col" rowspan="2">Strike</th>
+        <th class="pe-grp" colspan="2">PUT (PE)</th>
+      </tr>
+      <tr>
+        <th>LTP</th><th>Chg %</th>
+        <th>LTP</th><th>Chg %</th>
+      </tr>
+    </thead>
+    <tbody id="chainBody">
+      <tr><td colspan="5" class="loading">Loading option chain…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="hint" id="hint">Select an index above. Auto-refreshes every 3s.</div>
+
+<script>
+let currentIdx = "{{ indices[0].key if indices else '' }}";
+let lastData = null;
+
+document.getElementById('idxTabs').addEventListener('click', (e) => {
+  if (e.target.tagName !== 'BUTTON') return;
+  const idx = e.target.dataset.idx;
+  document.querySelectorAll('#idxTabs button').forEach(b =>
+    b.classList.toggle('active', b.dataset.idx === idx));
+  currentIdx = idx;
+  render(lastData);
+});
+
+function fmt(n, dp) {
+  if (n === null || n === undefined || isNaN(n)) return '-';
+  return Number(n).toFixed(dp === undefined ? 2 : dp);
+}
+function fmtChg(c) {
+  if (c === null || c === undefined) return {text: '-', cls: ''};
+  const sign = c >= 0 ? '+' : '';
+  return {text: sign + c.toFixed(2) + '%', cls: c >= 0 ? 'chg-pos' : 'chg-neg'};
+}
+
+function render(d) {
+  if (!d) return;
+  const chain = d.chains && d.chains[currentIdx];
+  const body = document.getElementById('chainBody');
+  if (!chain) { body.innerHTML = '<tr><td colspan="5" class="loading">No data</td></tr>'; return; }
+  document.getElementById('mSpot').textContent = fmt(chain.spot);
+  document.getElementById('mAtm').textContent = chain.atm ?? '-';
+  document.getElementById('mExpiry').textContent = chain.expiry || '-';
+  if (chain.error) {
+    document.getElementById('err').textContent = currentIdx + ': ' + chain.error;
+    document.getElementById('err').classList.add('show');
+  } else {
+    document.getElementById('err').classList.remove('show');
+  }
+  const rows = chain.rows || [];
+  if (rows.length === 0) {
+    body.innerHTML = '<tr><td colspan="5" class="loading">Resolving option chain (first load may take 5-10s)…</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(r => {
+    const ce = r.ce || {};
+    const pe = r.pe || {};
+    const ceChg = fmtChg(ce.change_pct);
+    const peChg = fmtChg(pe.change_pct);
+    return `<tr class="${r.is_atm ? 'atm' : ''}">
+      <td class="ltp-ce">${fmt(ce.ltp)}</td>
+      <td class="${ceChg.cls}">${ceChg.text}</td>
+      <td class="strike">${r.strike}</td>
+      <td class="ltp-pe">${fmt(pe.ltp)}</td>
+      <td class="${peChg.cls}">${peChg.text}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function refresh() {
+  const live = document.getElementById('live');
+  try {
+    const r = await fetch('/api/option-prices');
+    const d = await r.json();
+    lastData = d;
+    if (d.error) {
+      live.textContent = '● stale'; live.className = 'stale';
+    } else {
+      live.textContent = '● live'; live.className = 'live';
+    }
+    render(d);
+  } catch(e) {
+    live.textContent = '● stale'; live.className = 'stale';
+  }
+}
+function tickClock() {
+  const now = new Date();
+  const ist = new Date(now.getTime() + (now.getTimezoneOffset() + 330) * 60000);
+  document.getElementById('clock').textContent =
+    ist.toTimeString().slice(0, 8) + ' IST';
+}
+setInterval(tickClock, 1000); tickClock();
+setInterval(refresh, 3000); refresh();
+</script>
+</body>
+</html>
+"""
+
+
 ORDERLOG_PAGE = """
 <!DOCTYPE html>
 <html>
@@ -1586,6 +2051,59 @@ def gann_prices_api():
     return jsonify({"scrips": ordered, "error": err,
                     "ts": now_ist().strftime("%H:%M:%S IST"),
                     "stats": stats})
+
+
+# ---------- Options routes ----------
+@app.route("/options")
+def options_view():
+    return render_template_string(
+        OPTIONS_PAGE,
+        tabs=TABS,
+        active="options",
+        indices=[{"key": k, "label": v["label"]} for k, v in INDEX_OPTIONS_CONFIG.items()],
+        ucc=os.getenv("KOTAK_UCC", ""),
+    )
+
+
+@app.route("/api/option-prices")
+def option_prices_api():
+    """Returns option chains for all configured indices."""
+    data, meta, err = fetch_option_quotes()
+    # Group by index: chains[index] = {spot, atm, expiry, rows:[{strike, ce:{...}, pe:{...}, is_atm}]}
+    chains = {}
+    for idx_name, m in meta.items():
+        chains[idx_name] = {
+            "label": INDEX_OPTIONS_CONFIG[idx_name]["label"],
+            "spot": m.get("spot"),
+            "atm": m.get("atm"),
+            "expiry": m.get("expiry"),
+            "error": m.get("error"),
+            "rows": [],
+        }
+    # Group quote rows into per-index per-strike
+    by_idx_strike = {}
+    for q in data.values():
+        idx = q["index"]; s = q["strike"]
+        by_idx_strike.setdefault(idx, {}).setdefault(s, {})[q["option_type"]] = q
+    for idx_name, per_strike in by_idx_strike.items():
+        cfg = INDEX_OPTIONS_CONFIG[idx_name]
+        atm = chains[idx_name]["atm"]
+        step = cfg["strike_step"]
+        win = cfg["atm_window"]
+        strikes = [atm + i * step for i in range(-win, win + 1)] if atm else sorted(per_strike.keys())
+        for s in strikes:
+            legs = per_strike.get(s, {})
+            chains[idx_name]["rows"].append({
+                "strike": s,
+                "is_atm": atm is not None and s == atm,
+                "ce": legs.get("CE"),
+                "pe": legs.get("PE"),
+            })
+    return jsonify({
+        "chains": chains,
+        "error": err,
+        "ts": now_ist().strftime("%H:%M:%S IST"),
+    })
 
 
 # ---------- Paper trading routes ----------
@@ -1946,9 +2464,24 @@ def refresh():
     return redirect(url_for("holdings_view"))
 
 
+def _preload_option_universe():
+    """Warm up the F&O universe cache in background so first /options visit
+    is fast instead of waiting 90s for 3 sequential search_scrip calls."""
+    for idx_name in INDEX_OPTIONS_CONFIG:
+        try:
+            items, err = _fetch_index_fo_universe(idx_name)
+            print(f"[options] preloaded {idx_name}: {len(items)} contracts"
+                  + (f" (err: {err})" if err else ""))
+        except Exception as e:
+            print(f"[options] preload {idx_name} failed: {e}")
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("Kotak Neo Dashboard starting...")
     print("Open http://localhost:5000 in your browser")
     print("=" * 60)
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    # Warm options cache in background so first /options visit is fast
+    threading.Thread(target=_preload_option_universe, daemon=True).start()
+    # threaded=True: don't block other requests while a slow search_scrip runs
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
