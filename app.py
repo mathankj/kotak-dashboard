@@ -10,10 +10,11 @@ import os
 import json
 import math
 import time
+import threading
 import traceback
 import pyotp
 from datetime import datetime, timezone, timedelta
-from flask import Flask, render_template_string, jsonify, redirect, url_for
+from flask import Flask, render_template_string, jsonify, redirect, url_for, request, Response
 from dotenv import load_dotenv
 from neo_api_client import NeoAPI
 
@@ -131,15 +132,17 @@ def safe_call(fn, *args, **kwargs):
 
 # ---------- Gann Trader: scrips, levels, quote cache ----------
 SCRIPS = [
-    {"symbol": "NIFTY 50",  "token": "Nifty 50",   "exchange": "nse_cm"},
-    {"symbol": "BANKNIFTY", "token": "Nifty Bank", "exchange": "nse_cm"},
-    {"symbol": "SENSEX",    "token": "SENSEX",     "exchange": "bse_cm"},
-    {"symbol": "RELIANCE",  "token": "2885",       "exchange": "nse_cm"},
-    {"symbol": "TCS",       "token": "11536",      "exchange": "nse_cm"},
-    {"symbol": "INFOSYS",   "token": "1594",       "exchange": "nse_cm"},
-    {"symbol": "HDFCBANK",  "token": "1333",       "exchange": "nse_cm"},
-    {"symbol": "ICICIBANK", "token": "4963",       "exchange": "nse_cm"},
-    {"symbol": "SBIN",      "token": "3045",       "exchange": "nse_cm"},
+    # Indices: not tradeable as cash; buy/sell buttons hidden
+    {"symbol": "NIFTY 50",  "token": "Nifty 50",   "exchange": "nse_cm", "trading_symbol": None,           "tradeable": False, "lot": 1},
+    {"symbol": "BANKNIFTY", "token": "Nifty Bank", "exchange": "nse_cm", "trading_symbol": None,           "tradeable": False, "lot": 1},
+    {"symbol": "SENSEX",    "token": "SENSEX",     "exchange": "bse_cm", "trading_symbol": None,           "tradeable": False, "lot": 1},
+    # Equities: tradeable. trading_symbol is what Kotak place_order needs.
+    {"symbol": "RELIANCE",  "token": "2885",       "exchange": "nse_cm", "trading_symbol": "RELIANCE-EQ",  "tradeable": True,  "lot": 1},
+    {"symbol": "TCS",       "token": "11536",      "exchange": "nse_cm", "trading_symbol": "TCS-EQ",       "tradeable": True,  "lot": 1},
+    {"symbol": "INFOSYS",   "token": "1594",       "exchange": "nse_cm", "trading_symbol": "INFY-EQ",      "tradeable": True,  "lot": 1},
+    {"symbol": "HDFCBANK",  "token": "1333",       "exchange": "nse_cm", "trading_symbol": "HDFCBANK-EQ",  "tradeable": True,  "lot": 1},
+    {"symbol": "ICICIBANK", "token": "4963",       "exchange": "nse_cm", "trading_symbol": "ICICIBANK-EQ", "tradeable": True,  "lot": 1},
+    {"symbol": "SBIN",      "token": "3045",       "exchange": "nse_cm", "trading_symbol": "SBIN-EQ",      "tradeable": True,  "lot": 1},
 ]
 
 # Gann Square of 9 step = 22.5° in sqrt-space
@@ -283,6 +286,368 @@ def fetch_quotes(force=False):
     return out, last_err
 
 
+# ---------- Order placement + audit log ----------
+ORDERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "orders_log.json")
+
+
+def append_order(entry):
+    """Append an order attempt to orders_log.json. Newest first, keep last 200."""
+    try:
+        existing = []
+        if os.path.exists(ORDERS_FILE):
+            with open(ORDERS_FILE, "r") as f:
+                existing = json.load(f)
+        existing.insert(0, entry)
+        existing = existing[:200]
+        with open(ORDERS_FILE, "w") as f:
+            json.dump(existing, f, indent=2)
+    except Exception:
+        pass
+
+
+def read_orders():
+    try:
+        if os.path.exists(ORDERS_FILE):
+            with open(ORDERS_FILE, "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return []
+
+
+def find_scrip(symbol):
+    for s in SCRIPS:
+        if s["symbol"] == symbol:
+            return s
+    return None
+
+
+# ---------- Paper trading storage ----------
+PAPER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paper_trades.json")
+
+
+def read_paper_trades():
+    try:
+        if os.path.exists(PAPER_FILE):
+            with open(PAPER_FILE, "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return []
+
+
+def write_paper_trades(trades):
+    try:
+        with open(PAPER_FILE, "w") as f:
+            json.dump(trades, f, indent=2)
+    except Exception:
+        pass
+
+
+def _next_paper_id(trades):
+    mx = 0
+    for t in trades:
+        try:
+            n = int(t.get("id", "0"))
+            if n > mx:
+                mx = n
+        except (TypeError, ValueError):
+            pass
+    return str(mx + 1)
+
+
+def nearest_gann_level(symbol_data):
+    """Return (level_name, distance_pct) of the gann level nearest to current LTP.
+    Used for LTP box coloring. symbol_data = {ltp, levels: {sell: {...}, buy: {...}}}."""
+    ltp = symbol_data.get("ltp")
+    if not ltp:
+        return None, None
+    levels = symbol_data.get("levels") or {}
+    all_levels = {}
+    for k, v in (levels.get("sell") or {}).items():
+        if v is not None:
+            all_levels[k] = v
+    for k, v in (levels.get("buy") or {}).items():
+        if v is not None:
+            all_levels[k] = v
+    if not all_levels:
+        return None, None
+    best, best_dist = None, None
+    for name, px in all_levels.items():
+        d = abs(ltp - px) / ltp
+        if best_dist is None or d < best_dist:
+            best_dist = d
+            best = name
+    return best, best_dist
+
+
+# Ordering used when figuring out "how far in favour did the trade go"
+BUY_LEVEL_ORDER  = ["BUY", "BUY_WA", "T1", "T2", "T3"]
+SELL_LEVEL_ORDER = ["SELL", "SELL_WA", "S1", "S2", "S3"]
+
+
+def compute_target_level_reached(side, entry_price, max_min_price, levels):
+    """Given the best price reached since entry, determine the deepest
+    gann level touched in favour of the position.
+    side: 'B' or 'S'; levels: {sell:{}, buy:{}}."""
+    buy = (levels or {}).get("buy") or {}
+    sell = (levels or {}).get("sell") or {}
+    if side == "B":
+        # For BUY: price goes UP. Find highest level whose price <= max_min_price.
+        reached = None
+        for name in BUY_LEVEL_ORDER:
+            px = buy.get(name)
+            if px is not None and max_min_price >= px:
+                reached = name
+        # Beyond T3
+        t3 = buy.get("T3")
+        if t3 is not None and max_min_price > t3:
+            reached = "Beyond T3"
+        return reached
+    else:  # SELL: price goes DOWN
+        reached = None
+        for name in SELL_LEVEL_ORDER:
+            px = sell.get(name)
+            if px is not None and max_min_price <= px:
+                reached = name
+        s3 = sell.get("S3")
+        if s3 is not None and max_min_price < s3:
+            reached = "Beyond S3"
+        return reached
+
+
+def update_open_trades_mfe(quotes_by_symbol):
+    """Called each time quotes refresh. For every OPEN trade, update
+    max_min_target_price and target_level_reached based on the current LTP."""
+    trades = read_paper_trades()
+    changed = False
+    for t in trades:
+        if t.get("status") != "OPEN":
+            continue
+        q = quotes_by_symbol.get(t["scrip"])
+        if not q:
+            continue
+        ltp = q.get("ltp")
+        if ltp is None:
+            continue
+        prev_mfe = t.get("max_min_target_price")
+        if t["order_type"] == "BUY":
+            new_mfe = ltp if prev_mfe is None else max(prev_mfe, ltp)
+        else:
+            new_mfe = ltp if prev_mfe is None else min(prev_mfe, ltp)
+        if new_mfe != prev_mfe:
+            t["max_min_target_price"] = round(new_mfe, 2)
+            changed = True
+        side = "B" if t["order_type"] == "BUY" else "S"
+        reached = compute_target_level_reached(
+            side, t["entry_price"], new_mfe, q.get("levels"))
+        if reached and reached != t.get("target_level_reached"):
+            t["target_level_reached"] = reached
+            changed = True
+    if changed:
+        write_paper_trades(trades)
+
+
+def compute_stats(trades):
+    active = sum(1 for t in trades if t.get("status") == "OPEN")
+    closed = sum(1 for t in trades if t.get("status") == "CLOSED")
+    total_pnl = 0.0
+    for t in trades:
+        if t.get("status") == "CLOSED" and t.get("pnl_points") is not None:
+            try:
+                total_pnl += float(t["pnl_points"]) * int(t.get("qty", 1))
+            except (TypeError, ValueError):
+                pass
+    return {"active": active, "closed": closed, "pnl": round(total_pnl, 2)}
+
+
+def fmt_duration(seconds):
+    if seconds is None or seconds < 0:
+        return ""
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+# ---------- Auto-strategy engine (paper trading only) ----------
+# Rules (v1):
+#   Hours:        09:15 - 15:15 IST (square off all OPEN at 15:15)
+#   Entry BUY:    LTP crosses above BUY level (from <=BUY to >BUY)
+#   Entry SELL:   LTP crosses below SELL level (from >=SELL to <SELL)
+#   Target BUY:   exit when LTP >= T1
+#   Target SELL:  exit when LTP <= S1
+#   SL BUY:       exit when LTP < SELL level
+#   SL SELL:      exit when LTP > BUY level
+#   Qty:          AUTO_QTY per trade
+#   Max/scrip/day: AUTO_MAX_TRADES_PER_SCRIP
+#   Side effect:  writes to paper_trades.json only (no Kotak order)
+
+AUTO_STRATEGY_ENABLED = True
+AUTO_HOURS_START = (9, 15)
+AUTO_HOURS_END   = (15, 15)
+AUTO_MAX_TRADES_PER_SCRIP = 2
+AUTO_QTY = 1
+
+_auto_state = {
+    "last_ltp": {},  # symbol -> last LTP seen (to detect crossings)
+    "lock": threading.Lock(),
+}
+
+
+def _auto_in_hours(now):
+    if now.weekday() >= 5:
+        return False
+    hm = (now.hour, now.minute)
+    return AUTO_HOURS_START <= hm < AUTO_HOURS_END
+
+
+def _auto_at_or_after_squareoff(now):
+    if now.weekday() >= 5:
+        return False  # weekends: don't force square-off, just idle
+    return (now.hour, now.minute) >= AUTO_HOURS_END
+
+
+def _auto_close(trade, ltp, now, reason):
+    trade["exit_time"] = now.strftime("%H:%M:%S")
+    trade["exit_ts"]   = now.timestamp()
+    trade["exit_price"] = round(ltp, 2)
+    trade["exit_reason"] = reason
+    if trade["order_type"] == "BUY":
+        pnl = ltp - trade["entry_price"]
+    else:
+        pnl = trade["entry_price"] - ltp
+    trade["pnl_points"] = round(pnl, 2)
+    trade["pnl_pct"]    = round((pnl / trade["entry_price"]) * 100, 2) if trade["entry_price"] else 0.0
+    trade["duration_seconds"] = round(now.timestamp() - trade.get("entry_ts", now.timestamp()), 1)
+    trade["status"] = "CLOSED"
+
+
+def _auto_open(sym, side, qty, ltp, now, trades):
+    t = {
+        "id": _next_paper_id(trades),
+        "date": now.strftime("%Y-%m-%d"),
+        "scrip": sym,
+        "order_type": "BUY" if side == "B" else "SELL",
+        "entry_time": now.strftime("%H:%M:%S"),
+        "entry_ts": now.timestamp(),
+        "entry_price": round(ltp, 2),
+        "qty": qty,
+        "max_min_target_price": round(ltp, 2),
+        "target_level_reached": None,
+        "exit_time": None, "exit_ts": None, "exit_price": None,
+        "exit_reason": None, "pnl_points": None, "pnl_pct": None,
+        "duration_seconds": None,
+        "status": "OPEN",
+        "auto": True,
+    }
+    trades.insert(0, t)
+
+
+def _auto_check_entry(q, prev_ltp, cur_ltp):
+    """Return 'B' or 'S' on a level crossing, else None."""
+    levels = q.get("levels") or {}
+    buy_px  = (levels.get("buy")  or {}).get("BUY")
+    sell_px = (levels.get("sell") or {}).get("SELL")
+    if buy_px is not None and prev_ltp <= buy_px < cur_ltp:
+        return "B"
+    if sell_px is not None and prev_ltp >= sell_px > cur_ltp:
+        return "S"
+    return None
+
+
+def _auto_check_exit(trade, q, ltp):
+    """Return exit reason string if exit conditions met, else None."""
+    levels = q.get("levels") or {}
+    buy    = levels.get("buy")  or {}
+    sell   = levels.get("sell") or {}
+    if trade["order_type"] == "BUY":
+        t1 = buy.get("T1")
+        sl = sell.get("SELL")
+        if t1 is not None and ltp >= t1:
+            return "TARGET_T1"
+        if sl is not None and ltp < sl:
+            return "SL_SELL_LVL"
+    else:
+        s1 = sell.get("S1")
+        sl = buy.get("BUY")
+        if s1 is not None and ltp <= s1:
+            return "TARGET_S1"
+        if sl is not None and ltp > sl:
+            return "SL_BUY_LVL"
+    return None
+
+
+def auto_strategy_tick(quotes):
+    """One tick of the paper auto-strategy. Called after each fetch_quotes."""
+    if not AUTO_STRATEGY_ENABLED or not quotes:
+        return
+    now = now_ist()
+    with _auto_state["lock"]:
+        trades = read_paper_trades()
+        modified = False
+
+        # 1. Square off at/after 15:15
+        if _auto_at_or_after_squareoff(now):
+            for t in trades:
+                if t.get("status") != "OPEN":
+                    continue
+                q = quotes.get(t["scrip"])
+                if not q or q.get("ltp") is None:
+                    continue
+                _auto_close(t, float(q["ltp"]), now, "AUTO_SQUARE_OFF")
+                modified = True
+            if modified:
+                write_paper_trades(trades)
+            return
+
+        # 2. Only run during market hours
+        if not _auto_in_hours(now):
+            return
+
+        today = now.strftime("%Y-%m-%d")
+        counts = {}
+        for t in trades:
+            if t.get("date") == today:
+                counts[t["scrip"]] = counts.get(t["scrip"], 0) + 1
+        open_by_sym = {t["scrip"]: t for t in trades if t.get("status") == "OPEN"}
+
+        for scrip in SCRIPS:
+            if not scrip.get("tradeable"):
+                continue
+            sym = scrip["symbol"]
+            q = quotes.get(sym)
+            if not q or q.get("ltp") is None:
+                continue
+            ltp = float(q["ltp"])
+            prev = _auto_state["last_ltp"].get(sym)
+
+            # Exit check first
+            open_t = open_by_sym.get(sym)
+            if open_t:
+                reason = _auto_check_exit(open_t, q, ltp)
+                if reason:
+                    _auto_close(open_t, ltp, now, reason)
+                    modified = True
+                    open_by_sym.pop(sym, None)
+                    _auto_state["last_ltp"][sym] = ltp
+                    continue  # wait next tick before re-entering
+
+            # Entry check
+            if sym not in open_by_sym and counts.get(sym, 0) < AUTO_MAX_TRADES_PER_SCRIP:
+                if prev is not None:
+                    side = _auto_check_entry(q, prev, ltp)
+                    if side:
+                        _auto_open(sym, side, AUTO_QTY, ltp, now, trades)
+                        modified = True
+                        counts[sym] = counts.get(sym, 0) + 1
+
+            _auto_state["last_ltp"][sym] = ltp
+
+        if modified:
+            write_paper_trades(trades)
+
+
 # ---------- HTML template (single-file, dark theme) ----------
 PAGE = """
 <!DOCTYPE html>
@@ -418,6 +783,7 @@ TABS = [
     {"key": "orders", "url": "/orders", "label": "Orders"},
     {"key": "trades", "url": "/trades", "label": "Trades"},
     {"key": "limits", "url": "/limits", "label": "Limits"},
+    {"key": "orderlog", "url": "/orderlog", "label": "Order Log"},
     {"key": "history", "url": "/history", "label": "Login History"},
 ]
 
@@ -457,19 +823,113 @@ GANN_PAGE = """
   td { padding: 8px 6px; border-bottom: 1px solid #f3f4f6;
        color: #1f2937; text-align: center; font-variant-numeric: tabular-nums; }
   td.scrip { text-align: left; font-weight: 600; }
-  td.ltp { font-weight: 700; background: #f9fafb; font-size: 13px; }
   td.pnl { background: #dcfce7; color: #166534; font-weight: 600; }
   td.pnl.neg { background: #fee2e2; color: #991b1b; }
   th.group-sell { background: #6b7280; color: #fff; }
   th.group-buy  { background: #6b7280; color: #fff; }
   th.group-ltp  { background: #1f2937; color: #fff; }
-  .legend { display: flex; gap: 16px; justify-content: center;
-            padding: 12px; font-size: 12px; color: #6b7280; }
-  .legend span { display: inline-flex; align-items: center; gap: 6px; }
-  .swatch { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+  /* LTP cell gets coloured based on nearest gann level */
+  td.ltp { font-weight: 700; background: #f9fafb; font-size: 13px;
+           transition: background 0.3s, color 0.3s; }
+  td.ltp.lvl-S3      { background: #B71C1C; color: #fff; }
+  td.ltp.lvl-S2      { background: #C62828; color: #fff; }
+  td.ltp.lvl-S1      { background: #D32F2F; color: #fff; }
+  td.ltp.lvl-SELL_WA { background: #FF9800; color: #fff; }
+  td.ltp.lvl-SELL    { background: #EF9A9A; color: #7f1d1d; }
+  td.ltp.lvl-BUY     { background: #A5D6A7; color: #14532d; }
+  td.ltp.lvl-BUY_WA  { background: #FF9800; color: #fff; }
+  td.ltp.lvl-T1      { background: #81C784; color: #fff; }
+  td.ltp.lvl-T2      { background: #66BB6A; color: #fff; }
+  td.ltp.lvl-T3      { background: #388E3C; color: #fff; }
+  /* Header counter + toggle */
+  .counter { display: inline-flex; gap: 10px; align-items: center;
+             background: #f3f4f6; padding: 6px 12px; border-radius: 6px;
+             font-size: 12px; }
+  .counter b { font-family: monospace; font-size: 13px; }
+  .counter .c-active { color: #2563eb; }
+  .counter .c-closed { color: #6b7280; }
+  .counter .c-pnl-pos { color: #16a34a; }
+  .counter .c-pnl-neg { color: #dc2626; }
+  .paper-toggle { display: inline-flex; align-items: center; gap: 8px;
+                  background: #16a34a; color: #fff; padding: 6px 10px;
+                  border-radius: 16px; font-size: 12px; font-weight: 600; }
+  .dot-on  { width:10px; height:10px; border-radius:50%; background:#fff; }
+  .open-pos-bar { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+                  padding: 10px 12px; margin-bottom: 12px; font-size: 12px; }
+  .open-pos-bar .head { font-weight: 600; color: #374151; margin-bottom: 6px; }
+  .open-pos-row { display: grid;
+                  grid-template-columns: 90px 50px 70px 100px 100px 100px 80px 80px;
+                  gap: 8px; align-items: center; padding: 4px 0;
+                  border-bottom: 1px solid #f3f4f6; }
+  .open-pos-row:last-child { border-bottom: none; }
+  .open-pos-row .scr { font-weight: 700; }
+  .pill-sm { padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700;
+             display: inline-block; }
+  .pill-sm.BUY  { background: #dcfce7; color: #166534; }
+  .pill-sm.SELL { background: #fee2e2; color: #991b1b; }
+  .pnl-pos { color: #16a34a; font-weight: 600; }
+  .pnl-neg { color: #dc2626; font-weight: 600; }
+  .btn-close { background: #1f2937; color: #fff; border: none; border-radius: 4px;
+               padding: 4px 10px; font-size: 11px; cursor: pointer; }
+  .btn-close:hover { background: #374151; }
   .err-banner { background: #fef3c7; border: 1px solid #fbbf24; color: #78350f;
                 padding: 10px 14px; border-radius: 8px; margin-bottom: 12px;
                 font-size: 13px; }
+  .ok-banner  { background: #dcfce7; border: 1px solid #16a34a; color: #14532d;
+                padding: 10px 14px; border-radius: 8px; margin-bottom: 12px;
+                font-size: 13px; }
+  .btn-buy  { background:#16a34a; color:#fff; border:none; border-radius:4px;
+              padding:4px 10px; font-size:11px; font-weight:700;
+              cursor:pointer; margin-right:4px; }
+  .btn-buy:hover  { background:#15803d; }
+  .btn-sell { background:#dc2626; color:#fff; border:none; border-radius:4px;
+              padding:4px 10px; font-size:11px; font-weight:700;
+              cursor:pointer; }
+  .btn-sell:hover { background:#b91c1c; }
+  /* modal */
+  .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,0.5);
+              display:none; align-items:center; justify-content:center;
+              z-index:1000; }
+  .modal-bg.show { display:flex; }
+  .modal { background:#fff; border-radius:10px; padding:0; width:420px;
+           max-width:95vw; box-shadow:0 20px 50px rgba(0,0,0,0.3); }
+  .modal-head { padding:14px 18px; border-bottom:1px solid #e5e7eb;
+                display:flex; justify-content:space-between; align-items:center; }
+  .modal-head .sym { font-weight:700; font-size:16px; }
+  .modal-head .ltp { font-family:monospace; color:#6b7280; }
+  .modal-head .pill { padding:3px 10px; border-radius:12px; color:#fff;
+                      font-size:11px; font-weight:700; }
+  .pill-B { background:#16a34a; } .pill-S { background:#dc2626; }
+  .modal-body { padding:14px 18px; }
+  .row { display:flex; gap:10px; margin-bottom:10px; align-items:center; }
+  .row label { width:90px; font-size:12px; color:#374151; }
+  .row input[type=number], .row input[type=password] {
+    flex:1; padding:6px 10px; border:1px solid #d1d5db; border-radius:6px;
+    font-size:14px; font-family:monospace; }
+  .seg { display:flex; gap:4px; flex:1; }
+  .seg label { width:auto; flex:1; padding:6px 10px; border:1px solid #d1d5db;
+               border-radius:6px; text-align:center; font-size:12px;
+               cursor:pointer; background:#fff; }
+  .seg input { display:none; }
+  .seg input:checked + span { font-weight:700; }
+  .seg label:has(input:checked) { background:#dbeafe; border-color:#2563eb; color:#1e40af; }
+  .summary { background:#f9fafb; padding:10px 14px; border-radius:6px;
+             margin-top:8px; font-size:13px; }
+  .summary .total { font-size:16px; font-weight:700; color:#1f2937; }
+  .summary .avail { font-size:12px; color:#6b7280; margin-top:4px; }
+  .summary .insuf { color:#dc2626; font-weight:600; }
+  .modal-foot { padding:12px 18px; border-top:1px solid #e5e7eb;
+                display:flex; gap:10px; justify-content:flex-end; }
+  .btn-cancel { padding:8px 16px; background:#f3f4f6; color:#374151;
+                border:none; border-radius:6px; cursor:pointer; font-size:13px; }
+  .btn-confirm { padding:8px 18px; color:#fff; border:none; border-radius:6px;
+                 cursor:pointer; font-size:13px; font-weight:700; }
+  .btn-confirm.B { background:#16a34a; } .btn-confirm.B:hover { background:#15803d; }
+  .btn-confirm.S { background:#dc2626; } .btn-confirm.S:hover { background:#b91c1c; }
+  .modal-msg { padding:10px 14px; margin-top:8px; border-radius:6px;
+               font-size:13px; display:none; }
+  .modal-msg.ok  { background:#dcfce7; color:#14532d; display:block; }
+  .modal-msg.err { background:#fee2e2; color:#7f1d1d; display:block; }
 </style>
 </head>
 <body>
@@ -478,7 +938,15 @@ GANN_PAGE = """
     <span class="title">Gann Trader</span>
     <span id="livedot" class="live">● Live</span>
   </div>
-  <div style="display:flex; gap:8px; align-items:center;">
+  <div style="display:flex; gap:8px; align-items:center; flex-wrap: wrap;">
+    <span class="counter">
+      <span>Active: <b class="c-active" id="statActive">0</b></span>
+      <span>Closed: <b class="c-closed" id="statClosed">0</b></span>
+      <span>P&amp;L: <b id="statPnl">+0.00</b></span>
+    </span>
+    <span class="paper-toggle" title="Paper Trading mode (no real Kotak orders)">
+      <span class="dot-on"></span> Paper Trading
+    </span>
     <span class="clock" id="clock">--:--:--</span>
     <span class="ucc">UCC: {{ ucc }}</span>
     <form method="post" action="/refresh" style="margin:0">
@@ -494,6 +962,12 @@ GANN_PAGE = """
 </div>
 
 <div id="errbox"></div>
+
+<!-- Open paper positions -->
+<div class="open-pos-bar" id="openPosBar" style="display:none;">
+  <div class="head">Open Positions</div>
+  <div id="openPosRows"></div>
+</div>
 
 <div class="card">
 <table>
@@ -517,7 +991,7 @@ GANN_PAGE = """
   </thead>
   <tbody id="rows">
     {% for s in scrips %}
-    <tr data-symbol="{{ s.symbol }}">
+    <tr data-symbol="{{ s.symbol }}" data-tradeable="{{ '1' if s.tradeable else '0' }}">
       <td class="scrip">{{ s.symbol }}</td>
       <td class="pnl" data-col="pnl">+0.00</td>
       <td class="pnl" data-col="livepnl">+0.00</td>
@@ -540,11 +1014,34 @@ GANN_PAGE = """
     {% endfor %}
   </tbody>
 </table>
-<div class="legend">
-  <span><span class="swatch" style="background:#EF9A9A"></span>Sell Levels (Darker = Far from LTP)</span>
-  <span><span class="swatch" style="background:#FF9800"></span>WA (Watch Area)</span>
-  <span><span class="swatch" style="background:#A5D6A7"></span>Buy Levels (Darker = Far from LTP)</span>
 </div>
+
+<!-- Order ticket modal -->
+<div class="modal-bg" id="modalBg">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <span class="pill" id="mPill">B</span>
+        <span class="sym" id="mSym">SYMBOL</span>
+      </div>
+      <div class="ltp">LTP <span id="mLtp">-</span></div>
+    </div>
+    <div class="modal-body">
+      <div class="row">
+        <label>Quantity</label>
+        <input type="number" id="mQty" value="1" min="1" step="1">
+      </div>
+      <div class="summary">
+        <div>Paper trade — fills instantly at current LTP</div>
+        <div class="avail">Entry price <span id="mEntryPx">-</span> &nbsp;·&nbsp; Est. value <span id="mTotal">₹0.00</span></div>
+      </div>
+      <div class="modal-msg" id="mMsg"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn-cancel" onclick="closeTicket()">Cancel</button>
+      <button class="btn-confirm B" id="mConfirm" onclick="submitTicket()">Confirm BUY</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -559,30 +1056,35 @@ function fmt(v) {
   return n.toFixed(2);
 }
 
+// Paint a level cell as plain text (no colouring — only LTP cell gets coloured)
 function paintCell(td, level, value, ltp) {
+  if (!td) return;
   if (value === null || value === undefined) {
     td.textContent = "-";
-    td.style.background = "";
-    td.style.color = "";
-    return;
-  }
-  td.textContent = fmt(value);
-  // Distance shading: closer to LTP = lighter
-  if (ltp && value) {
-    const distAbs = Math.abs(value - ltp);
-    // small distance => light, large => dark (use base color from LEVEL_COLORS)
-    td.style.background = LEVEL_COLORS[level] || "";
-    td.style.color = "#000";
-    // Lighten if close to LTP (within ~0.3% of LTP)
-    if (distAbs / ltp < 0.003) {
-      td.style.opacity = "0.55";
-    } else {
-      td.style.opacity = "1";
-    }
   } else {
-    td.style.background = "";
-    td.style.color = "";
+    td.textContent = fmt(value);
   }
+}
+
+const LTP_LEVEL_CLASSES = [
+  "lvl-S3","lvl-S2","lvl-S1","lvl-SELL_WA","lvl-SELL",
+  "lvl-BUY","lvl-BUY_WA","lvl-T1","lvl-T2","lvl-T3",
+];
+
+function paintLtpCell(td, nearest) {
+  if (!td) return;
+  td.classList.remove(...LTP_LEVEL_CLASSES);
+  if (nearest) td.classList.add("lvl-" + nearest);
+}
+
+function updateStats(stats) {
+  if (!stats) return;
+  document.getElementById("statActive").textContent = stats.active || 0;
+  document.getElementById("statClosed").textContent = stats.closed || 0;
+  const pnlEl = document.getElementById("statPnl");
+  const p = Number(stats.pnl || 0);
+  pnlEl.textContent = (p >= 0 ? "+" : "") + p.toFixed(2);
+  pnlEl.className = p >= 0 ? "c-pnl-pos" : "c-pnl-neg";
 }
 
 async function refresh() {
@@ -597,12 +1099,15 @@ async function refresh() {
     }
     document.getElementById("livedot").className = data.error ? "stale" : "live";
     document.getElementById("livedot").textContent = data.error ? "● Stale" : "● Live";
+    updateStats(data.stats);
 
     for (const s of data.scrips) {
       const tr = document.querySelector('tr[data-symbol="' + s.symbol + '"]');
       if (!tr) continue;
       const ltp = s.ltp;
-      tr.querySelector('[data-col=ltp]').textContent = fmt(ltp);
+      const ltpCell = tr.querySelector('[data-col=ltp]');
+      ltpCell.textContent = fmt(ltp);
+      paintLtpCell(ltpCell, s.nearest_level);
       tr.querySelector('[data-col=open]').textContent = fmt(s.open);
       tr.querySelector('[data-col=low]').textContent  = fmt(s.low);
       tr.querySelector('[data-col=high]').textContent = fmt(s.high);
@@ -615,6 +1120,7 @@ async function refresh() {
         paintCell(tr.querySelector('[data-col=' + lvl + ']'), lvl, buy[lvl], ltp);
       }
     }
+    refreshOpenPositions(data);
   } catch (e) {
     document.getElementById("livedot").className = "stale";
     document.getElementById("livedot").textContent = "● Offline";
@@ -630,9 +1136,244 @@ function tickClock() {
   document.getElementById("clock").textContent = hh+":"+mm+":"+ss + " IST";
 }
 
+// ---- Order ticket ----
+let _ticketSide = "B";
+let _ticketSymbol = "";
+let _availMargin = null;
+
+function fmtRs(n) {
+  if (n === null || n === undefined || !isFinite(n)) return "-";
+  return "₹" + Number(n).toLocaleString("en-IN", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+
+function getRowLtp(symbol) {
+  const tr = document.querySelector('tr[data-symbol="' + symbol + '"]');
+  if (!tr) return null;
+  const t = tr.querySelector('[data-col=ltp]').textContent;
+  const n = parseFloat(t);
+  return isFinite(n) ? n : null;
+}
+
+function recalcTotal() {
+  const qty = parseInt(document.getElementById('mQty').value, 10) || 0;
+  const ltp = getRowLtp(_ticketSymbol) || 0;
+  document.getElementById('mEntryPx').textContent = ltp ? ltp.toFixed(2) : '-';
+  document.getElementById('mTotal').textContent = fmtRs(qty * ltp);
+}
+
+function openTicket(symbol, side) {
+  _ticketSymbol = symbol;
+  _ticketSide = side;
+  document.getElementById('mSym').textContent = symbol;
+  const pill = document.getElementById('mPill');
+  pill.textContent = side === 'B' ? 'BUY' : 'SELL';
+  pill.className = 'pill pill-' + side;
+  const conf = document.getElementById('mConfirm');
+  conf.textContent = side === 'B' ? 'Confirm BUY' : 'Confirm SELL';
+  conf.className = 'btn-confirm ' + side;
+  conf.disabled = false;
+  const ltp = getRowLtp(symbol);
+  document.getElementById('mLtp').textContent = ltp !== null ? ltp.toFixed(2) : '-';
+  document.getElementById('mQty').value = 1;
+  document.getElementById('mMsg').className = 'modal-msg';
+  document.getElementById('mMsg').textContent = '';
+  document.getElementById('modalBg').classList.add('show');
+  recalcTotal();
+}
+
+function closeTicket() {
+  document.getElementById('modalBg').classList.remove('show');
+}
+
+async function submitTicket() {
+  const qty  = document.getElementById('mQty').value;
+  const conf = document.getElementById('mConfirm');
+  const msg  = document.getElementById('mMsg');
+  conf.disabled = true;
+  conf.textContent = 'Placing...';
+  msg.className = 'modal-msg';
+  msg.textContent = '';
+  try {
+    const r = await fetch('/api/paper-open', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        symbol: _ticketSymbol, side: _ticketSide, qty: qty,
+      })
+    });
+    const d = await r.json();
+    if (r.ok && d.ok) {
+      msg.className = 'modal-msg ok';
+      msg.textContent = '✓ Paper ' + (_ticketSide === 'B' ? 'BUY' : 'SELL')
+                     + ' opened @ ₹' + d.trade.entry_price;
+      conf.textContent = 'Done';
+      refresh();
+      setTimeout(closeTicket, 1500);
+    } else {
+      msg.className = 'modal-msg err';
+      msg.textContent = '✗ ' + (d.error || 'Failed');
+      conf.disabled = false;
+      conf.textContent = _ticketSide === 'B' ? 'Confirm BUY' : 'Confirm SELL';
+    }
+  } catch(e) {
+    msg.className = 'modal-msg err';
+    msg.textContent = '✗ Network error: ' + e.message;
+    conf.disabled = false;
+    conf.textContent = _ticketSide === 'B' ? 'Confirm BUY' : 'Confirm SELL';
+  }
+}
+
+document.addEventListener('input', (e) => {
+  if (e.target && e.target.id === 'mQty') recalcTotal();
+});
+document.getElementById('modalBg').addEventListener('click', (e) => {
+  if (e.target.id === 'modalBg') closeTicket();
+});
+
+// ---- Open positions ----
+async function refreshOpenPositions(quotes) {
+  let tradesResp;
+  try {
+    tradesResp = await (await fetch('/api/paper-trades')).json();
+  } catch(e) { return; }
+  const open = (tradesResp.trades || []).filter(t => t.status === 'OPEN');
+  const bar = document.getElementById('openPosBar');
+  const rows = document.getElementById('openPosRows');
+  if (open.length === 0) { bar.style.display = 'none'; rows.innerHTML = ''; return; }
+  bar.style.display = '';
+  const ltpBySym = {};
+  for (const s of (quotes && quotes.scrips) || []) ltpBySym[s.symbol] = s.ltp;
+  const out = [];
+  out.push('<div class="open-pos-row" style="font-weight:600;color:#6b7280;">'
+         + '<div>Scrip</div><div>Side</div><div>Qty</div>'
+         + '<div>Entry</div><div>LTP</div><div>Live P&L</div>'
+         + '<div>Reached</div><div></div></div>');
+  for (const t of open) {
+    const ltp = ltpBySym[t.scrip];
+    let pnl = null;
+    if (ltp !== null && ltp !== undefined) {
+      pnl = t.order_type === 'BUY'
+        ? (ltp - t.entry_price) * t.qty
+        : (t.entry_price - ltp) * t.qty;
+    }
+    const pnlClass = pnl === null ? '' : (pnl >= 0 ? 'pnl-pos' : 'pnl-neg');
+    const pnlStr = pnl === null ? '-' : (pnl >= 0 ? '+' : '') + pnl.toFixed(2);
+    out.push('<div class="open-pos-row">'
+           + '<div class="scr">' + t.scrip + '</div>'
+           + '<div><span class="pill-sm ' + t.order_type + '">' + t.order_type + '</span></div>'
+           + '<div>' + t.qty + '</div>'
+           + '<div>₹' + t.entry_price.toFixed(2) + '</div>'
+           + '<div>' + (ltp !== null && ltp !== undefined ? '₹' + ltp.toFixed(2) : '-') + '</div>'
+           + '<div class="' + pnlClass + '">' + pnlStr + '</div>'
+           + '<div>' + (t.target_level_reached || '-') + '</div>'
+           + '<div><button class="btn-close" onclick="closeTrade(\\'' + t.id + '\\')">Close</button></div>'
+           + '</div>');
+  }
+  rows.innerHTML = out.join('');
+}
+
+async function closeTrade(id) {
+  if (!confirm('Close this paper trade at current LTP?')) return;
+  try {
+    const r = await fetch('/api/paper-close', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({id: id, reason: 'MANUAL'})
+    });
+    const d = await r.json();
+    if (!(r.ok && d.ok)) alert('Failed: ' + (d.error || 'unknown'));
+    refresh();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
 setInterval(tickClock, 1000); tickClock();
 setInterval(refresh, 2500); refresh();
 </script>
+</body>
+</html>
+"""
+
+
+ORDERLOG_PAGE = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Order Log - Kotak Neo</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif;
+         background: #f5f6f8; color: #1f2937; margin: 0; padding: 16px; }
+  header { display: flex; justify-content: space-between; align-items: center;
+           background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+           padding: 12px 16px; margin-bottom: 12px; }
+  .title { font-weight: 700; font-size: 18px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tabs a { padding: 6px 12px; background: #fff; color: #6b7280;
+            text-decoration: none; border-radius: 6px; font-size: 13px;
+            border: 1px solid #e5e7eb; }
+  .tabs a.active { background: #2563eb; color: white; border-color: #2563eb; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+          padding: 12px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; padding: 8px; background: #f9fafb;
+       color: #6b7280; font-weight: 600; font-size: 11px;
+       text-transform: uppercase; border-bottom: 1px solid #e5e7eb; }
+  td { padding: 8px; border-bottom: 1px solid #f3f4f6; }
+  .placed { color: #166534; font-weight: 600; }
+  .rejected { color: #991b1b; font-weight: 600; }
+  .side-B { color: #166534; font-weight: 700; }
+  .side-S { color: #991b1b; font-weight: 700; }
+  .empty { color: #9ca3af; padding: 20px; text-align: center; }
+  .dlbtn { padding: 6px 12px; background: #2563eb; color: #fff; border: none;
+           border-radius: 6px; cursor: pointer; font-size: 13px;
+           text-decoration: none; }
+</style>
+</head>
+<body>
+<header>
+  <div><span class="title">Order Log</span></div>
+  <a class="dlbtn" href="/orderlog.csv">Download CSV</a>
+</header>
+
+<div class="tabs">
+  {% for t in tabs %}
+    <a href="{{ t.url }}" class="{% if t.key == active %}active{% endif %}">{{ t.label }}</a>
+  {% endfor %}
+</div>
+
+<div class="card">
+{% if orders and orders|length > 0 %}
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th>
+        <th>Type</th><th>Price</th><th>Product</th><th>Validity</th>
+        <th>Status</th><th>Kotak Order ID</th><th>Message</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for o in orders %}
+      <tr>
+        <td>{{ o.timestamp }}</td>
+        <td>{{ o.symbol }}</td>
+        <td class="side-{{ o.side }}">{{ o.side }}</td>
+        <td>{{ o.qty }}</td>
+        <td>{{ o.order_type }}</td>
+        <td>{{ o.price }}</td>
+        <td>{{ o.product }}</td>
+        <td>{{ o.validity }}</td>
+        <td class="{% if o.status == 'PLACED' %}placed{% else %}rejected{% endif %}">{{ o.status }}</td>
+        <td>{{ o.kotak_order_id or '-' }}</td>
+        <td>{{ o.message }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <div class="empty">No orders placed yet.</div>
+{% endif %}
+</div>
 </body>
 </html>
 """
@@ -820,12 +1561,375 @@ def gann_view():
 @app.route("/api/gann-prices")
 def gann_prices_api():
     data, err = fetch_quotes()
-    # Preserve scrip order
-    ordered = [data.get(s["symbol"], {
-        "symbol": s["symbol"], "ltp": None, "open": None,
-        "low": None, "high": None, "levels": {"sell": {}, "buy": {}},
-    }) for s in SCRIPS]
-    return jsonify({"scrips": ordered, "error": err, "ts": now_ist().strftime("%H:%M:%S IST")})
+    # Run auto-strategy (paper trades only) + update MFE on any open trades
+    try:
+        auto_strategy_tick(data)
+    except Exception:
+        traceback.print_exc()
+    try:
+        update_open_trades_mfe(data)
+    except Exception:
+        pass
+    # Preserve scrip order; attach nearest_level so the UI can color the LTP cell
+    ordered = []
+    for s in SCRIPS:
+        row = data.get(s["symbol"], {
+            "symbol": s["symbol"], "ltp": None, "open": None,
+            "low": None, "high": None, "levels": {"sell": {}, "buy": {}},
+        })
+        # Shallow copy to avoid mutating cache
+        row = dict(row)
+        nl, _ = nearest_gann_level(row)
+        row["nearest_level"] = nl
+        ordered.append(row)
+    stats = compute_stats(read_paper_trades())
+    return jsonify({"scrips": ordered, "error": err,
+                    "ts": now_ist().strftime("%H:%M:%S IST"),
+                    "stats": stats})
+
+
+# ---------- Paper trading routes ----------
+@app.route("/api/paper-open", methods=["POST"])
+def paper_open_api():
+    """Open a new paper trade at the current LTP. No Kotak involvement."""
+    payload = request.get_json(force=True, silent=True) or {}
+    symbol = (payload.get("symbol") or "").strip()
+    side   = (payload.get("side") or "").strip().upper()   # B or S
+    try:
+        qty = int(payload.get("qty") or 1)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Qty must be integer"}), 400
+    if qty <= 0:
+        return jsonify({"ok": False, "error": "Qty must be positive"}), 400
+    if side not in ("B", "S"):
+        return jsonify({"ok": False, "error": "Side must be B or S"}), 400
+    scrip = find_scrip(symbol)
+    if not scrip:
+        return jsonify({"ok": False, "error": "Unknown symbol"}), 400
+    # Indices aren't tradable cash even in paper (no real lot mapping) — allow
+    # but we keep the tradeable gate consistent with live mode:
+    if not scrip.get("tradeable"):
+        return jsonify({"ok": False, "error": "Index symbols can't be paper-traded"}), 400
+
+    quotes, _ = fetch_quotes()
+    q = quotes.get(symbol)
+    if not q or q.get("ltp") is None:
+        return jsonify({"ok": False, "error": "No LTP available yet"}), 400
+    entry_price = float(q["ltp"])
+    now = now_ist()
+    trades = read_paper_trades()
+    trade = {
+        "id": _next_paper_id(trades),
+        "date": now.strftime("%Y-%m-%d"),
+        "scrip": symbol,
+        "order_type": "BUY" if side == "B" else "SELL",
+        "entry_time": now.strftime("%H:%M:%S"),
+        "entry_ts": now.timestamp(),
+        "entry_price": round(entry_price, 2),
+        "qty": qty,
+        "max_min_target_price": round(entry_price, 2),
+        "target_level_reached": None,
+        "exit_time": None,
+        "exit_ts": None,
+        "exit_price": None,
+        "exit_reason": None,
+        "pnl_points": None,
+        "pnl_pct": None,
+        "duration_seconds": None,
+        "status": "OPEN",
+    }
+    trades.insert(0, trade)
+    write_paper_trades(trades)
+    return jsonify({"ok": True, "trade": trade})
+
+
+@app.route("/api/paper-close", methods=["POST"])
+def paper_close_api():
+    """Close an open paper trade at current LTP."""
+    payload = request.get_json(force=True, silent=True) or {}
+    tid = str(payload.get("id") or "").strip()
+    reason = (payload.get("reason") or "MANUAL").strip().upper()
+    if not tid:
+        return jsonify({"ok": False, "error": "id required"}), 400
+    trades = read_paper_trades()
+    target = None
+    for t in trades:
+        if str(t.get("id")) == tid:
+            target = t
+            break
+    if not target:
+        return jsonify({"ok": False, "error": "trade not found"}), 404
+    if target.get("status") == "CLOSED":
+        return jsonify({"ok": False, "error": "already closed"}), 400
+
+    quotes, _ = fetch_quotes()
+    q = quotes.get(target["scrip"])
+    if not q or q.get("ltp") is None:
+        return jsonify({"ok": False, "error": "No LTP available"}), 400
+    exit_price = float(q["ltp"])
+    now = now_ist()
+    entry_price = float(target["entry_price"])
+    qty = int(target.get("qty") or 1)
+    if target["order_type"] == "BUY":
+        pnl_points = round(exit_price - entry_price, 2)
+    else:
+        pnl_points = round(entry_price - exit_price, 2)
+    pnl_pct = round((pnl_points / entry_price) * 100.0, 2) if entry_price else 0
+    duration = now.timestamp() - float(target.get("entry_ts") or now.timestamp())
+
+    target["exit_time"] = now.strftime("%H:%M:%S")
+    target["exit_ts"] = now.timestamp()
+    target["exit_price"] = round(exit_price, 2)
+    target["exit_reason"] = reason
+    target["pnl_points"] = pnl_points
+    target["pnl_pct"] = pnl_pct
+    target["duration_seconds"] = round(duration, 0)
+    target["status"] = "CLOSED"
+    # Finalise max-min-target and target_level_reached if not set yet
+    side = "B" if target["order_type"] == "BUY" else "S"
+    best = target.get("max_min_target_price") or exit_price
+    reached = compute_target_level_reached(side, entry_price, best, q.get("levels"))
+    if reached:
+        target["target_level_reached"] = reached
+    write_paper_trades(trades)
+    return jsonify({"ok": True, "trade": target})
+
+
+@app.route("/api/paper-trades")
+def paper_trades_api():
+    trades = read_paper_trades()
+    return jsonify({"trades": trades, "stats": compute_stats(trades)})
+
+
+@app.route("/paper-trades.xlsx")
+def paper_trades_xlsx():
+    """Export all paper trades as a formatted Excel file."""
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Paper Trades"
+    headers = ["Date", "Scrip", "Order Type", "Entry Time (IST)", "Entry Price",
+               "Target Level Reached", "Max/Min Target Price", "Exit Time (IST)",
+               "Exit Price", "Exit Reason", "P&L Points", "P&L %", "Duration"]
+    ws.append(headers)
+    # Header styling
+    hdr_fill = PatternFill("solid", fgColor="FFEB3B")
+    for c, _ in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=c)
+        cell.font = Font(bold=True)
+        cell.fill = hdr_fill
+        cell.alignment = Alignment(horizontal="center")
+    sell_fill = PatternFill("solid", fgColor="F8CBAD")
+    buy_fill  = PatternFill("solid", fgColor="C6EFCE")
+    pos_font  = Font(color="006100")
+    neg_font  = Font(color="9C0006")
+    for t in read_paper_trades():
+        ws.append([
+            t.get("date", ""),
+            t.get("scrip", ""),
+            t.get("order_type", ""),
+            t.get("entry_time", ""),
+            t.get("entry_price", ""),
+            t.get("target_level_reached", "") or "",
+            t.get("max_min_target_price", "") or "",
+            t.get("exit_time", "") or "",
+            t.get("exit_price", "") or "",
+            t.get("exit_reason", "") or "",
+            t.get("pnl_points", "") if t.get("pnl_points") is not None else "",
+            t.get("pnl_pct", "") if t.get("pnl_pct") is not None else "",
+            fmt_duration(t.get("duration_seconds")),
+        ])
+        r = ws.max_row
+        # Colour the Order Type cell
+        otype_cell = ws.cell(row=r, column=3)
+        if t.get("order_type") == "SELL":
+            otype_cell.fill = sell_fill
+        else:
+            otype_cell.fill = buy_fill
+        otype_cell.alignment = Alignment(horizontal="center")
+        # P&L colouring
+        try:
+            pl = float(t.get("pnl_points") or 0)
+            ws.cell(row=r, column=11).font = pos_font if pl >= 0 else neg_font
+            ws.cell(row=r, column=12).font = pos_font if pl >= 0 else neg_font
+        except (TypeError, ValueError):
+            pass
+    # Column widths
+    widths = [12, 12, 12, 18, 14, 20, 20, 18, 12, 14, 12, 10, 12]
+    from openpyxl.utils import get_column_letter
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_paper_export.xlsx")
+    wb.save(out)
+    with open(out, "rb") as f:
+        data = f.read()
+    return Response(
+        data,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=paper_trades.xlsx"},
+    )
+
+
+@app.route("/api/margin-summary")
+def margin_summary_api():
+    """Return available cash so the order ticket can show margin headroom."""
+    try:
+        client = ensure_client()
+        data, err = safe_call(client.limits, segment="ALL", exchange="ALL", product="ALL")
+        if err:
+            return jsonify({"error": err, "available": None})
+        # limits may return dict-of-fields or list-of-rows. Surface the most
+        # useful field. Kotak typically uses Net or CashAvailable / Net.
+        avail = None
+        if isinstance(data, dict):
+            for k in ("Net", "net", "CashAvailable", "cashAvailable",
+                     "AvailableCash", "availableCash", "DepositValue"):
+                if k in data:
+                    try:
+                        avail = float(data[k])
+                        break
+                    except (TypeError, ValueError):
+                        pass
+        return jsonify({"available": avail, "raw": data, "error": None})
+    except Exception as e:
+        return jsonify({"error": str(e), "available": None})
+
+
+@app.route("/api/place-order", methods=["POST"])
+def place_order_api():
+    """Place a real order with Kotak. Records every attempt to orders_log.json."""
+    payload = request.get_json(force=True, silent=True) or {}
+    symbol      = (payload.get("symbol") or "").strip()
+    side        = (payload.get("side") or "").strip().upper()      # B or S
+    qty         = str(payload.get("qty") or "").strip()
+    order_type  = (payload.get("order_type") or "L").strip().upper()  # L / MKT
+    price       = str(payload.get("price") or "0").strip()
+    product     = (payload.get("product") or "MIS").strip().upper()    # MIS / CNC
+    validity    = (payload.get("validity") or "DAY").strip().upper()
+    trigger     = str(payload.get("trigger") or "0").strip()
+    pin         = (payload.get("pin") or "").strip()
+
+    ts = now_ist().strftime("%Y-%m-%d %H:%M:%S IST")
+    log_entry = {
+        "timestamp": ts, "symbol": symbol, "side": side, "qty": qty,
+        "order_type": order_type, "price": price, "product": product,
+        "validity": validity, "trigger": trigger,
+        "status": "REJECTED", "kotak_order_id": None, "message": "",
+    }
+
+    # Validation
+    expected_pin = os.getenv("ORDER_PIN", "").strip()
+    if expected_pin and pin != expected_pin:
+        log_entry["message"] = "Wrong PIN"
+        append_order(log_entry)
+        return jsonify({"ok": False, "error": "Wrong PIN"}), 401
+
+    scrip = find_scrip(symbol)
+    if not scrip:
+        log_entry["message"] = "Unknown symbol"
+        append_order(log_entry)
+        return jsonify({"ok": False, "error": "Unknown symbol"}), 400
+    if not scrip.get("tradeable"):
+        log_entry["message"] = "Symbol not tradeable (index)"
+        append_order(log_entry)
+        return jsonify({"ok": False, "error": "Index symbols can't be traded as cash"}), 400
+    if side not in ("B", "S"):
+        log_entry["message"] = "Side must be B or S"
+        append_order(log_entry)
+        return jsonify({"ok": False, "error": "Side must be B or S"}), 400
+    try:
+        if int(qty) <= 0:
+            raise ValueError("qty<=0")
+    except (TypeError, ValueError):
+        log_entry["message"] = "Qty must be a positive integer"
+        append_order(log_entry)
+        return jsonify({"ok": False, "error": "Qty must be a positive integer"}), 400
+    if order_type == "L":
+        try:
+            if float(price) <= 0:
+                raise ValueError("price<=0")
+        except (TypeError, ValueError):
+            log_entry["message"] = "Price required for LIMIT"
+            append_order(log_entry)
+            return jsonify({"ok": False, "error": "Price required for LIMIT order"}), 400
+
+    # Place the order
+    try:
+        client = ensure_client()
+    except Exception as e:
+        log_entry["message"] = f"login: {e}"
+        append_order(log_entry)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    try:
+        resp = client.place_order(
+            exchange_segment=scrip["exchange"],
+            product=product,
+            price=price if order_type == "L" else "0",
+            order_type=order_type,
+            quantity=qty,
+            validity=validity,
+            trading_symbol=scrip["trading_symbol"],
+            transaction_type=side,
+            trigger_price=trigger,
+            tag="gann-ui",
+        )
+    except Exception as e:
+        log_entry["message"] = f"{type(e).__name__}: {e}"
+        append_order(log_entry)
+        return jsonify({"ok": False, "error": log_entry["message"]}), 500
+
+    # Parse response
+    if isinstance(resp, dict):
+        # success path: resp commonly has nOrdNo / data.orderId
+        oid = (resp.get("nOrdNo")
+               or (resp.get("data") or {}).get("orderId")
+               or (resp.get("data") or {}).get("nOrdNo"))
+        err = resp.get("error") or resp.get("Error") or resp.get("errMsg")
+        msg = resp.get("stat") or resp.get("Message") or resp.get("statusDescription")
+        if oid:
+            log_entry["status"] = "PLACED"
+            log_entry["kotak_order_id"] = str(oid)
+            log_entry["message"] = msg or "Order accepted"
+            append_order(log_entry)
+            return jsonify({"ok": True, "order_id": str(oid),
+                           "message": log_entry["message"], "raw": resp})
+        if err:
+            err_str = err if isinstance(err, str) else json.dumps(err)
+            log_entry["message"] = err_str
+            append_order(log_entry)
+            return jsonify({"ok": False, "error": err_str, "raw": resp}), 400
+
+    log_entry["message"] = f"Unexpected response: {json.dumps(resp)[:200]}"
+    append_order(log_entry)
+    return jsonify({"ok": False, "error": "Unexpected response", "raw": resp}), 500
+
+
+@app.route("/orderlog")
+def orderlog_view():
+    return render_template_string(
+        ORDERLOG_PAGE, tabs=TABS, active="orderlog",
+        orders=read_orders(),
+    )
+
+
+@app.route("/orderlog.csv")
+def orderlog_csv():
+    rows = read_orders()
+    cols = ["timestamp", "symbol", "side", "qty", "order_type", "price",
+            "product", "validity", "trigger", "status", "kotak_order_id", "message"]
+    lines = [",".join(cols)]
+    for r in rows:
+        vals = []
+        for c in cols:
+            v = str(r.get(c, ""))
+            if "," in v or '"' in v or "\n" in v:
+                v = '"' + v.replace('"', '""') + '"'
+            vals.append(v)
+        lines.append(",".join(vals))
+    return Response("\n".join(lines), mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=orders_log.csv"})
 
 
 @app.route("/refresh", methods=["POST", "GET"])
