@@ -1,80 +1,95 @@
-# Kotak Neo Auto-Login Dashboard
+# Kotak Neo Paper-Trading Dashboard
 
-Automated daily login to Kotak Neo Trade API with a web dashboard for Holdings, Positions, Orders, Trades, and Limits.
+Web dashboard for Ganesh's Kotak Neo account (UCC `V4M8I`) — TOTP auto-login,
+live Gann Square-of-9 levels for stocks and index options, paper auto-trading
+on level crossings, and an audit trail of every real-broker order attempt.
 
-## Local development
+Single Flask app, REST + WebSocket overlay for quotes, JSON files for
+storage. No external services. Runs on the local PC today; will move to a
+Contabo VPS for 24/7 operation later.
 
-```bash
-pip install -r requirements.txt
-cp .env.example .env
-# Fill in credentials in .env
-python app.py
-# Open http://localhost:5000
-```
-
-## Cloud deployment (Render + GitHub Actions)
-
-**Goal:** Dashboard live 24/7 at a public URL, auto-login at 9 AM IST Mon-Fri, zero dependency on your local PC.
-
-### 1. Push code to GitHub (private repo)
-
-Create a new **private** repo at github.com, then from the project folder:
+## Quick start
 
 ```powershell
-git init
-git add .
-git commit -m "initial commit"
-git branch -M main
-git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO.git
-git push -u origin main
+pip install -r requirements.txt
+copy .env.example .env       # then edit .env with credentials
+python app.py
+# open http://localhost:5000
 ```
 
-Confirm `.env` is NOT pushed (it's gitignored).
+The first request auto-logs into Kotak Neo and caches the session for the
+process lifetime. The WebSocket QuoteFeed starts on the first
+`/api/gann-prices` call.
 
-### 2. Deploy to Render
+Required env vars (`.env`):
 
-1. Go to https://render.com → Sign in with GitHub
-2. New → Blueprint → connect your repo
-3. Render reads `render.yaml` and creates the web service
-4. Set environment variables (from your local `.env`):
-   - KOTAK_CONSUMER_KEY
-   - KOTAK_UCC
-   - KOTAK_MOBILE
-   - KOTAK_MPIN
-   - KOTAK_TOTP_SECRET
-5. Deploy. You'll get a URL like `https://kotak-dashboard-xxxx.onrender.com`
+```
+KOTAK_CONSUMER_KEY=...
+KOTAK_UCC=V4M8I
+KOTAK_MOBILE=+91...
+KOTAK_MPIN=...
+KOTAK_TOTP_SECRET=...     # base32 secret from the Authenticator QR
+```
 
-### 3. Configure GitHub Actions cron
+## Layout
 
-In your GitHub repo:
+```
+app.py                       Flask routes (~740 lines after refactor)
+backend/
+  utils.py                   IST timezone, now_ist()
+  quotes.py                  fetch_quotes / fetch_option_quotes + WS overlay
+  kotak/
+    api.py                   rate limiter, circuit breaker, call_with_retry
+    client.py                login(), ensure_client(), safe_call()
+    instruments.py           SCRIPS, F&O universe lookup
+    quote_feed.py            WebSocket subscription + tick cache
+  storage/
+    _safe_io.py              atomic_write_json + per-file locks
+    trades.py                paper_trades.json  (read/write/next_id)
+    orders.py                orders_log.json    (append/read)
+    history.py               login_history.json (append/read)
+  strategy/
+    gann.py                  Square-of-9 levels, target-reached helper
+    stocks.py                paper auto-strategy on level crossings
+    options.py               paper auto-strategy on index option chains
+frontend/
+  templates/                 base.html, gann.html, options.html, ...
+  static/                    (empty for now — JS/CSS still inline in templates)
+docs/
+  ARCHITECTURE.md            module map and data flow
+  API.md                     HTTP endpoint reference
+  STRATEGY.md                Gann math + auto-strategy rules
+tests/
+  test_smoke.py              import + Flask client smoke
+  test_kotak_api.py          rate limiter / breaker / retry
+  test_storage.py            atomic write + concurrent append safety
+auto_login.py                standalone script (Windows Task Scheduler)
+run_login.bat                Task Scheduler wrapper
+setup_schedule.bat           one-time scheduled task setup
+```
 
-1. Settings → Secrets and variables → Actions → New repository secret
-2. Name: `RENDER_APP_URL`
-3. Value: your Render URL (no trailing slash)
+## Tests
 
-The workflow at `.github/workflows/daily-login.yml` will now run Mon-Fri at 9 AM IST.
+```powershell
+python -m pytest tests/ -v
+```
 
-To test immediately:
-- Actions tab → "Daily Kotak Login at 9 AM IST" → "Run workflow"
+All tests are offline — no Kotak network calls. They cover module imports,
+Gann math, paper-trade ID generation, the rate limiter / circuit breaker /
+retry primitives, atomic writes, and concurrent-append safety.
 
-### 4. Share with Ganesh
+## Documentation
 
-Send Ganesh the Render URL. He can bookmark it and check his holdings/positions any time.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — modules and how data flows through them.
+- [docs/API.md](docs/API.md) — HTTP routes (page views + JSON APIs).
+- [docs/STRATEGY.md](docs/STRATEGY.md) — Gann Square-of-9 math and the paper auto-strategy rules.
+- [docs/REFACTOR_PLAN.md](docs/REFACTOR_PLAN.md) — original 8-phase plan; kept for history.
+- [docs/SUPER_DUPER_ENGINE.md](docs/SUPER_DUPER_ENGINE.md) — design notes for the WebSocket QuoteFeed.
 
-## Files
+## Security
 
-- `app.py` - Flask dashboard (5 tabs)
-- `auto_login.py` - Standalone login script (for local Task Scheduler)
-- `run_login.bat` - Windows batch wrapper for Task Scheduler
-- `setup_schedule.bat` - One-time Windows Task Scheduler setup
-- `requirements.txt` - Python dependencies
-- `render.yaml` - Render deployment config
-- `.github/workflows/daily-login.yml` - GitHub Actions cron trigger
-- `.env.example` - Template for credentials
-
-## Security notes
-
-- Never commit `.env` - it's in `.gitignore`
-- On Render, credentials go in environment variables dashboard
-- TOTP secret is the most sensitive value - rotate if leaked
-- Use a private GitHub repo only
+- `.env` is gitignored; never commit it.
+- The TOTP secret is the most sensitive value — rotate at the broker if leaked.
+- Paper-trading writes only ever touch the local JSON files. The only code
+  path that talks to Kotak's order endpoint is `/api/place-order`, and every
+  attempt (success or failure) is appended to `orders_log.json` for audit.
