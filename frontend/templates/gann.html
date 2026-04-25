@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Gann Trader - Kotak Neo</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif;
+         background: #f5f6f8; color: #1f2937; margin: 0; padding: 16px; }
+  header { display: flex; justify-content: space-between; align-items: center;
+           background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+           padding: 12px 16px; margin-bottom: 12px; }
+  .title { font-weight: 700; font-size: 18px; }
+  .live { color: #16a34a; font-size: 12px; margin-left: 8px; }
+  .stale { color: #dc2626; font-size: 12px; margin-left: 8px; }
+  .clock { font-family: monospace; background: #f3f4f6; padding: 6px 10px;
+           border-radius: 6px; font-size: 14px; }
+  .ucc { background: #f3f4f6; padding: 6px 10px; border-radius: 6px;
+         font-size: 13px; color: #374151; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tabs a { padding: 6px 12px; background: #fff; color: #6b7280;
+            text-decoration: none; border-radius: 6px; font-size: 13px;
+            border: 1px solid #e5e7eb; }
+  .tabs a.active { background: #2563eb; color: white; border-color: #2563eb; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+          overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 1400px; }
+  th { text-align: center; padding: 8px 6px; background: #f9fafb;
+       color: #6b7280; font-weight: 600; font-size: 10px;
+       text-transform: uppercase; border-bottom: 1px solid #e5e7eb;
+       position: sticky; top: 0; }
+  td { padding: 8px 6px; border-bottom: 1px solid #f3f4f6;
+       color: #1f2937; text-align: center; font-variant-numeric: tabular-nums; }
+  td.scrip { text-align: left; font-weight: 600; }
+  td.pnl { background: #dcfce7; color: #166534; font-weight: 600; }
+  td.pnl.neg { background: #fee2e2; color: #991b1b; }
+  th.group-sell { background: #6b7280; color: #fff; }
+  th.group-buy  { background: #6b7280; color: #fff; }
+  th.group-ltp  { background: #1f2937; color: #fff; }
+  /* LTP cell gets coloured based on nearest gann level */
+  td.ltp { font-weight: 700; background: #f9fafb; font-size: 13px;
+           transition: background 0.3s, color 0.3s; }
+  td.ltp.lvl-S3      { background: #B71C1C; color: #fff; }
+  td.ltp.lvl-S2      { background: #C62828; color: #fff; }
+  td.ltp.lvl-S1      { background: #D32F2F; color: #fff; }
+  td.ltp.lvl-SELL_WA { background: #FF9800; color: #fff; }
+  td.ltp.lvl-SELL    { background: #EF9A9A; color: #7f1d1d; }
+  td.ltp.lvl-BUY     { background: #A5D6A7; color: #14532d; }
+  td.ltp.lvl-BUY_WA  { background: #FF9800; color: #fff; }
+  td.ltp.lvl-T1      { background: #81C784; color: #fff; }
+  td.ltp.lvl-T2      { background: #66BB6A; color: #fff; }
+  td.ltp.lvl-T3      { background: #388E3C; color: #fff; }
+  /* Header counter + toggle */
+  .counter { display: inline-flex; gap: 10px; align-items: center;
+             background: #f3f4f6; padding: 6px 12px; border-radius: 6px;
+             font-size: 12px; }
+  .counter b { font-family: monospace; font-size: 13px; }
+  .counter .c-active { color: #2563eb; }
+  .counter .c-closed { color: #6b7280; }
+  .counter .c-pnl-pos { color: #16a34a; }
+  .counter .c-pnl-neg { color: #dc2626; }
+  .paper-toggle { display: inline-flex; align-items: center; gap: 8px;
+                  background: #16a34a; color: #fff; padding: 6px 10px;
+                  border-radius: 16px; font-size: 12px; font-weight: 600; }
+  .dot-on  { width:10px; height:10px; border-radius:50%; background:#fff; }
+  .open-pos-bar { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+                  padding: 10px 12px; margin-bottom: 12px; font-size: 12px; }
+  .open-pos-bar .head { font-weight: 600; color: #374151; margin-bottom: 6px; }
+  .open-pos-row { display: grid;
+                  grid-template-columns: 90px 50px 70px 100px 100px 100px 80px 80px;
+                  gap: 8px; align-items: center; padding: 4px 0;
+                  border-bottom: 1px solid #f3f4f6; }
+  .open-pos-row:last-child { border-bottom: none; }
+  .open-pos-row .scr { font-weight: 700; }
+  .pill-sm { padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700;
+             display: inline-block; }
+  .pill-sm.BUY  { background: #dcfce7; color: #166534; }
+  .pill-sm.SELL { background: #fee2e2; color: #991b1b; }
+  .pnl-pos { color: #16a34a; font-weight: 600; }
+  .pnl-neg { color: #dc2626; font-weight: 600; }
+  .btn-close { background: #1f2937; color: #fff; border: none; border-radius: 4px;
+               padding: 4px 10px; font-size: 11px; cursor: pointer; }
+  .btn-close:hover { background: #374151; }
+  .err-banner { background: #fef3c7; border: 1px solid #fbbf24; color: #78350f;
+                padding: 10px 14px; border-radius: 8px; margin-bottom: 12px;
+                font-size: 13px; }
+  .ok-banner  { background: #dcfce7; border: 1px solid #16a34a; color: #14532d;
+                padding: 10px 14px; border-radius: 8px; margin-bottom: 12px;
+                font-size: 13px; }
+  .btn-buy  { background:#16a34a; color:#fff; border:none; border-radius:4px;
+              padding:4px 10px; font-size:11px; font-weight:700;
+              cursor:pointer; margin-right:4px; }
+  .btn-buy:hover  { background:#15803d; }
+  .btn-sell { background:#dc2626; color:#fff; border:none; border-radius:4px;
+              padding:4px 10px; font-size:11px; font-weight:700;
+              cursor:pointer; }
+  .btn-sell:hover { background:#b91c1c; }
+  /* modal */
+  .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,0.5);
+              display:none; align-items:center; justify-content:center;
+              z-index:1000; }
+  .modal-bg.show { display:flex; }
+  .modal { background:#fff; border-radius:10px; padding:0; width:420px;
+           max-width:95vw; box-shadow:0 20px 50px rgba(0,0,0,0.3); }
+  .modal-head { padding:14px 18px; border-bottom:1px solid #e5e7eb;
+                display:flex; justify-content:space-between; align-items:center; }
+  .modal-head .sym { font-weight:700; font-size:16px; }
+  .modal-head .ltp { font-family:monospace; color:#6b7280; }
+  .modal-head .pill { padding:3px 10px; border-radius:12px; color:#fff;
+                      font-size:11px; font-weight:700; }
+  .pill-B { background:#16a34a; } .pill-S { background:#dc2626; }
+  .modal-body { padding:14px 18px; }
+  .row { display:flex; gap:10px; margin-bottom:10px; align-items:center; }
+  .row label { width:90px; font-size:12px; color:#374151; }
+  .row input[type=number], .row input[type=password] {
+    flex:1; padding:6px 10px; border:1px solid #d1d5db; border-radius:6px;
+    font-size:14px; font-family:monospace; }
+  .seg { display:flex; gap:4px; flex:1; }
+  .seg label { width:auto; flex:1; padding:6px 10px; border:1px solid #d1d5db;
+               border-radius:6px; text-align:center; font-size:12px;
+               cursor:pointer; background:#fff; }
+  .seg input { display:none; }
+  .seg input:checked + span { font-weight:700; }
+  .seg label:has(input:checked) { background:#dbeafe; border-color:#2563eb; color:#1e40af; }
+  .summary { background:#f9fafb; padding:10px 14px; border-radius:6px;
+             margin-top:8px; font-size:13px; }
+  .summary .total { font-size:16px; font-weight:700; color:#1f2937; }
+  .summary .avail { font-size:12px; color:#6b7280; margin-top:4px; }
+  .summary .insuf { color:#dc2626; font-weight:600; }
+  .modal-foot { padding:12px 18px; border-top:1px solid #e5e7eb;
+                display:flex; gap:10px; justify-content:flex-end; }
+  .btn-cancel { padding:8px 16px; background:#f3f4f6; color:#374151;
+                border:none; border-radius:6px; cursor:pointer; font-size:13px; }
+  .btn-confirm { padding:8px 18px; color:#fff; border:none; border-radius:6px;
+                 cursor:pointer; font-size:13px; font-weight:700; }
+  .btn-confirm.B { background:#16a34a; } .btn-confirm.B:hover { background:#15803d; }
+  .btn-confirm.S { background:#dc2626; } .btn-confirm.S:hover { background:#b91c1c; }
+  .modal-msg { padding:10px 14px; margin-top:8px; border-radius:6px;
+               font-size:13px; display:none; }
+  .modal-msg.ok  { background:#dcfce7; color:#14532d; display:block; }
+  .modal-msg.err { background:#fee2e2; color:#7f1d1d; display:block; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <span class="title">Gann Trader</span>
+    <span id="livedot" class="live">● Live</span>
+  </div>
+  <div style="display:flex; gap:8px; align-items:center; flex-wrap: wrap;">
+    <span class="counter">
+      <span>Active: <b class="c-active" id="statActive">0</b></span>
+      <span>Closed: <b class="c-closed" id="statClosed">0</b></span>
+      <span>P&amp;L: <b id="statPnl">+0.00</b></span>
+    </span>
+    <span class="paper-toggle" title="Paper Trading mode (no real Kotak orders)">
+      <span class="dot-on"></span> Paper Trading
+    </span>
+    <span class="clock" id="clock">--:--:--</span>
+    <span class="ucc">UCC: {{ ucc }}</span>
+    <form method="post" action="/refresh" style="margin:0">
+      <button style="padding:6px 12px;background:#16a34a;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;">Refresh Login</button>
+    </form>
+  </div>
+</header>
+
+<div class="tabs">
+  {% for t in tabs %}
+    <a href="{{ t.url }}" class="{% if t.key == active %}active{% endif %}">{{ t.label }}</a>
+  {% endfor %}
+</div>
+
+<div id="errbox"></div>
+
+<!-- Open paper positions -->
+<div class="open-pos-bar" id="openPosBar" style="display:none;">
+  <div class="head">Open Positions</div>
+  <div id="openPosRows"></div>
+</div>
+
+<div class="card">
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2">SCRIP</th>
+      <th rowspan="2">P&amp;L</th>
+      <th rowspan="2">LIVE P&amp;L</th>
+      <th rowspan="2">QTY</th>
+      <th rowspan="2">OPEN</th>
+      <th rowspan="2">LOW</th>
+      <th rowspan="2">HIGH</th>
+      <th colspan="5" class="group-sell">SELL LEVELS</th>
+      <th rowspan="2" class="group-ltp">LTP</th>
+      <th colspan="5" class="group-buy">BUY LEVELS</th>
+    </tr>
+    <tr>
+      <th>S3</th><th>S2</th><th>S1</th><th>WA</th><th>SELL</th>
+      <th>BUY</th><th>WA</th><th>T1</th><th>T2</th><th>T3</th>
+    </tr>
+  </thead>
+  <tbody id="rows">
+    {% for s in scrips %}
+    <tr data-symbol="{{ s.symbol }}" data-tradeable="{{ '1' if s.tradeable else '0' }}">
+      <td class="scrip">{{ s.symbol }}</td>
+      <td class="pnl" data-col="pnl">+0.00</td>
+      <td class="pnl" data-col="livepnl">+0.00</td>
+      <td data-col="qty">0</td>
+      <td data-col="open">-</td>
+      <td data-col="low">-</td>
+      <td data-col="high">-</td>
+      <td data-col="S3">-</td>
+      <td data-col="S2">-</td>
+      <td data-col="S1">-</td>
+      <td data-col="SELL_WA">-</td>
+      <td data-col="SELL">-</td>
+      <td class="ltp" data-col="ltp">-</td>
+      <td data-col="BUY">-</td>
+      <td data-col="BUY_WA">-</td>
+      <td data-col="T1">-</td>
+      <td data-col="T2">-</td>
+      <td data-col="T3">-</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<!-- Order ticket modal -->
+<div class="modal-bg" id="modalBg">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <span class="pill" id="mPill">B</span>
+        <span class="sym" id="mSym">SYMBOL</span>
+      </div>
+      <div class="ltp">LTP <span id="mLtp">-</span></div>
+    </div>
+    <div class="modal-body">
+      <div class="row">
+        <label>Quantity</label>
+        <input type="number" id="mQty" value="1" min="1" step="1">
+      </div>
+      <div class="summary">
+        <div>Paper trade — fills instantly at current LTP</div>
+        <div class="avail">Entry price <span id="mEntryPx">-</span> &nbsp;·&nbsp; Est. value <span id="mTotal">₹0.00</span></div>
+      </div>
+      <div class="modal-msg" id="mMsg"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn-cancel" onclick="closeTicket()">Cancel</button>
+      <button class="btn-confirm B" id="mConfirm" onclick="submitTicket()">Confirm BUY</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const LEVEL_COLORS = {{ level_colors|tojson }};
+const SELL_LVLS = ["S3","S2","S1","SELL_WA","SELL"];
+const BUY_LVLS  = ["BUY","BUY_WA","T1","T2","T3"];
+
+function fmt(v) {
+  if (v === null || v === undefined || v === "") return "-";
+  const n = Number(v);
+  if (!isFinite(n)) return "-";
+  return n.toFixed(2);
+}
+
+// Paint a level cell as plain text (no colouring — only LTP cell gets coloured)
+function paintCell(td, level, value, ltp) {
+  if (!td) return;
+  if (value === null || value === undefined) {
+    td.textContent = "-";
+  } else {
+    td.textContent = fmt(value);
+  }
+}
+
+const LTP_LEVEL_CLASSES = [
+  "lvl-S3","lvl-S2","lvl-S1","lvl-SELL_WA","lvl-SELL",
+  "lvl-BUY","lvl-BUY_WA","lvl-T1","lvl-T2","lvl-T3",
+];
+
+function paintLtpCell(td, nearest) {
+  if (!td) return;
+  td.classList.remove(...LTP_LEVEL_CLASSES);
+  if (nearest) td.classList.add("lvl-" + nearest);
+}
+
+function updateStats(stats) {
+  if (!stats) return;
+  document.getElementById("statActive").textContent = stats.active || 0;
+  document.getElementById("statClosed").textContent = stats.closed || 0;
+  const pnlEl = document.getElementById("statPnl");
+  const p = Number(stats.pnl || 0);
+  pnlEl.textContent = (p >= 0 ? "+" : "") + p.toFixed(2);
+  pnlEl.className = p >= 0 ? "c-pnl-pos" : "c-pnl-neg";
+}
+
+async function refresh() {
+  try {
+    const r = await fetch("/api/gann-prices");
+    const data = await r.json();
+    const ebox = document.getElementById("errbox");
+    if (data.error) {
+      ebox.innerHTML = '<div class="err-banner">Data error: ' + data.error + '</div>';
+    } else {
+      ebox.innerHTML = "";
+    }
+    document.getElementById("livedot").className = data.error ? "stale" : "live";
+    document.getElementById("livedot").textContent = data.error ? "● Stale" : "● Live";
+    updateStats(data.stats);
+
+    for (const s of data.scrips) {
+      const tr = document.querySelector('tr[data-symbol="' + s.symbol + '"]');
+      if (!tr) continue;
+      const ltp = s.ltp;
+      const ltpCell = tr.querySelector('[data-col=ltp]');
+      ltpCell.textContent = fmt(ltp);
+      paintLtpCell(ltpCell, s.nearest_level);
+      tr.querySelector('[data-col=open]').textContent = fmt(s.open);
+      tr.querySelector('[data-col=low]').textContent  = fmt(s.low);
+      tr.querySelector('[data-col=high]').textContent = fmt(s.high);
+      const sell = (s.levels && s.levels.sell) || {};
+      const buy  = (s.levels && s.levels.buy)  || {};
+      for (const lvl of SELL_LVLS) {
+        paintCell(tr.querySelector('[data-col=' + lvl + ']'), lvl, sell[lvl], ltp);
+      }
+      for (const lvl of BUY_LVLS) {
+        paintCell(tr.querySelector('[data-col=' + lvl + ']'), lvl, buy[lvl], ltp);
+      }
+    }
+    refreshOpenPositions(data);
+  } catch (e) {
+    document.getElementById("livedot").className = "stale";
+    document.getElementById("livedot").textContent = "● Offline";
+  }
+}
+
+function tickClock() {
+  const now = new Date();
+  const ist = new Date(now.getTime() + (now.getTimezoneOffset() + 330) * 60000);
+  const hh = String(ist.getHours()).padStart(2,'0');
+  const mm = String(ist.getMinutes()).padStart(2,'0');
+  const ss = String(ist.getSeconds()).padStart(2,'0');
+  document.getElementById("clock").textContent = hh+":"+mm+":"+ss + " IST";
+}
+
+// ---- Order ticket ----
+let _ticketSide = "B";
+let _ticketSymbol = "";
+let _availMargin = null;
+
+function fmtRs(n) {
+  if (n === null || n === undefined || !isFinite(n)) return "-";
+  return "₹" + Number(n).toLocaleString("en-IN", {minimumFractionDigits: 2, maximumFractionDigits: 2});
+}
+
+function getRowLtp(symbol) {
+  const tr = document.querySelector('tr[data-symbol="' + symbol + '"]');
+  if (!tr) return null;
+  const t = tr.querySelector('[data-col=ltp]').textContent;
+  const n = parseFloat(t);
+  return isFinite(n) ? n : null;
+}
+
+function recalcTotal() {
+  const qty = parseInt(document.getElementById('mQty').value, 10) || 0;
+  const ltp = getRowLtp(_ticketSymbol) || 0;
+  document.getElementById('mEntryPx').textContent = ltp ? ltp.toFixed(2) : '-';
+  document.getElementById('mTotal').textContent = fmtRs(qty * ltp);
+}
+
+function openTicket(symbol, side) {
+  _ticketSymbol = symbol;
+  _ticketSide = side;
+  document.getElementById('mSym').textContent = symbol;
+  const pill = document.getElementById('mPill');
+  pill.textContent = side === 'B' ? 'BUY' : 'SELL';
+  pill.className = 'pill pill-' + side;
+  const conf = document.getElementById('mConfirm');
+  conf.textContent = side === 'B' ? 'Confirm BUY' : 'Confirm SELL';
+  conf.className = 'btn-confirm ' + side;
+  conf.disabled = false;
+  const ltp = getRowLtp(symbol);
+  document.getElementById('mLtp').textContent = ltp !== null ? ltp.toFixed(2) : '-';
+  document.getElementById('mQty').value = 1;
+  document.getElementById('mMsg').className = 'modal-msg';
+  document.getElementById('mMsg').textContent = '';
+  document.getElementById('modalBg').classList.add('show');
+  recalcTotal();
+}
+
+function closeTicket() {
+  document.getElementById('modalBg').classList.remove('show');
+}
+
+async function submitTicket() {
+  const qty  = document.getElementById('mQty').value;
+  const conf = document.getElementById('mConfirm');
+  const msg  = document.getElementById('mMsg');
+  conf.disabled = true;
+  conf.textContent = 'Placing...';
+  msg.className = 'modal-msg';
+  msg.textContent = '';
+  try {
+    const r = await fetch('/api/paper-open', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        symbol: _ticketSymbol, side: _ticketSide, qty: qty,
+      })
+    });
+    const d = await r.json();
+    if (r.ok && d.ok) {
+      msg.className = 'modal-msg ok';
+      msg.textContent = '✓ Paper ' + (_ticketSide === 'B' ? 'BUY' : 'SELL')
+                     + ' opened @ ₹' + d.trade.entry_price;
+      conf.textContent = 'Done';
+      refresh();
+      setTimeout(closeTicket, 1500);
+    } else {
+      msg.className = 'modal-msg err';
+      msg.textContent = '✗ ' + (d.error || 'Failed');
+      conf.disabled = false;
+      conf.textContent = _ticketSide === 'B' ? 'Confirm BUY' : 'Confirm SELL';
+    }
+  } catch(e) {
+    msg.className = 'modal-msg err';
+    msg.textContent = '✗ Network error: ' + e.message;
+    conf.disabled = false;
+    conf.textContent = _ticketSide === 'B' ? 'Confirm BUY' : 'Confirm SELL';
+  }
+}
+
+document.addEventListener('input', (e) => {
+  if (e.target && e.target.id === 'mQty') recalcTotal();
+});
+document.getElementById('modalBg').addEventListener('click', (e) => {
+  if (e.target.id === 'modalBg') closeTicket();
+});
+
+// ---- Open positions ----
+async function refreshOpenPositions(quotes) {
+  let tradesResp;
+  try {
+    tradesResp = await (await fetch('/api/paper-trades')).json();
+  } catch(e) { return; }
+  const open = (tradesResp.trades || []).filter(t => t.status === 'OPEN');
+  const bar = document.getElementById('openPosBar');
+  const rows = document.getElementById('openPosRows');
+  if (open.length === 0) { bar.style.display = 'none'; rows.innerHTML = ''; return; }
+  bar.style.display = '';
+  const ltpBySym = {};
+  for (const s of (quotes && quotes.scrips) || []) ltpBySym[s.symbol] = s.ltp;
+  const out = [];
+  out.push('<div class="open-pos-row" style="font-weight:600;color:#6b7280;">'
+         + '<div>Scrip</div><div>Side</div><div>Qty</div>'
+         + '<div>Entry</div><div>LTP</div><div>Live P&L</div>'
+         + '<div>Reached</div><div></div></div>');
+  for (const t of open) {
+    const ltp = ltpBySym[t.scrip];
+    let pnl = null;
+    if (ltp !== null && ltp !== undefined) {
+      pnl = t.order_type === 'BUY'
+        ? (ltp - t.entry_price) * t.qty
+        : (t.entry_price - ltp) * t.qty;
+    }
+    const pnlClass = pnl === null ? '' : (pnl >= 0 ? 'pnl-pos' : 'pnl-neg');
+    const pnlStr = pnl === null ? '-' : (pnl >= 0 ? '+' : '') + pnl.toFixed(2);
+    out.push('<div class="open-pos-row">'
+           + '<div class="scr">' + t.scrip + '</div>'
+           + '<div><span class="pill-sm ' + t.order_type + '">' + t.order_type + '</span></div>'
+           + '<div>' + t.qty + '</div>'
+           + '<div>₹' + t.entry_price.toFixed(2) + '</div>'
+           + '<div>' + (ltp !== null && ltp !== undefined ? '₹' + ltp.toFixed(2) : '-') + '</div>'
+           + '<div class="' + pnlClass + '">' + pnlStr + '</div>'
+           + '<div>' + (t.target_level_reached || '-') + '</div>'
+           + '<div><button class="btn-close" onclick="closeTrade(\\'' + t.id + '\\')">Close</button></div>'
+           + '</div>');
+  }
+  rows.innerHTML = out.join('');
+}
+
+async function closeTrade(id) {
+  if (!confirm('Close this paper trade at current LTP?')) return;
+  try {
+    const r = await fetch('/api/paper-close', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({id: id, reason: 'MANUAL'})
+    });
+    const d = await r.json();
+    if (!(r.ok && d.ok)) alert('Failed: ' + (d.error || 'unknown'));
+    refresh();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+setInterval(tickClock, 1000); tickClock();
+setInterval(refresh, 2500); refresh();
+</script>
+</body>
+</html>

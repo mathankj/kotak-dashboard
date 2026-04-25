@@ -158,3 +158,14 @@ def test_next_paper_id_empty_and_increment():
     assert next_paper_id([{"id": "5"}, {"id": "3"}]) == "6"
     # Garbled IDs are skipped
     assert next_paper_id([{"id": "abc"}, {"id": "2"}]) == "3"
+
+
+def test_login_free_pages_render():
+    """Pages that don't require Kotak login should render via the file-system
+    templates moved out of app.py — proves frontend/templates/ resolves."""
+    import app
+    client = app.app.test_client()
+    for url in ["/history", "/orderlog", "/gann", "/options"]:
+        r = client.get(url)
+        assert r.status_code == 200, f"{url} -> {r.status_code}"
+        assert len(r.data) > 100, f"{url} returned only {len(r.data)} bytes"

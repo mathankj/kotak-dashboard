@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Order Log - Kotak Neo</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif;
+         background: #f5f6f8; color: #1f2937; margin: 0; padding: 16px; }
+  header { display: flex; justify-content: space-between; align-items: center;
+           background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+           padding: 12px 16px; margin-bottom: 12px; }
+  .title { font-weight: 700; font-size: 18px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tabs a { padding: 6px 12px; background: #fff; color: #6b7280;
+            text-decoration: none; border-radius: 6px; font-size: 13px;
+            border: 1px solid #e5e7eb; }
+  .tabs a.active { background: #2563eb; color: white; border-color: #2563eb; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+          padding: 12px; overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; padding: 8px; background: #f9fafb;
+       color: #6b7280; font-weight: 600; font-size: 11px;
+       text-transform: uppercase; border-bottom: 1px solid #e5e7eb; }
+  td { padding: 8px; border-bottom: 1px solid #f3f4f6; }
+  .placed { color: #166534; font-weight: 600; }
+  .rejected { color: #991b1b; font-weight: 600; }
+  .side-B { color: #166534; font-weight: 700; }
+  .side-S { color: #991b1b; font-weight: 700; }
+  .empty { color: #9ca3af; padding: 20px; text-align: center; }
+  .dlbtn { padding: 6px 12px; background: #2563eb; color: #fff; border: none;
+           border-radius: 6px; cursor: pointer; font-size: 13px;
+           text-decoration: none; }
+</style>
+</head>
+<body>
+<header>
+  <div><span class="title">Order Log</span></div>
+  <a class="dlbtn" href="/orderlog.csv">Download CSV</a>
+</header>
+
+<div class="tabs">
+  {% for t in tabs %}
+    <a href="{{ t.url }}" class="{% if t.key == active %}active{% endif %}">{{ t.label }}</a>
+  {% endfor %}
+</div>
+
+<div class="card">
+{% if orders and orders|length > 0 %}
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th>
+        <th>Type</th><th>Price</th><th>Product</th><th>Validity</th>
+        <th>Status</th><th>Kotak Order ID</th><th>Message</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for o in orders %}
+      <tr>
+        <td>{{ o.timestamp }}</td>
+        <td>{{ o.symbol }}</td>
+        <td class="side-{{ o.side }}">{{ o.side }}</td>
+        <td>{{ o.qty }}</td>
+        <td>{{ o.order_type }}</td>
+        <td>{{ o.price }}</td>
+        <td>{{ o.product }}</td>
+        <td>{{ o.validity }}</td>
+        <td class="{% if o.status == 'PLACED' %}placed{% else %}rejected{% endif %}">{{ o.status }}</td>
+        <td>{{ o.kotak_order_id or '-' }}</td>
+        <td>{{ o.message }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <div class="empty">No orders placed yet.</div>
+{% endif %}
+</div>
+</body>
+</html>

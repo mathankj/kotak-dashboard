@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Options - Kotak Neo</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif;
+         background: #f5f6f8; color: #1f2937; margin: 0; padding: 16px; }
+  header { display: flex; justify-content: space-between; align-items: center;
+           background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+           padding: 12px 16px; margin-bottom: 12px; }
+  .title { font-weight: 700; font-size: 18px; }
+  .live { color: #16a34a; font-size: 12px; margin-left: 8px; }
+  .stale { color: #dc2626; font-size: 12px; margin-left: 8px; }
+  .clock { font-family: monospace; background: #f3f4f6; padding: 6px 10px;
+           border-radius: 6px; font-size: 14px; }
+  .ucc { background: #f3f4f6; padding: 6px 10px; border-radius: 6px;
+         font-size: 13px; color: #374151; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tabs a { padding: 6px 12px; background: #fff; color: #6b7280;
+            text-decoration: none; border-radius: 6px; font-size: 13px;
+            border: 1px solid #e5e7eb; }
+  .tabs a.active { background: #2563eb; color: white; border-color: #2563eb; }
+  .idx-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+  .idx-tabs button { padding: 8px 16px; background: #fff; color: #374151;
+                     border: 1px solid #e5e7eb; border-radius: 6px;
+                     cursor: pointer; font-size: 13px; font-weight: 600; }
+  .idx-tabs button.active { background: #1f2937; color: #fff;
+                            border-color: #1f2937; }
+  .meta-bar { display: flex; gap: 18px; padding: 12px 16px; background: #fff;
+              border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 8px;
+              font-size: 13px; flex-wrap: wrap; align-items: center; }
+  .meta-bar .m { display: flex; gap: 6px; align-items: baseline; }
+  .meta-bar .k { color: #6b7280; font-size: 11px; text-transform: uppercase; }
+  .meta-bar .v { font-weight: 700; font-family: monospace; font-size: 14px; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+          overflow-x: auto; }
+  table.chain { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.chain th { text-align: center; padding: 10px 8px; background: #f9fafb;
+       color: #6b7280; font-weight: 600; font-size: 11px;
+       text-transform: uppercase; border-bottom: 1px solid #e5e7eb; }
+  table.chain th.ce-grp { background: #065f46; color: #fff; }
+  table.chain th.pe-grp { background: #991b1b; color: #fff; }
+  table.chain th.strike-col { background: #1f2937; color: #fff; }
+  table.chain td { padding: 10px 8px; border-bottom: 1px solid #f3f4f6;
+       color: #1f2937; text-align: center;
+       font-variant-numeric: tabular-nums; }
+  table.chain td.strike { font-weight: 700; background: #f3f4f6;
+                          font-family: monospace; font-size: 14px; }
+  table.chain td.ltp-ce, table.chain td.ltp-pe {
+       font-weight: 700; font-size: 14px; }
+  table.chain td.ltp-ce { background: #d1fae5; color: #065f46; }
+  table.chain td.ltp-pe { background: #fee2e2; color: #991b1b; }
+  table.chain tr.atm td { background: #fffbeb !important; }
+  table.chain tr.atm td.strike { background: #f59e0b !important; color: #fff; }
+  table.chain td.chg-pos { color: #16a34a; font-weight: 600; }
+  table.chain td.chg-neg { color: #dc2626; font-weight: 600; }
+  .err { background: #fee2e2; color: #991b1b; padding: 8px 12px;
+         border-radius: 6px; font-size: 12px; margin-bottom: 10px;
+         display: none; }
+  .err.show { display: block; }
+  .hint { color: #6b7280; font-size: 11px; padding: 10px 16px; }
+  .loading { padding: 60px; text-align: center; color: #6b7280; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <span class="title">Options Chain</span>
+    <span id="live" class="live">● live</span>
+  </div>
+  <div style="display:flex;gap:10px;align-items:center;">
+    <span class="clock" id="clock">00:00:00 IST</span>
+    {% if ucc %}<span class="ucc">UCC: {{ ucc }}</span>{% endif %}
+  </div>
+</header>
+
+<div class="tabs">
+  {% for t in tabs %}
+    <a href="{{ t.url }}" class="{{ 'active' if t.key == active else '' }}">{{ t.label }}</a>
+  {% endfor %}
+</div>
+
+<div class="idx-tabs" id="idxTabs">
+  {% for i in indices %}
+    <button data-idx="{{ i.key }}" class="{{ 'active' if loop.first else '' }}">{{ i.label }}</button>
+  {% endfor %}
+</div>
+
+<div class="err" id="err"></div>
+
+<div class="meta-bar" id="metaBar">
+  <div class="m"><span class="k">Spot</span><span class="v" id="mSpot">-</span></div>
+  <div class="m"><span class="k">ATM</span><span class="v" id="mAtm">-</span></div>
+  <div class="m"><span class="k">Expiry</span><span class="v" id="mExpiry">-</span></div>
+</div>
+
+<div class="card">
+  <table class="chain" id="chainTable">
+    <thead>
+      <tr>
+        <th class="ce-grp" colspan="2">CALL (CE)</th>
+        <th class="strike-col" rowspan="2">Strike</th>
+        <th class="pe-grp" colspan="2">PUT (PE)</th>
+      </tr>
+      <tr>
+        <th>LTP</th><th>Chg %</th>
+        <th>LTP</th><th>Chg %</th>
+      </tr>
+    </thead>
+    <tbody id="chainBody">
+      <tr><td colspan="5" class="loading">Loading option chain…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="hint" id="hint">Select an index above. Auto-refreshes every 3s.</div>
+
+<div style="margin-top:24px;">
+  <h3 style="margin:0 0 8px 0; font-size:15px;">Auto Option Trades (paper) — today</h3>
+  <div style="font-size:12px; color:#666; margin-bottom:8px;">
+    Strategy auto-buys ATM CE when index spot crosses Gann BUY level up, or ATM PE when spot crosses SELL level down. Exits at T1/S1 target or opposite-level SL. Squares off at 15:15.
+  </div>
+  <table style="width:100%; border-collapse:collapse; font-size:13px;">
+    <thead>
+      <tr style="background:#f5f5f5; text-align:left;">
+        <th style="padding:6px;">Time</th>
+        <th style="padding:6px;">Underlying</th>
+        <th style="padding:6px;">Contract</th>
+        <th style="padding:6px;">Trigger</th>
+        <th style="padding:6px; text-align:right;">Entry</th>
+        <th style="padding:6px; text-align:right;">Current / Exit</th>
+        <th style="padding:6px; text-align:right;">P&amp;L pts</th>
+        <th style="padding:6px;">Status</th>
+      </tr>
+    </thead>
+    <tbody id="tradesBody">
+      <tr><td colspan="8" style="padding:12px; text-align:center; color:#888;">Monitoring index spot crossings…</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script>
+let currentIdx = "{{ indices[0].key if indices else '' }}";
+let lastData = null;
+
+document.getElementById('idxTabs').addEventListener('click', (e) => {
+  if (e.target.tagName !== 'BUTTON') return;
+  const idx = e.target.dataset.idx;
+  document.querySelectorAll('#idxTabs button').forEach(b =>
+    b.classList.toggle('active', b.dataset.idx === idx));
+  currentIdx = idx;
+  render(lastData);
+});
+
+function fmt(n, dp) {
+  if (n === null || n === undefined || isNaN(n)) return '-';
+  return Number(n).toFixed(dp === undefined ? 2 : dp);
+}
+function fmtChg(c) {
+  if (c === null || c === undefined) return {text: '-', cls: ''};
+  const sign = c >= 0 ? '+' : '';
+  return {text: sign + c.toFixed(2) + '%', cls: c >= 0 ? 'chg-pos' : 'chg-neg'};
+}
+
+function render(d) {
+  if (!d) return;
+  const body = document.getElementById('chainBody');
+  if (d.loading) {
+    body.innerHTML = '<tr><td colspan="5" class="loading">Warming option universe (first load ~60-90s on cold start)…</td></tr>';
+    return;
+  }
+  const chain = d.chains && d.chains[currentIdx];
+  if (!chain) { body.innerHTML = '<tr><td colspan="5" class="loading">No data</td></tr>'; return; }
+  document.getElementById('mSpot').textContent = fmt(chain.spot);
+  document.getElementById('mAtm').textContent = chain.atm ?? '-';
+  document.getElementById('mExpiry').textContent = chain.expiry || '-';
+  if (chain.error) {
+    document.getElementById('err').textContent = currentIdx + ': ' + chain.error;
+    document.getElementById('err').classList.add('show');
+  } else {
+    document.getElementById('err').classList.remove('show');
+  }
+  const rows = chain.rows || [];
+  if (rows.length === 0) {
+    body.innerHTML = '<tr><td colspan="5" class="loading">Resolving option chain (first load may take 5-10s)…</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(r => {
+    const ce = r.ce || {};
+    const pe = r.pe || {};
+    const ceChg = fmtChg(ce.change_pct);
+    const peChg = fmtChg(pe.change_pct);
+    return `<tr class="${r.is_atm ? 'atm' : ''}">
+      <td class="ltp-ce">${fmt(ce.ltp)}</td>
+      <td class="${ceChg.cls}">${ceChg.text}</td>
+      <td class="strike">${r.strike}</td>
+      <td class="ltp-pe">${fmt(pe.ltp)}</td>
+      <td class="${peChg.cls}">${peChg.text}</td>
+    </tr>`;
+  }).join('');
+  renderTrades(d.option_trades || []);
+}
+
+function renderTrades(trades) {
+  const tb = document.getElementById('tradesBody');
+  if (!tb) return;
+  if (!trades.length) {
+    tb.innerHTML = '<tr><td colspan="8" style="padding:12px; text-align:center; color:#888;">Monitoring index spot crossings…</td></tr>';
+    return;
+  }
+  tb.innerHTML = trades.map(t => {
+    const isOpen = t.status === 'OPEN';
+    const cur = isOpen ? (t.live_ltp ?? '-') : (t.exit_price ?? '-');
+    const pnl = isOpen ? (t.live_pnl_points ?? 0) : (t.pnl_points ?? 0);
+    const pnlCls = pnl > 0 ? 'chg-pos' : (pnl < 0 ? 'chg-neg' : '');
+    const reason = isOpen ? '—' : (t.exit_reason || '');
+    const contract = `${t.strike} ${t.option_type}`;
+    const statusHtml = isOpen
+      ? '<span style="color:#1976d2; font-weight:600;">OPEN</span>'
+      : `<span style="color:#666;">CLOSED</span> <span style="font-size:11px; color:#888;">(${reason})</span>`;
+    return `<tr>
+      <td style="padding:6px;">${t.entry_time}${!isOpen && t.exit_time ? ' → ' + t.exit_time : ''}</td>
+      <td style="padding:6px;">${t.underlying}</td>
+      <td style="padding:6px;">${contract}</td>
+      <td style="padding:6px; font-size:11px; color:#666;">${t.trigger_level || ''} @ ${fmt(t.trigger_spot)}</td>
+      <td style="padding:6px; text-align:right;">${fmt(t.entry_price)}</td>
+      <td style="padding:6px; text-align:right;">${fmt(cur)}</td>
+      <td style="padding:6px; text-align:right;" class="${pnlCls}">${fmt(pnl)}</td>
+      <td style="padding:6px;">${statusHtml}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function refresh() {
+  const live = document.getElementById('live');
+  try {
+    const r = await fetch('/api/option-prices');
+    const d = await r.json();
+    lastData = d;
+    if (d.error) {
+      live.textContent = '● stale'; live.className = 'stale';
+    } else {
+      live.textContent = '● live'; live.className = 'live';
+    }
+    render(d);
+  } catch(e) {
+    live.textContent = '● stale'; live.className = 'stale';
+  }
+}
+function tickClock() {
+  const now = new Date();
+  const ist = new Date(now.getTime() + (now.getTimezoneOffset() + 330) * 60000);
+  document.getElementById('clock').textContent =
+    ist.toTimeString().slice(0, 8) + ' IST';
+}
+setInterval(tickClock, 1000); tickClock();
+setInterval(refresh, 3000); refresh();
+</script>
+</body>
+</html>

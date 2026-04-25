@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Kotak Neo Dashboard</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'Segoe UI', sans-serif;
+    background: #0f1419; color: #d4d4d8; margin: 0; padding: 20px;
+  }
+  header {
+    display: flex; justify-content: space-between; align-items: center;
+    border-bottom: 2px solid #27272a; padding-bottom: 12px; margin-bottom: 20px;
+  }
+  h1 { margin: 0; color: #fafafa; font-size: 24px; }
+  .status { font-size: 12px; color: #71717a; }
+  .status .ok { color: #4ade80; }
+  .status .err { color: #f87171; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tabs a {
+    padding: 8px 16px; background: #18181b; color: #a1a1aa;
+    text-decoration: none; border-radius: 6px; font-size: 14px;
+    border: 1px solid #27272a;
+  }
+  .tabs a.active { background: #2563eb; color: white; border-color: #2563eb; }
+  .tabs a:hover:not(.active) { background: #27272a; color: #fafafa; }
+  .refresh {
+    padding: 8px 16px; background: #16a34a; color: white; border: none;
+    border-radius: 6px; cursor: pointer; font-size: 14px; margin-left: auto;
+  }
+  .refresh:hover { background: #15803d; }
+  .card {
+    background: #18181b; border: 1px solid #27272a;
+    border-radius: 8px; padding: 20px; overflow-x: auto;
+  }
+  h2 { margin-top: 0; color: #fafafa; font-size: 18px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    text-align: left; padding: 10px 12px; background: #27272a;
+    color: #a1a1aa; font-weight: 600; font-size: 11px;
+    text-transform: uppercase; letter-spacing: 0.5px;
+    border-bottom: 1px solid #3f3f46;
+  }
+  td {
+    padding: 10px 12px; border-bottom: 1px solid #27272a;
+    color: #d4d4d8;
+  }
+  tr:hover td { background: #1f1f23; }
+  .empty { color: #71717a; font-style: italic; padding: 20px 0; }
+  .error {
+    background: #450a0a; border: 1px solid #7f1d1d; color: #fca5a5;
+    padding: 12px; border-radius: 6px; font-family: monospace; font-size: 12px;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pos { color: #4ade80; }
+  .neg { color: #f87171; }
+  .banner {
+    padding: 14px 18px; border-radius: 8px; margin-bottom: 16px;
+    font-size: 14px; display: flex; align-items: center; gap: 12px;
+  }
+  .banner.ok { background: #052e16; border: 1px solid #166534; color: #86efac; }
+  .banner.bad { background: #450a0a; border: 1px solid #7f1d1d; color: #fca5a5; }
+  .banner .big { font-size: 16px; font-weight: 600; }
+  .badge-ok { color: #4ade80; font-weight: 600; }
+  .badge-bad { color: #f87171; font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Kotak Neo Dashboard</h1>
+    <div class="status">
+      {% if greeting %}Welcome, <span class="ok">{{ greeting }}</span> |{% endif %}
+      {% if login_time %}Logged in at {{ login_time }}{% endif %}
+      {% if error %}<span class="err">Login error: {{ error }}</span>{% endif %}
+    </div>
+  </div>
+  <form method="post" action="/refresh" style="margin:0">
+    <button class="refresh" type="submit">Refresh Login</button>
+  </form>
+</header>
+
+<div class="tabs">
+  {% for t in tabs %}
+    <a href="{{ t.url }}" class="{% if t.key == active %}active{% endif %}">{{ t.label }}</a>
+  {% endfor %}
+</div>
+
+{% if login_time %}
+  <div class="banner ok">
+    <div class="big">Auto-login successful</div>
+    <div>Logged in at <strong>{{ login_time }}</strong> as <strong>{{ greeting }}</strong> — session active</div>
+  </div>
+{% elif error %}
+  <div class="banner bad">
+    <div class="big">Login failed</div>
+    <div>{{ error }}</div>
+  </div>
+{% endif %}
+
+<div class="card">
+  <h2>{{ heading }}</h2>
+  {% if view_error %}
+    <div class="error">{{ view_error }}</div>
+  {% elif rows and rows|length > 0 %}
+    <table>
+      <thead>
+        <tr>{% for c in cols %}<th>{{ c }}</th>{% endfor %}</tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+          <tr>{% for c in cols %}<td>{{ r.get(c, '') }}</td>{% endfor %}</tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="empty">No records found.</div>
+  {% endif %}
+</div>
+
+</body>
+</html>
