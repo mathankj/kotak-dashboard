@@ -17,6 +17,7 @@ from datetime import datetime, timezone, timedelta
 from flask import Flask, render_template_string, jsonify, redirect, url_for, request, Response
 from dotenv import load_dotenv
 from neo_api_client import NeoAPI
+from quote_feed import QuoteFeed
 
 load_dotenv()
 
@@ -184,6 +185,74 @@ def gann_levels(open_price):
 _quote_cache = {"data": {}, "ts": 0, "error": None}
 QUOTE_TTL = 2.0  # seconds
 
+# ---- WebSocket QuoteFeed (Phase 1 of Super Duper Engine) ----
+# REST polling stays as fallback; WS overlays fresher LTP when available.
+_feed = QuoteFeed(client_provider=ensure_client)
+_feed_started = {"flag": False, "lock": threading.Lock()}
+WS_FRESH_SECONDS = 5.0   # WS tick considered fresh if newer than this
+
+
+def _ensure_feed_started():
+    """Start the WS feed once; safe to call from any request thread."""
+    if _feed_started["flag"]:
+        return
+    with _feed_started["lock"]:
+        if _feed_started["flag"]:
+            return
+        # Subscribe to all SCRIPS at startup. Indices vs equities split by
+        # exchange segment + symbol shape: index tokens are non-numeric.
+        idx_subs, scrip_subs = [], []
+        for s in SCRIPS:
+            entry = {"instrument_token": s["token"],
+                     "exchange_segment": s["exchange"]}
+            if s.get("tradeable"):
+                scrip_subs.append(entry)
+            else:
+                idx_subs.append(entry)
+        _feed.set_index_subs(idx_subs)
+        _feed.set_scrip_subs(scrip_subs)
+        _feed.start()
+        _feed_started["flag"] = True
+        print(f"[quote_feed] started: {len(idx_subs)} indices, "
+              f"{len(scrip_subs)} scrips")
+
+
+def _ws_overlay(out_dict, key_to_token_exch):
+    """Overlay WS LTP onto out_dict in place.
+    Rules:
+      - WS LTP fresher than WS_FRESH_SECONDS → always wins over REST
+      - WS LTP stale but REST returned None → still use WS (better than nothing,
+        e.g., off-hours snapshot)
+      - WS LTP stale and REST has its own value → keep REST
+    `ws_age` field is added for diagnostics.
+    Returns count of overlays applied."""
+    overlaid = 0
+    now = time.time()
+    for key, (exch, token) in key_to_token_exch.items():
+        tick = _feed.get(exch, token)
+        if not tick or tick.get("ltp") is None:
+            continue
+        age = now - tick.get("ts", 0)
+        rec = out_dict.get(key)
+        if not rec:
+            continue
+        rest_ltp = rec.get("ltp")
+        is_fresh = age <= WS_FRESH_SECONDS
+        if is_fresh or rest_ltp is None:
+            rec["ltp"] = tick["ltp"]
+            rec["ws_age"] = round(age, 2)
+            # Backfill OHLC if REST didn't have it (off-hours, etc.)
+            # Treat 0.0 as missing — Kotak sometimes returns 0 for closed mkt.
+            for src, dst in (("op","open"), ("lo","low"), ("h","high")):
+                if (rec.get(dst) in (None, 0, 0.0)
+                        and tick.get(src) is not None):
+                    rec[dst] = tick[src]
+            # Recompute Gann levels if we just filled in 'open'
+            if rec.get("open") and not rec.get("levels", {}).get("buy"):
+                rec["levels"] = gann_levels(rec["open"])
+            overlaid += 1
+    return overlaid
+
 
 def _extract_ohlc(quote_obj):
     """Pull (ltp, open, low, high) from a Kotak quote response item.
@@ -279,6 +348,13 @@ def fetch_quotes(force=False):
             "high": high,
             "levels": gann_levels(op) if op else {"sell": {}, "buy": {}},
         }
+
+    # Overlay fresh WS LTPs (Phase 1 — WebSocket QuoteFeed)
+    try:
+        _ensure_feed_started()
+        _ws_overlay(out, {s["symbol"]: (s["exchange"], s["token"]) for s in SCRIPS})
+    except Exception as e:
+        print(f"[quote_feed] overlay (stocks) failed: {type(e).__name__}: {e}")
 
     _quote_cache["data"] = out
     _quote_cache["ts"] = now
@@ -536,6 +612,18 @@ def fetch_option_quotes(force=False):
             "close": close,
             "change_pct": change_pct,
         }
+    # Overlay fresh WS LTPs and refresh option subs if ATM drifted
+    try:
+        _ensure_feed_started()
+        # Update option subscription set so the WS streams the active ATM±N strikes
+        opt_subs = [{"instrument_token": i["token"],
+                     "exchange_segment": i["exchange"]} for i in insts]
+        if _feed.set_option_subs(opt_subs):
+            print(f"[quote_feed] option subs updated: {len(opt_subs)} contracts")
+        _ws_overlay(out, {i["key"]: (i["exchange"], i["token"]) for i in insts})
+    except Exception as e:
+        print(f"[quote_feed] overlay (options) failed: {type(e).__name__}: {e}")
+
     _option_quote_cache["data"] = out
     _option_quote_cache["ts"] = now
     _option_quote_cache["meta"] = idx_meta
@@ -2222,6 +2310,17 @@ def gann_view():
     )
 
 
+@app.route("/api/feed-status")
+def feed_status_api():
+    """WebSocket QuoteFeed diagnostics."""
+    return jsonify({
+        "started": _feed_started["flag"],
+        **_feed.status(),
+        "fresh_threshold_seconds": WS_FRESH_SECONDS,
+        "ts": now_ist().strftime("%H:%M:%S IST"),
+    })
+
+
 @app.route("/api/gann-prices")
 def gann_prices_api():
     data, err = fetch_quotes()
@@ -2352,6 +2451,70 @@ def option_prices_api():
         "option_trades": option_trades,
         "ts": now_ist().strftime("%H:%M:%S IST"),
     })
+
+
+@app.route("/api/option-demo-seed", methods=["POST", "GET"])
+def option_demo_seed_api():
+    """Seed one paper trade per index at current LTP so the auto-trade panel
+    has visible entries. For demo use only. Once open, the existing exit
+    logic (T1/S1/opposite-SL/15:15 square-off) manages them automatically."""
+    data, meta, err = fetch_option_quotes()
+    if err:
+        return jsonify({"ok": False, "error": err}), 500
+    now = now_ist()
+    gann_quotes, _ = fetch_quotes()
+    created = []
+    with _option_auto_state["lock"]:
+        trades = read_paper_trades()
+        open_by_underlying = {
+            t["underlying"]: t for t in trades
+            if t.get("status") == "OPEN" and t.get("asset_type") == "option"
+        }
+        for idx_name, m in meta.items():
+            if idx_name in open_by_underlying:
+                continue  # already has an open trade
+            spot = m.get("spot"); atm = m.get("atm")
+            if spot is None or atm is None:
+                continue
+            # Choose CE or PE based on whether spot is above/below today's open
+            gann_sym = INDEX_OPTIONS_CONFIG[idx_name]["spot_symbol_key"]
+            op = (gann_quotes.get(gann_sym) or {}).get("open")
+            option_type = "CE" if (op and spot >= op) else "PE"
+            opt_key = f"{idx_name} {atm} {option_type}"
+            opt_q = data.get(opt_key)
+            if not opt_q or opt_q.get("ltp") is None:
+                continue
+            opt_ltp = float(opt_q["ltp"])
+            t = {
+                "id": _next_paper_id(trades),
+                "date": now.strftime("%Y-%m-%d"),
+                "scrip": opt_key,
+                "option_key": opt_key,
+                "asset_type": "option",
+                "underlying": idx_name,
+                "strike": atm,
+                "option_type": option_type,
+                "expiry": m.get("expiry"),
+                "order_type": "BUY",
+                "entry_time": now.strftime("%H:%M:%S"),
+                "entry_ts": now.timestamp(),
+                "entry_price": round(opt_ltp, 2),
+                "qty": 1,
+                "trigger_spot": round(float(spot), 2),
+                "trigger_level": "DEMO_SEED",
+                "max_min_target_price": round(opt_ltp, 2),
+                "target_level_reached": None,
+                "exit_time": None, "exit_ts": None, "exit_price": None,
+                "exit_reason": None, "pnl_points": None, "pnl_pct": None,
+                "duration_seconds": None,
+                "status": "OPEN",
+                "auto": True,
+            }
+            trades.insert(0, t)
+            created.append(opt_key)
+        if created:
+            write_paper_trades(trades)
+    return jsonify({"ok": True, "created": created})
 
 
 # ---------- Paper trading routes ----------
