@@ -1,11 +1,13 @@
 .env
 .env.txt
 *.png
+*.xlsx
+*.pyc
 __pycache__/
 *.log
 login_history.log
 login_history.json
 orders_log.json
 paper_trades.json
-
+.pytest_cache/
 .gstack/

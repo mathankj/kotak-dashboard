@@ -1,0 +1,127 @@
+"""Kotak Neo client lifecycle: login (TOTP), session caching, safe_call wrapper.
+
+Module-level _state holds the live NeoAPI client. ensure_client() is the single
+entry point — it logs in on first call and reuses the cached client thereafter.
+
+Login attempts are recorded in login_history.json (newest first, last 30 kept)
+so the /history page can show what happened. History I/O is intentionally
+co-located here (not in storage/) because it's strictly about login lifecycle.
+"""
+import json
+import os
+
+import pyotp
+from dotenv import load_dotenv
+from neo_api_client import NeoAPI
+
+from backend.utils import now_ist
+
+load_dotenv()
+
+# Live session state — mutated by ensure_client() and /refresh route.
+_state = {"client": None, "login_time": None, "greeting": None, "error": None}
+
+HISTORY_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "login_history.json",
+)
+
+
+def append_history(status, detail):
+    """Append a login attempt to the history file (JSON list, newest first, max 30)."""
+    entry = {
+        "timestamp": now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
+        "status": status,  # "success" or "failed"
+        "detail": detail,
+    }
+    try:
+        existing = []
+        if os.path.exists(HISTORY_FILE):
+            with open(HISTORY_FILE, "r") as f:
+                existing = json.load(f)
+        existing.insert(0, entry)
+        existing = existing[:30]
+        with open(HISTORY_FILE, "w") as f:
+            json.dump(existing, f, indent=2)
+    except Exception:
+        pass  # never let history I/O break login
+
+
+def read_history():
+    try:
+        if os.path.exists(HISTORY_FILE):
+            with open(HISTORY_FILE, "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return []
+
+
+def login():
+    """Fresh login using TOTP. Returns (client, greeting) or raises."""
+    client = NeoAPI(
+        environment="prod",
+        access_token=None,
+        neo_fin_key=None,
+        consumer_key=os.getenv("KOTAK_CONSUMER_KEY"),
+    )
+    totp_code = pyotp.TOTP(os.getenv("KOTAK_TOTP_SECRET")).now()
+    login_resp = client.totp_login(
+        mobile_number=os.getenv("KOTAK_MOBILE"),
+        ucc=os.getenv("KOTAK_UCC"),
+        totp=totp_code,
+    )
+    if "error" in login_resp:
+        raise RuntimeError(f"totp_login failed: {login_resp['error']}")
+
+    validate_resp = client.totp_validate(mpin=os.getenv("KOTAK_MPIN"))
+    if "error" in validate_resp:
+        raise RuntimeError(f"totp_validate failed: {validate_resp['error']}")
+
+    greeting = validate_resp.get("data", {}).get("greetingName", "Trader")
+    return client, greeting
+
+
+def ensure_client():
+    """Return the cached NeoAPI client; log in on first call."""
+    if _state["client"] is None:
+        try:
+            client, greeting = login()
+            _state["client"] = client
+            _state["greeting"] = greeting
+            _state["login_time"] = now_ist()
+            _state["error"] = None
+            append_history("success", f"Logged in as {greeting}")
+        except Exception as e:
+            _state["error"] = str(e)
+            _state["client"] = None
+            append_history("failed", str(e))
+            raise
+    return _state["client"]
+
+
+def safe_call(fn, *args, **kwargs):
+    """Call a Kotak SDK method with try/catch. Returns (data, error_str).
+
+    Treats 'no data found' style responses as empty (data=[], error=None) rather
+    than errors, since the SDK uses that pattern for empty result sets.
+    """
+    try:
+        resp = fn(*args, **kwargs)
+        if isinstance(resp, dict) and "error" in resp:
+            err = resp["error"]
+            err_list = err if isinstance(err, list) else [err]
+            empty_markers = [
+                "no holdings found", "no positions", "no orders",
+                "no trades", "no data", "not found",
+            ]
+            for e in err_list:
+                msg = (e.get("message") if isinstance(e, dict) else str(e)).lower()
+                if any(m in msg for m in empty_markers):
+                    return [], None
+            return None, str(err)
+        if isinstance(resp, dict) and "data" in resp:
+            return resp["data"], None
+        return resp, None
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"

@@ -12,139 +12,22 @@ import math
 import time
 import threading
 import traceback
-import pyotp
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 from flask import Flask, render_template_string, jsonify, redirect, url_for, request, Response
-from dotenv import load_dotenv
-from neo_api_client import NeoAPI
-from quote_feed import QuoteFeed
 
-load_dotenv()
+from backend.utils import IST, now_ist
+from backend.kotak.client import (
+    _state, login, ensure_client, safe_call,
+    append_history, read_history, HISTORY_FILE,
+)
+from backend.kotak.instruments import (
+    SCRIPS, find_scrip,
+    INDEX_OPTIONS_CONFIG, _option_universe,
+    _fetch_index_fo_universe, _parse_item_strike, _parse_item_expiry_date,
+)
+from backend.kotak.quote_feed import QuoteFeed
 
 app = Flask(__name__)
-_state = {"client": None, "login_time": None, "greeting": None, "error": None}
-
-IST = timezone(timedelta(hours=5, minutes=30))
-
-
-def now_ist():
-    return datetime.now(IST)
-
-HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "login_history.json")
-
-
-def append_history(status, detail):
-    """Append a login attempt to the history file (JSONL)."""
-    entry = {
-        "timestamp": now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
-        "status": status,  # "success" or "failed"
-        "detail": detail,
-    }
-    try:
-        existing = []
-        if os.path.exists(HISTORY_FILE):
-            with open(HISTORY_FILE, "r") as f:
-                existing = json.load(f)
-        existing.insert(0, entry)  # newest first
-        existing = existing[:30]   # keep last 30
-        with open(HISTORY_FILE, "w") as f:
-            json.dump(existing, f, indent=2)
-    except Exception:
-        pass  # don't let history errors break login
-
-
-def read_history():
-    try:
-        if os.path.exists(HISTORY_FILE):
-            with open(HISTORY_FILE, "r") as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return []
-
-
-def login():
-    """Fresh login using TOTP. Returns NeoAPI client or raises."""
-    client = NeoAPI(
-        environment="prod",
-        access_token=None,
-        neo_fin_key=None,
-        consumer_key=os.getenv("KOTAK_CONSUMER_KEY"),
-    )
-    totp_code = pyotp.TOTP(os.getenv("KOTAK_TOTP_SECRET")).now()
-    login_resp = client.totp_login(
-        mobile_number=os.getenv("KOTAK_MOBILE"),
-        ucc=os.getenv("KOTAK_UCC"),
-        totp=totp_code,
-    )
-    if "error" in login_resp:
-        raise RuntimeError(f"totp_login failed: {login_resp['error']}")
-
-    validate_resp = client.totp_validate(mpin=os.getenv("KOTAK_MPIN"))
-    if "error" in validate_resp:
-        raise RuntimeError(f"totp_validate failed: {validate_resp['error']}")
-
-    greeting = validate_resp.get("data", {}).get("greetingName", "Trader")
-    return client, greeting
-
-
-def ensure_client():
-    """Login if not already logged in, or return existing client."""
-    if _state["client"] is None:
-        try:
-            client, greeting = login()
-            _state["client"] = client
-            _state["greeting"] = greeting
-            _state["login_time"] = now_ist()
-            _state["error"] = None
-            append_history("success", f"Logged in as {greeting}")
-        except Exception as e:
-            _state["error"] = str(e)
-            _state["client"] = None
-            append_history("failed", str(e))
-            raise
-    return _state["client"]
-
-
-def safe_call(fn, *args, **kwargs):
-    """Call API method with try/catch. Returns (data, error_str).
-    Treats 'no data found' responses as empty, not errors."""
-    try:
-        resp = fn(*args, **kwargs)
-        if isinstance(resp, dict) and "error" in resp:
-            err = resp["error"]
-            # Normalise to list of dicts
-            err_list = err if isinstance(err, list) else [err]
-            # 'No <X> found' messages are empty state, not errors
-            empty_markers = ["no holdings found", "no positions", "no orders",
-                             "no trades", "no data", "not found"]
-            for e in err_list:
-                msg = (e.get("message") if isinstance(e, dict) else str(e)).lower()
-                if any(m in msg for m in empty_markers):
-                    return [], None  # empty result, no error
-            return None, str(err)
-        # SDK wraps success payload under "data"
-        if isinstance(resp, dict) and "data" in resp:
-            return resp["data"], None
-        return resp, None
-    except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
-
-
-# ---------- Gann Trader: scrips, levels, quote cache ----------
-SCRIPS = [
-    # Indices: not tradeable as cash; buy/sell buttons hidden
-    {"symbol": "NIFTY 50",  "token": "Nifty 50",   "exchange": "nse_cm", "trading_symbol": None,           "tradeable": False, "lot": 1},
-    {"symbol": "BANKNIFTY", "token": "Nifty Bank", "exchange": "nse_cm", "trading_symbol": None,           "tradeable": False, "lot": 1},
-    {"symbol": "SENSEX",    "token": "SENSEX",     "exchange": "bse_cm", "trading_symbol": None,           "tradeable": False, "lot": 1},
-    # Equities: tradeable. trading_symbol is what Kotak place_order needs.
-    {"symbol": "RELIANCE",  "token": "2885",       "exchange": "nse_cm", "trading_symbol": "RELIANCE-EQ",  "tradeable": True,  "lot": 1},
-    {"symbol": "TCS",       "token": "11536",      "exchange": "nse_cm", "trading_symbol": "TCS-EQ",       "tradeable": True,  "lot": 1},
-    {"symbol": "INFOSYS",   "token": "1594",       "exchange": "nse_cm", "trading_symbol": "INFY-EQ",      "tradeable": True,  "lot": 1},
-    {"symbol": "HDFCBANK",  "token": "1333",       "exchange": "nse_cm", "trading_symbol": "HDFCBANK-EQ",  "tradeable": True,  "lot": 1},
-    {"symbol": "ICICIBANK", "token": "4963",       "exchange": "nse_cm", "trading_symbol": "ICICIBANK-EQ", "tradeable": True,  "lot": 1},
-    {"symbol": "SBIN",      "token": "3045",       "exchange": "nse_cm", "trading_symbol": "SBIN-EQ",      "tradeable": True,  "lot": 1},
-]
 
 # Gann Square of 9 step = 22.5° in sqrt-space
 GANN_STEP = 0.0625
@@ -343,85 +226,8 @@ def fetch_quotes(force=False):
 
 
 # ---------- Options (F&O) ----------
-# Index option chains. Each index renders an ATM ± window chain (CE+Strike+PE)
-# and resolves the nearest future expiry dynamically via search_scrip.
-INDEX_OPTIONS_CONFIG = {
-    "NIFTY": {
-        "label": "NIFTY 50",
-        "spot_symbol_key": "NIFTY 50",       # key in SCRIPS / fetch_quotes out
-        "exchange_segment": "nse_fo",
-        "strike_step": 50,
-        "atm_window": 5,                     # ± strikes (11 total incl ATM)
-    },
-    "BANKNIFTY": {
-        "label": "BANK NIFTY",
-        "spot_symbol_key": "BANKNIFTY",
-        "exchange_segment": "nse_fo",
-        "strike_step": 100,
-        "atm_window": 5,
-    },
-    "SENSEX": {
-        "label": "SENSEX",
-        "spot_symbol_key": "SENSEX",
-        "exchange_segment": "bse_fo",
-        "strike_step": 100,
-        "atm_window": 5,
-    },
-}
-
-# Per-day cache of F&O universe per index (list of all option contract records)
-_option_universe = {"date": None, "by_index": {}, "error": None}
 # TTL cache of live quotes
 _option_quote_cache = {"ts": 0.0, "data": {}, "error": None, "meta": {}}
-
-
-def _fetch_index_fo_universe(index_name):
-    """Returns (items, err) of all OPTIDX records for an index, cached per day."""
-    cfg = INDEX_OPTIONS_CONFIG[index_name]
-    today = now_ist().strftime("%Y-%m-%d")
-    if (_option_universe["date"] == today
-            and index_name in _option_universe["by_index"]):
-        return _option_universe["by_index"][index_name], None
-    try:
-        client = ensure_client()
-    except Exception as e:
-        return [], f"login: {e}"
-    try:
-        r = client.search_scrip(
-            exchange_segment=cfg["exchange_segment"],
-            symbol=index_name,
-        )
-    except Exception as e:
-        return [], f"search_scrip {index_name}: {type(e).__name__}: {e}"
-    # NSE uses pInstType="OPTIDX", BSE uses "IO" — accept both
-    items = [
-        x for x in (r or []) if isinstance(x, dict)
-        and str(x.get("pSymbolName", "")).strip().upper() == index_name.upper()
-        and str(x.get("pInstType", "")).strip().upper() in ("OPTIDX", "IO")
-    ]
-    if _option_universe["date"] != today:
-        _option_universe["date"] = today
-        _option_universe["by_index"] = {}
-    _option_universe["by_index"][index_name] = items
-    return items, None
-
-
-def _parse_item_strike(item):
-    """dStrikePrice; field is scaled x100 and has a trailing semicolon in key."""
-    raw = item.get("dStrikePrice;", item.get("dStrikePrice"))
-    try:
-        return int(round(float(raw) / 100.0))
-    except (TypeError, ValueError):
-        return None
-
-
-def _parse_item_expiry_date(item):
-    """Returns a date object parsed from pExpiryDate (e.g. '28Apr2026'), or None."""
-    s = str(item.get("pExpiryDate", "")).strip()
-    try:
-        return datetime.strptime(s, "%d%b%Y").date()
-    except (ValueError, TypeError):
-        return None
 
 
 def build_option_chain(index_name):
@@ -638,13 +444,6 @@ def read_orders():
     except Exception:
         pass
     return []
-
-
-def find_scrip(symbol):
-    for s in SCRIPS:
-        if s["symbol"] == symbol:
-            return s
-    return None
 
 
 # ---------- Paper trading storage ----------
