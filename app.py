@@ -254,26 +254,6 @@ def _ws_overlay(out_dict, key_to_token_exch):
     return overlaid
 
 
-def _extract_ohlc(quote_obj):
-    """Pull (ltp, open, low, high) from a Kotak quote response item.
-    Tolerant of various key shapes the SDK might return."""
-    if not isinstance(quote_obj, dict):
-        return None, None, None, None
-    def pick(*keys):
-        for k in keys:
-            if k in quote_obj and quote_obj[k] not in (None, "", "0"):
-                try:
-                    return float(quote_obj[k])
-                except (ValueError, TypeError):
-                    pass
-        return None
-    ltp  = pick("ltp", "last_traded_price", "lastPrice", "lp")
-    op   = pick("open", "openPrice", "op", "o")
-    low  = pick("low", "lowPrice", "lo", "l")
-    high = pick("high", "highPrice", "hp", "h")
-    return ltp, op, low, high
-
-
 def fetch_quotes(force=False):
     """Fetch quotes for all SCRIPS via Kotak. Returns dict {symbol: {...}}.
     Uses TTL cache."""
@@ -2451,70 +2431,6 @@ def option_prices_api():
         "option_trades": option_trades,
         "ts": now_ist().strftime("%H:%M:%S IST"),
     })
-
-
-@app.route("/api/option-demo-seed", methods=["POST", "GET"])
-def option_demo_seed_api():
-    """Seed one paper trade per index at current LTP so the auto-trade panel
-    has visible entries. For demo use only. Once open, the existing exit
-    logic (T1/S1/opposite-SL/15:15 square-off) manages them automatically."""
-    data, meta, err = fetch_option_quotes()
-    if err:
-        return jsonify({"ok": False, "error": err}), 500
-    now = now_ist()
-    gann_quotes, _ = fetch_quotes()
-    created = []
-    with _option_auto_state["lock"]:
-        trades = read_paper_trades()
-        open_by_underlying = {
-            t["underlying"]: t for t in trades
-            if t.get("status") == "OPEN" and t.get("asset_type") == "option"
-        }
-        for idx_name, m in meta.items():
-            if idx_name in open_by_underlying:
-                continue  # already has an open trade
-            spot = m.get("spot"); atm = m.get("atm")
-            if spot is None or atm is None:
-                continue
-            # Choose CE or PE based on whether spot is above/below today's open
-            gann_sym = INDEX_OPTIONS_CONFIG[idx_name]["spot_symbol_key"]
-            op = (gann_quotes.get(gann_sym) or {}).get("open")
-            option_type = "CE" if (op and spot >= op) else "PE"
-            opt_key = f"{idx_name} {atm} {option_type}"
-            opt_q = data.get(opt_key)
-            if not opt_q or opt_q.get("ltp") is None:
-                continue
-            opt_ltp = float(opt_q["ltp"])
-            t = {
-                "id": _next_paper_id(trades),
-                "date": now.strftime("%Y-%m-%d"),
-                "scrip": opt_key,
-                "option_key": opt_key,
-                "asset_type": "option",
-                "underlying": idx_name,
-                "strike": atm,
-                "option_type": option_type,
-                "expiry": m.get("expiry"),
-                "order_type": "BUY",
-                "entry_time": now.strftime("%H:%M:%S"),
-                "entry_ts": now.timestamp(),
-                "entry_price": round(opt_ltp, 2),
-                "qty": 1,
-                "trigger_spot": round(float(spot), 2),
-                "trigger_level": "DEMO_SEED",
-                "max_min_target_price": round(opt_ltp, 2),
-                "target_level_reached": None,
-                "exit_time": None, "exit_ts": None, "exit_price": None,
-                "exit_reason": None, "pnl_points": None, "pnl_pct": None,
-                "duration_seconds": None,
-                "status": "OPEN",
-                "auto": True,
-            }
-            trades.insert(0, t)
-            created.append(opt_key)
-        if created:
-            write_paper_trades(trades)
-    return jsonify({"ok": True, "created": created})
 
 
 # ---------- Paper trading routes ----------

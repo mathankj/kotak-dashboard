@@ -157,12 +157,14 @@ fewer REST calls per UI interaction.
 
 Confirmed dead via grep. Safe to delete in Phase 1.
 
-| Symbol | Location | Why dead |
-|--------|----------|----------|
-| `_extract_ohlc()` | app.py:257 | Defined, zero call sites |
-| `_quote_cache` + `QUOTE_TTL` | app.py:184-185 | Replaced by WS feed cache; no readers remain after Phase 1 cleanup |
-| `quote_feed._record_error` "_reconnects" counter | quote_feed.py:64 | Never incremented (SDK does its own reconnects) |
-| `auto_login.py` print-only smoke script | root | Keep — standalone debugging tool, not imported by app |
+| Symbol | Location | Status |
+|--------|----------|--------|
+| `_extract_ohlc()` | app.py:257 | DELETED in Phase 1 — confirmed dead |
+| `option_demo_seed_api` (`/api/option-demo-seed`) | app.py:2456 | DELETED in Phase 1 — no JS callers |
+| `_quote_cache` + `QUOTE_TTL` | app.py:184-185 | **NOT dead** — KEEP. Re-grep showed `fetch_quotes` reads/writes both, and `fetch_option_quotes` reads `QUOTE_TTL` for its own `_option_quote_cache`. Original plan was wrong. |
+| `quote_feed._reconnects` counter | quote_feed.py:64 | Never incremented. Cosmetic, deferred. |
+| `auto_login.py` print-only smoke script | root | KEEP — standalone debugging tool |
+| `render.yaml`, `fly.toml`, `Dockerfile`, `.dockerignore` | root | DELETED in Phase 1 — going Contabo |
 
 **To verify before deleting** (Phase 1, Step 1):
 ```bash
