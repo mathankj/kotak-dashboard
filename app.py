@@ -8,7 +8,6 @@ Open: http://localhost:5000
 """
 import os
 import json
-import math
 import time
 import threading
 import traceback
@@ -26,42 +25,25 @@ from backend.kotak.instruments import (
     _fetch_index_fo_universe, _parse_item_strike, _parse_item_expiry_date,
 )
 from backend.kotak.quote_feed import QuoteFeed
+from backend.storage.trades import (
+    PAPER_FILE, read_paper_trades, write_paper_trades, next_paper_id,
+)
+from backend.storage.orders import ORDERS_FILE, append_order, read_orders
+from backend.strategy.gann import (
+    GANN_STEP, SELL_LEVELS, BUY_LEVELS, LEVEL_COLORS,
+    BUY_LEVEL_ORDER, SELL_LEVEL_ORDER,
+    gann_levels, nearest_gann_level, compute_target_level_reached,
+)
+from backend.strategy.stocks import (
+    AUTO_STRATEGY_ENABLED, AUTO_HOURS_START, AUTO_HOURS_END,
+    AUTO_MAX_TRADES_PER_SCRIP, AUTO_QTY,
+    _auto_state, auto_strategy_tick, update_open_trades_mfe,
+)
+from backend.strategy.options import (
+    AUTO_OPTION_STRATEGY_ENABLED, _option_auto_state, option_auto_strategy_tick,
+)
 
 app = Flask(__name__)
-
-# Gann Square of 9 step = 22.5° in sqrt-space
-GANN_STEP = 0.0625
-
-SELL_LEVELS = ["S3", "S2", "S1", "SELL_WA", "SELL"]   # n = -5..-1
-BUY_LEVELS  = ["BUY", "BUY_WA", "T1", "T2", "T3"]      # n = +1..+5
-
-LEVEL_COLORS = {
-    "S3": "#B71C1C", "S2": "#C62828", "S1": "#D32F2F",
-    "SELL_WA": "#FF9800", "SELL": "#EF9A9A",
-    "BUY": "#A5D6A7", "BUY_WA": "#FF9800",
-    "T1": "#81C784", "T2": "#66BB6A", "T3": "#388E3C",
-}
-
-
-def gann_levels(open_price):
-    """Compute Gann Square of 9 levels from the opening price.
-    Returns dict {sell: {S3..SELL}, buy: {BUY..T3}}.
-    Sell levels are 5..1 steps below open, buy levels are 1..5 steps above."""
-    if not open_price or open_price <= 0:
-        return {"sell": {k: None for k in SELL_LEVELS},
-                "buy":  {k: None for k in BUY_LEVELS}}
-    sq = math.sqrt(open_price)
-    sell = {}
-    for i, name in enumerate(SELL_LEVELS):
-        # S3=-6, S2=-5, S1=-4, SELL_WA=-3, SELL=-2 (matches Square-of-9 reference)
-        n = -(6 - i)
-        sell[name] = round((sq + n * GANN_STEP) ** 2, 2)
-    buy = {}
-    for i, name in enumerate(BUY_LEVELS):
-        # BUY=+2, BUY_WA=+3, T1=+4, T2=+5, T3=+6
-        n = i + 2
-        buy[name] = round((sq + n * GANN_STEP) ** 2, 2)
-    return {"sell": sell, "buy": buy}
 
 
 # ---- quote cache (refresh on demand, TTL 2 sec) ----
@@ -417,161 +399,6 @@ def fetch_option_quotes(force=False):
     return out, idx_meta, last_err
 
 
-# ---------- Order placement + audit log ----------
-ORDERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "orders_log.json")
-
-
-def append_order(entry):
-    """Append an order attempt to orders_log.json. Newest first, keep last 200."""
-    try:
-        existing = []
-        if os.path.exists(ORDERS_FILE):
-            with open(ORDERS_FILE, "r") as f:
-                existing = json.load(f)
-        existing.insert(0, entry)
-        existing = existing[:200]
-        with open(ORDERS_FILE, "w") as f:
-            json.dump(existing, f, indent=2)
-    except Exception:
-        pass
-
-
-def read_orders():
-    try:
-        if os.path.exists(ORDERS_FILE):
-            with open(ORDERS_FILE, "r") as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return []
-
-
-# ---------- Paper trading storage ----------
-PAPER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paper_trades.json")
-
-
-def read_paper_trades():
-    try:
-        if os.path.exists(PAPER_FILE):
-            with open(PAPER_FILE, "r") as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return []
-
-
-def write_paper_trades(trades):
-    try:
-        with open(PAPER_FILE, "w") as f:
-            json.dump(trades, f, indent=2)
-    except Exception:
-        pass
-
-
-def _next_paper_id(trades):
-    mx = 0
-    for t in trades:
-        try:
-            n = int(t.get("id", "0"))
-            if n > mx:
-                mx = n
-        except (TypeError, ValueError):
-            pass
-    return str(mx + 1)
-
-
-def nearest_gann_level(symbol_data):
-    """Return (level_name, distance_pct) of the gann level nearest to current LTP.
-    Used for LTP box coloring. symbol_data = {ltp, levels: {sell: {...}, buy: {...}}}."""
-    ltp = symbol_data.get("ltp")
-    if not ltp:
-        return None, None
-    levels = symbol_data.get("levels") or {}
-    all_levels = {}
-    for k, v in (levels.get("sell") or {}).items():
-        if v is not None:
-            all_levels[k] = v
-    for k, v in (levels.get("buy") or {}).items():
-        if v is not None:
-            all_levels[k] = v
-    if not all_levels:
-        return None, None
-    best, best_dist = None, None
-    for name, px in all_levels.items():
-        d = abs(ltp - px) / ltp
-        if best_dist is None or d < best_dist:
-            best_dist = d
-            best = name
-    return best, best_dist
-
-
-# Ordering used when figuring out "how far in favour did the trade go"
-BUY_LEVEL_ORDER  = ["BUY", "BUY_WA", "T1", "T2", "T3"]
-SELL_LEVEL_ORDER = ["SELL", "SELL_WA", "S1", "S2", "S3"]
-
-
-def compute_target_level_reached(side, entry_price, max_min_price, levels):
-    """Given the best price reached since entry, determine the deepest
-    gann level touched in favour of the position.
-    side: 'B' or 'S'; levels: {sell:{}, buy:{}}."""
-    buy = (levels or {}).get("buy") or {}
-    sell = (levels or {}).get("sell") or {}
-    if side == "B":
-        # For BUY: price goes UP. Find highest level whose price <= max_min_price.
-        reached = None
-        for name in BUY_LEVEL_ORDER:
-            px = buy.get(name)
-            if px is not None and max_min_price >= px:
-                reached = name
-        # Beyond T3
-        t3 = buy.get("T3")
-        if t3 is not None and max_min_price > t3:
-            reached = "Beyond T3"
-        return reached
-    else:  # SELL: price goes DOWN
-        reached = None
-        for name in SELL_LEVEL_ORDER:
-            px = sell.get(name)
-            if px is not None and max_min_price <= px:
-                reached = name
-        s3 = sell.get("S3")
-        if s3 is not None and max_min_price < s3:
-            reached = "Beyond S3"
-        return reached
-
-
-def update_open_trades_mfe(quotes_by_symbol):
-    """Called each time quotes refresh. For every OPEN trade, update
-    max_min_target_price and target_level_reached based on the current LTP."""
-    trades = read_paper_trades()
-    changed = False
-    for t in trades:
-        if t.get("status") != "OPEN":
-            continue
-        q = quotes_by_symbol.get(t["scrip"])
-        if not q:
-            continue
-        ltp = q.get("ltp")
-        if ltp is None:
-            continue
-        prev_mfe = t.get("max_min_target_price")
-        if t["order_type"] == "BUY":
-            new_mfe = ltp if prev_mfe is None else max(prev_mfe, ltp)
-        else:
-            new_mfe = ltp if prev_mfe is None else min(prev_mfe, ltp)
-        if new_mfe != prev_mfe:
-            t["max_min_target_price"] = round(new_mfe, 2)
-            changed = True
-        side = "B" if t["order_type"] == "BUY" else "S"
-        reached = compute_target_level_reached(
-            side, t["entry_price"], new_mfe, q.get("levels"))
-        if reached and reached != t.get("target_level_reached"):
-            t["target_level_reached"] = reached
-            changed = True
-    if changed:
-        write_paper_trades(trades)
-
-
 def compute_stats(trades):
     active = sum(1 for t in trades if t.get("status") == "OPEN")
     closed = sum(1 for t in trades if t.get("status") == "CLOSED")
@@ -592,324 +419,6 @@ def fmt_duration(seconds):
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
-
-
-# ---------- Auto-strategy engine (paper trading only) ----------
-# Rules (v1):
-#   Hours:        09:15 - 15:15 IST (square off all OPEN at 15:15)
-#   Entry BUY:    LTP crosses above BUY level (from <=BUY to >BUY)
-#   Entry SELL:   LTP crosses below SELL level (from >=SELL to <SELL)
-#   Target BUY:   exit when LTP >= T1
-#   Target SELL:  exit when LTP <= S1
-#   SL BUY:       exit when LTP < SELL level
-#   SL SELL:      exit when LTP > BUY level
-#   Qty:          AUTO_QTY per trade
-#   Max/scrip/day: AUTO_MAX_TRADES_PER_SCRIP
-#   Side effect:  writes to paper_trades.json only (no Kotak order)
-
-AUTO_STRATEGY_ENABLED = True
-AUTO_HOURS_START = (9, 15)
-AUTO_HOURS_END   = (15, 15)
-AUTO_MAX_TRADES_PER_SCRIP = 2
-AUTO_QTY = 1
-
-_auto_state = {
-    "last_ltp": {},  # symbol -> last LTP seen (to detect crossings)
-    "lock": threading.Lock(),
-}
-
-
-def _auto_in_hours(now):
-    if now.weekday() >= 5:
-        return False
-    hm = (now.hour, now.minute)
-    return AUTO_HOURS_START <= hm < AUTO_HOURS_END
-
-
-def _auto_at_or_after_squareoff(now):
-    if now.weekday() >= 5:
-        return False  # weekends: don't force square-off, just idle
-    return (now.hour, now.minute) >= AUTO_HOURS_END
-
-
-def _auto_close(trade, ltp, now, reason):
-    trade["exit_time"] = now.strftime("%H:%M:%S")
-    trade["exit_ts"]   = now.timestamp()
-    trade["exit_price"] = round(ltp, 2)
-    trade["exit_reason"] = reason
-    if trade["order_type"] == "BUY":
-        pnl = ltp - trade["entry_price"]
-    else:
-        pnl = trade["entry_price"] - ltp
-    trade["pnl_points"] = round(pnl, 2)
-    trade["pnl_pct"]    = round((pnl / trade["entry_price"]) * 100, 2) if trade["entry_price"] else 0.0
-    trade["duration_seconds"] = round(now.timestamp() - trade.get("entry_ts", now.timestamp()), 1)
-    trade["status"] = "CLOSED"
-
-
-def _auto_open(sym, side, qty, ltp, now, trades):
-    t = {
-        "id": _next_paper_id(trades),
-        "date": now.strftime("%Y-%m-%d"),
-        "scrip": sym,
-        "order_type": "BUY" if side == "B" else "SELL",
-        "entry_time": now.strftime("%H:%M:%S"),
-        "entry_ts": now.timestamp(),
-        "entry_price": round(ltp, 2),
-        "qty": qty,
-        "max_min_target_price": round(ltp, 2),
-        "target_level_reached": None,
-        "exit_time": None, "exit_ts": None, "exit_price": None,
-        "exit_reason": None, "pnl_points": None, "pnl_pct": None,
-        "duration_seconds": None,
-        "status": "OPEN",
-        "auto": True,
-    }
-    trades.insert(0, t)
-
-
-def _auto_check_entry(q, prev_ltp, cur_ltp):
-    """Return 'B' or 'S' on a level crossing, else None."""
-    levels = q.get("levels") or {}
-    buy_px  = (levels.get("buy")  or {}).get("BUY")
-    sell_px = (levels.get("sell") or {}).get("SELL")
-    if buy_px is not None and prev_ltp <= buy_px < cur_ltp:
-        return "B"
-    if sell_px is not None and prev_ltp >= sell_px > cur_ltp:
-        return "S"
-    return None
-
-
-def _auto_check_exit(trade, q, ltp):
-    """Return exit reason string if exit conditions met, else None."""
-    levels = q.get("levels") or {}
-    buy    = levels.get("buy")  or {}
-    sell   = levels.get("sell") or {}
-    if trade["order_type"] == "BUY":
-        t1 = buy.get("T1")
-        sl = sell.get("SELL")
-        if t1 is not None and ltp >= t1:
-            return "TARGET_T1"
-        if sl is not None and ltp < sl:
-            return "SL_SELL_LVL"
-    else:
-        s1 = sell.get("S1")
-        sl = buy.get("BUY")
-        if s1 is not None and ltp <= s1:
-            return "TARGET_S1"
-        if sl is not None and ltp > sl:
-            return "SL_BUY_LVL"
-    return None
-
-
-def auto_strategy_tick(quotes):
-    """One tick of the paper auto-strategy. Called after each fetch_quotes."""
-    if not AUTO_STRATEGY_ENABLED or not quotes:
-        return
-    now = now_ist()
-    with _auto_state["lock"]:
-        trades = read_paper_trades()
-        modified = False
-
-        # 1. Square off at/after 15:15
-        if _auto_at_or_after_squareoff(now):
-            for t in trades:
-                if t.get("status") != "OPEN":
-                    continue
-                q = quotes.get(t["scrip"])
-                if not q or q.get("ltp") is None:
-                    continue
-                _auto_close(t, float(q["ltp"]), now, "AUTO_SQUARE_OFF")
-                modified = True
-            if modified:
-                write_paper_trades(trades)
-            return
-
-        # 2. Only run during market hours
-        if not _auto_in_hours(now):
-            return
-
-        today = now.strftime("%Y-%m-%d")
-        counts = {}
-        for t in trades:
-            if t.get("date") == today:
-                counts[t["scrip"]] = counts.get(t["scrip"], 0) + 1
-        open_by_sym = {t["scrip"]: t for t in trades if t.get("status") == "OPEN"}
-
-        for scrip in SCRIPS:
-            if not scrip.get("tradeable"):
-                continue
-            sym = scrip["symbol"]
-            q = quotes.get(sym)
-            if not q or q.get("ltp") is None:
-                continue
-            ltp = float(q["ltp"])
-            prev = _auto_state["last_ltp"].get(sym)
-
-            # Exit check first
-            open_t = open_by_sym.get(sym)
-            if open_t:
-                reason = _auto_check_exit(open_t, q, ltp)
-                if reason:
-                    _auto_close(open_t, ltp, now, reason)
-                    modified = True
-                    open_by_sym.pop(sym, None)
-                    _auto_state["last_ltp"][sym] = ltp
-                    continue  # wait next tick before re-entering
-
-            # Entry check
-            if sym not in open_by_sym and counts.get(sym, 0) < AUTO_MAX_TRADES_PER_SCRIP:
-                if prev is not None:
-                    side = _auto_check_entry(q, prev, ltp)
-                    if side:
-                        _auto_open(sym, side, AUTO_QTY, ltp, now, trades)
-                        modified = True
-                        counts[sym] = counts.get(sym, 0) + 1
-
-            _auto_state["last_ltp"][sym] = ltp
-
-        if modified:
-            write_paper_trades(trades)
-
-
-# ---------- Option auto-strategy (paper) ----------
-# Same Gann-level crossing concept as stock strategy, applied to index options:
-#   - Index spot crosses BUY level UP    -> paper BUY 1 lot ATM CE
-#   - Index spot crosses SELL level DOWN -> paper BUY 1 lot ATM PE
-# Exits:
-#   - CE: spot >= T1 (target) OR spot < SELL level (SL) OR 15:15 square-off
-#   - PE: spot <= S1 (target) OR spot > BUY level  (SL) OR 15:15 square-off
-# Entry price / exit price = option LTP at that moment (paper).
-AUTO_OPTION_STRATEGY_ENABLED = True
-
-_option_auto_state = {
-    "last_spot": {},  # index_name -> last seen spot
-    "lock": threading.Lock(),
-}
-
-
-def option_auto_strategy_tick(option_data, option_index_meta):
-    """Called after each /api/option-prices fetch.
-    option_data: {key: {index, strike, option_type, ltp, ...}}
-    option_index_meta: {index_name: {spot, atm, expiry, ...}}"""
-    if not AUTO_OPTION_STRATEGY_ENABLED or not option_index_meta:
-        return
-    now = now_ist()
-    gann_quotes, _ = fetch_quotes()
-
-    with _option_auto_state["lock"]:
-        trades = read_paper_trades()
-        modified = False
-
-        # 1. Square off option positions at/after 15:15
-        if _auto_at_or_after_squareoff(now):
-            for t in trades:
-                if t.get("status") != "OPEN" or t.get("asset_type") != "option":
-                    continue
-                q = option_data.get(t.get("option_key"))
-                if not q or q.get("ltp") is None:
-                    continue
-                _auto_close(t, float(q["ltp"]), now, "AUTO_SQUARE_OFF")
-                modified = True
-            if modified:
-                write_paper_trades(trades)
-            return
-
-        if not _auto_in_hours(now):
-            return
-
-        today = now.strftime("%Y-%m-%d")
-        counts = {}
-        for t in trades:
-            if t.get("date") == today and t.get("asset_type") == "option":
-                u = t.get("underlying", "")
-                counts[u] = counts.get(u, 0) + 1
-        open_by_underlying = {
-            t["underlying"]: t for t in trades
-            if t.get("status") == "OPEN" and t.get("asset_type") == "option"
-        }
-
-        for idx_name, m in option_index_meta.items():
-            spot = m.get("spot")
-            atm  = m.get("atm")
-            if spot is None or atm is None:
-                continue
-            gann_sym = INDEX_OPTIONS_CONFIG[idx_name]["spot_symbol_key"]
-            gq = gann_quotes.get(gann_sym) or {}
-            levels  = gq.get("levels") or {}
-            buy_lvl = (levels.get("buy")  or {}).get("BUY")
-            sell_lvl= (levels.get("sell") or {}).get("SELL")
-            t1_lvl  = (levels.get("buy")  or {}).get("T1")
-            s1_lvl  = (levels.get("sell") or {}).get("S1")
-            prev_spot = _option_auto_state["last_spot"].get(idx_name)
-
-            # Exit open position (based on spot level hits)
-            open_t = open_by_underlying.get(idx_name)
-            if open_t:
-                opt_q = option_data.get(open_t.get("option_key"))
-                opt_ltp = (opt_q or {}).get("ltp")
-                reason = None
-                if open_t.get("option_type") == "CE":
-                    if t1_lvl is not None and spot >= t1_lvl:     reason = "TARGET_T1"
-                    elif sell_lvl is not None and spot < sell_lvl: reason = "SL_SELL_LVL"
-                else:  # PE
-                    if s1_lvl is not None and spot <= s1_lvl:     reason = "TARGET_S1"
-                    elif buy_lvl is not None and spot > buy_lvl:  reason = "SL_BUY_LVL"
-                if reason and opt_ltp is not None:
-                    _auto_close(open_t, float(opt_ltp), now, reason)
-                    modified = True
-                    open_by_underlying.pop(idx_name, None)
-                    _option_auto_state["last_spot"][idx_name] = spot
-                    continue
-
-            # Entry check — spot crossing
-            if (idx_name not in open_by_underlying
-                    and counts.get(idx_name, 0) < AUTO_MAX_TRADES_PER_SCRIP
-                    and prev_spot is not None):
-                option_type = None
-                if buy_lvl is not None and prev_spot <= buy_lvl < spot:
-                    option_type = "CE"
-                elif sell_lvl is not None and prev_spot >= sell_lvl > spot:
-                    option_type = "PE"
-
-                if option_type:
-                    opt_key = f"{idx_name} {atm} {option_type}"
-                    opt_q = option_data.get(opt_key)
-                    opt_ltp = (opt_q or {}).get("ltp")
-                    if opt_ltp is not None:
-                        t = {
-                            "id": _next_paper_id(trades),
-                            "date": now.strftime("%Y-%m-%d"),
-                            "scrip": opt_key,
-                            "option_key": opt_key,
-                            "asset_type": "option",
-                            "underlying": idx_name,
-                            "strike": atm,
-                            "option_type": option_type,
-                            "expiry": m.get("expiry"),
-                            "order_type": "BUY",
-                            "entry_time": now.strftime("%H:%M:%S"),
-                            "entry_ts": now.timestamp(),
-                            "entry_price": round(float(opt_ltp), 2),
-                            "qty": 1,
-                            "trigger_spot": round(float(spot), 2),
-                            "trigger_level": "BUY" if option_type == "CE" else "SELL",
-                            "max_min_target_price": round(float(opt_ltp), 2),
-                            "target_level_reached": None,
-                            "exit_time": None, "exit_ts": None, "exit_price": None,
-                            "exit_reason": None, "pnl_points": None, "pnl_pct": None,
-                            "duration_seconds": None,
-                            "status": "OPEN",
-                            "auto": True,
-                        }
-                        trades.insert(0, t)
-                        modified = True
-                        counts[idx_name] = counts.get(idx_name, 0) + 1
-
-            _option_auto_state["last_spot"][idx_name] = spot
-
-        if modified:
-            write_paper_trades(trades)
 
 
 # ---------- HTML template (single-file, dark theme) ----------
@@ -2187,9 +1696,11 @@ def option_prices_api():
             "ts": now_ist().strftime("%H:%M:%S IST"),
         })
     data, meta, err = fetch_option_quotes()
-    # Run paper auto-strategy on each tick
+    # Run paper auto-strategy on each tick. Pass gann_quotes so the strategy
+    # module doesn't need to import fetch_quotes (would be a circular import).
     try:
-        option_auto_strategy_tick(data, meta)
+        gann_quotes, _ = fetch_quotes()
+        option_auto_strategy_tick(data, meta, gann_quotes)
     except Exception as e:
         print(f"[option_auto] tick failed: {type(e).__name__}: {e}")
     # Group by index: chains[index] = {spot, atm, expiry, rows:[{strike, ce:{...}, pe:{...}, is_atm}]}
@@ -2277,7 +1788,7 @@ def paper_open_api():
     now = now_ist()
     trades = read_paper_trades()
     trade = {
-        "id": _next_paper_id(trades),
+        "id": next_paper_id(trades),
         "date": now.strftime("%Y-%m-%d"),
         "scrip": symbol,
         "order_type": "BUY" if side == "B" else "SELL",

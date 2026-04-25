@@ -3,11 +3,8 @@
 Module-level _state holds the live NeoAPI client. ensure_client() is the single
 entry point — it logs in on first call and reuses the cached client thereafter.
 
-Login attempts are recorded in login_history.json (newest first, last 30 kept)
-so the /history page can show what happened. History I/O is intentionally
-co-located here (not in storage/) because it's strictly about login lifecycle.
+Login attempts are recorded in login_history.json via backend.storage.history.
 """
-import json
 import os
 
 import pyotp
@@ -15,47 +12,13 @@ from dotenv import load_dotenv
 from neo_api_client import NeoAPI
 
 from backend.kotak.api import call_with_retry, CircuitOpenError
+from backend.storage.history import append_history, read_history, HISTORY_FILE
 from backend.utils import now_ist
 
 load_dotenv()
 
 # Live session state — mutated by ensure_client() and /refresh route.
 _state = {"client": None, "login_time": None, "greeting": None, "error": None}
-
-HISTORY_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "login_history.json",
-)
-
-
-def append_history(status, detail):
-    """Append a login attempt to the history file (JSON list, newest first, max 30)."""
-    entry = {
-        "timestamp": now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
-        "status": status,  # "success" or "failed"
-        "detail": detail,
-    }
-    try:
-        existing = []
-        if os.path.exists(HISTORY_FILE):
-            with open(HISTORY_FILE, "r") as f:
-                existing = json.load(f)
-        existing.insert(0, entry)
-        existing = existing[:30]
-        with open(HISTORY_FILE, "w") as f:
-            json.dump(existing, f, indent=2)
-    except Exception:
-        pass  # never let history I/O break login
-
-
-def read_history():
-    try:
-        if os.path.exists(HISTORY_FILE):
-            with open(HISTORY_FILE, "r") as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return []
 
 
 def login():
