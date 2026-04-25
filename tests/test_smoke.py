@@ -75,6 +75,14 @@ def test_quote_feed_constructs():
     assert status["cached_keys"] == 0
 
 
+def test_import_quotes_module():
+    """backend.quotes must import standalone (no Flask dependency)."""
+    from backend.quotes import (  # noqa: F401
+        fetch_quotes, fetch_option_quotes, build_option_chain,
+        build_all_option_tokens, _feed,
+    )
+
+
 def test_import_storage_modules():
     """All backend.storage modules must import cleanly."""
     from backend.storage.trades import (  # noqa: F401
