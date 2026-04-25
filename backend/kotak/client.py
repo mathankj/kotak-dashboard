@@ -14,6 +14,7 @@ import pyotp
 from dotenv import load_dotenv
 from neo_api_client import NeoAPI
 
+from backend.kotak.api import call_with_retry, CircuitOpenError
 from backend.utils import now_ist
 
 load_dotenv()
@@ -101,27 +102,36 @@ def ensure_client():
 
 
 def safe_call(fn, *args, **kwargs):
-    """Call a Kotak SDK method with try/catch. Returns (data, error_str).
+    """Call a Kotak SDK method with rate-limit + retry + breaker + try/catch.
 
-    Treats 'no data found' style responses as empty (data=[], error=None) rather
-    than errors, since the SDK uses that pattern for empty result sets.
+    Returns (data, error_str). Treats 'no data found' style responses as empty
+    (data=[], error=None) rather than errors, since the SDK uses that pattern
+    for empty result sets.
+
+    Rate limiting / retry / circuit-breaker are applied via call_with_retry.
+    Breaker-open errors surface as their own error string so the UI can show
+    "broker temporarily unavailable" instead of crashing.
     """
+    name = getattr(fn, "__name__", "kotak_call")
     try:
-        resp = fn(*args, **kwargs)
-        if isinstance(resp, dict) and "error" in resp:
-            err = resp["error"]
-            err_list = err if isinstance(err, list) else [err]
-            empty_markers = [
-                "no holdings found", "no positions", "no orders",
-                "no trades", "no data", "not found",
-            ]
-            for e in err_list:
-                msg = (e.get("message") if isinstance(e, dict) else str(e)).lower()
-                if any(m in msg for m in empty_markers):
-                    return [], None
-            return None, str(err)
-        if isinstance(resp, dict) and "data" in resp:
-            return resp["data"], None
-        return resp, None
+        resp = call_with_retry(name, fn, *args, **kwargs)
+    except CircuitOpenError as e:
+        return None, f"breaker_open: {e}"
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
+
+    if isinstance(resp, dict) and "error" in resp:
+        err = resp["error"]
+        err_list = err if isinstance(err, list) else [err]
+        empty_markers = [
+            "no holdings found", "no positions", "no orders",
+            "no trades", "no data", "not found",
+        ]
+        for e in err_list:
+            msg = (e.get("message") if isinstance(e, dict) else str(e)).lower()
+            if any(m in msg for m in empty_markers):
+                return [], None
+        return None, str(err)
+    if isinstance(resp, dict) and "data" in resp:
+        return resp["data"], None
+    return resp, None

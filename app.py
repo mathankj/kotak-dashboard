@@ -2100,6 +2100,20 @@ def feed_status_api():
     })
 
 
+@app.route("/api/health")
+def health_api():
+    """Strong-API stats: per-method call counts, errors, retries, breaker state."""
+    from backend.kotak.api import stats as kotak_stats
+    return jsonify({
+        "ok": True,
+        "kotak": kotak_stats(),
+        "feed": _feed.status(),
+        "feed_started": _feed_started["flag"],
+        "logged_in": _state.get("client") is not None,
+        "ts": now_ist().strftime("%H:%M:%S IST"),
+    })
+
+
 @app.route("/api/gann-prices")
 def gann_prices_api():
     data, err = fetch_quotes()
