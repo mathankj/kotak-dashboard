@@ -120,11 +120,23 @@ def fetch_quotes(force=False):
             r = client.quotes(instrument_tokens=tokens, quote_type=qt)
         except Exception as e:
             return None, f"{qt}: {type(e).__name__}: {e}"
+        # Empty / nothing-to-report (common off-hours): silent, not an error.
+        if r is None or r == "" or r == {} or r == []:
+            return [], None
         if isinstance(r, dict) and "fault" in r:
             return None, f"{qt}: {r['fault'].get('message', 'fault')}"
         if isinstance(r, list):
             return r, None
-        return [], f"{qt}: unexpected response shape"
+        # Some Kotak responses wrap the list under a 'data' key.
+        if isinstance(r, dict):
+            for key in ("data", "result", "quotes"):
+                v = r.get(key)
+                if isinstance(v, list):
+                    return v, None
+            # Single-row dict with quote fields: wrap in a list.
+            if any(k in r for k in ("ohlc", "ltp", "exchange_token")):
+                return [r], None
+        return [], None  # unknown shape, but treat as silent no-data
 
     ohlc_items, e1 = _call("ohlc")
     ltp_items, e2 = _call("ltp")
@@ -303,11 +315,23 @@ def fetch_option_quotes(force=False):
             r = client.quotes(instrument_tokens=tokens, quote_type=qt)
         except Exception as e:
             return None, f"{qt}: {type(e).__name__}: {e}"
+        # Empty / nothing-to-report (common off-hours): silent, not an error.
+        if r is None or r == "" or r == {} or r == []:
+            return [], None
         if isinstance(r, dict) and "fault" in r:
             return None, f"{qt}: {r['fault'].get('message', 'fault')}"
         if isinstance(r, list):
             return r, None
-        return [], f"{qt}: unexpected response shape"
+        # Some Kotak responses wrap the list under a 'data' key.
+        if isinstance(r, dict):
+            for key in ("data", "result", "quotes"):
+                v = r.get(key)
+                if isinstance(v, list):
+                    return v, None
+            # Single-row dict with quote fields: wrap in a list.
+            if any(k in r for k in ("ohlc", "ltp", "exchange_token")):
+                return [r], None
+        return [], None  # unknown shape, but treat as silent no-data
 
     ohlc_items, e1 = _call("ohlc")
     ltp_items, e2 = _call("ltp")

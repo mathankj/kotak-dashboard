@@ -1,18 +1,19 @@
-"""Paper auto-trading strategy for index options (Gann spot-crossing → ATM CE/PE).
+"""Paper auto-trading strategy for index options.
 
-Triggered each /api/option-prices fetch. Same Gann-level crossing concept as
-the stock strategy, applied to index options:
-  - Spot crosses BUY level UP    -> paper BUY 1 lot ATM CE
-  - Spot crosses SELL level DOWN -> paper BUY 1 lot ATM PE
-Exits:
-  - CE: spot >= T1 (target) OR spot < SELL level (SL) OR 15:15 square-off
-  - PE: spot <= S1 (target) OR spot > BUY level  (SL) OR 15:15 square-off
+Plain English:
+  - Watch the index spot (NIFTY 50, BANKNIFTY, SENSEX).
+  - When spot crosses BUY level upward -> paper buy 1 lot ATM CE.
+  - When spot crosses SELL level downward -> paper buy 1 lot ATM PE.
+  - For each open option trade, watch THREE exits (first hit wins):
+      1. Stop loss   (3 variants — see EXIT block below; one is active)
+      2. Profit T1   (CE: spot >= T1; PE: spot <= S1)
+      3. Time exit   (force-close at 15:15 IST)
 
-Entry/exit prices are option LTPs at that moment (paper, not Kotak orders).
+Trades go to paper_trades.json only. Never calls Kotak place_order.
 
 Note: the caller passes `gann_quotes` (the stock-side fetch_quotes result) so
 this module doesn't need to import fetch_quotes — that would create an
-app.py ↔ strategy circular import.
+app.py <-> strategy circular import.
 """
 import threading
 
@@ -20,19 +21,107 @@ from backend.kotak.instruments import INDEX_OPTIONS_CONFIG
 from backend.storage.trades import (
     read_paper_trades, write_paper_trades, next_paper_id,
 )
-from backend.strategy.stocks import (
-    AUTO_MAX_TRADES_PER_SCRIP, _auto_at_or_after_squareoff,
-    _auto_close, _auto_in_hours,
+from backend.strategy.common import (
+    _auto_at_or_after_squareoff, _auto_close, _auto_in_hours,
 )
 from backend.utils import now_ist
 
 
+# ----------------------------------------------------------------------
+# TUNABLES
+# ----------------------------------------------------------------------
 AUTO_OPTION_STRATEGY_ENABLED = True
+
+# Set to None for unlimited entries per index per day.
+# Or an int (e.g. 2) to cap trades per index per day.
+MAX_TRADES_PER_INDEX_PER_DAY = None
+
+# Used by the ₹5-fixed SL variant (only matters if that variant is active).
+PREMIUM_SL_FIXED_POINTS = 5
+
+# Used by the % SL variant (only matters if that variant is active).
+# 0.30 = exit when premium drops to 70% of entry (a 30% loss).
+PREMIUM_SL_PCT = 0.30
+# ----------------------------------------------------------------------
+
 
 _option_auto_state = {
     "last_spot": {},  # index_name -> last seen spot
     "lock": threading.Lock(),
 }
+
+
+def _check_exit_reason(open_t, opt_ltp, spot,
+                       buy_lvl, sell_lvl, t1_lvl, s1_lvl):
+    """Return the exit reason string for an open option trade, or None.
+
+    =======================================================================
+    EXIT CONDITIONS — checked in order, first hit wins.
+    =======================================================================
+
+    1) STOP LOSS — three variants. Only ONE is active at a time.
+       To switch: comment out the active block, uncomment the desired one.
+       Currently active: variant C (spot reaches opposite Gann level).
+
+       Variant A — Fixed premium drop (e.g. ₹5):
+       --------------------------------------------------------
+       # if opt_ltp is not None and opt_ltp <= entry_price - PREMIUM_SL_FIXED_POINTS:
+       #     return "SL_PREMIUM_FIXED"
+
+       Variant B — Premium percentage drop (e.g. 30%):
+       --------------------------------------------------------
+       # if opt_ltp is not None and opt_ltp <= entry_price * (1 - PREMIUM_SL_PCT):
+       #     return "SL_PREMIUM_PCT"
+
+       Variant C — Spot reaches opposite Gann level (ACTIVE):
+       --------------------------------------------------------
+       (CE: spot < SELL level   |   PE: spot > BUY level)
+
+    2) PROFIT TARGET — spot reaches T1 (CE) or S1 (PE).
+
+    3) TIME SQUAREOFF — clock hits 15:15 IST. Handled at top of tick(),
+       not in this function.
+    =======================================================================
+    """
+    entry_price = open_t.get("entry_price")
+    side = open_t.get("option_type")  # 'CE' or 'PE'
+
+    # ---------- (1) STOP LOSS — pick ONE variant ----------
+
+    # --- Variant A: fixed premium drop (e.g. ₹5 below entry) ---
+    # if opt_ltp is not None and entry_price is not None:
+    #     if opt_ltp <= entry_price - PREMIUM_SL_FIXED_POINTS:
+    #         return "SL_PREMIUM_FIXED"
+
+    # --- Variant B: percentage premium drop (e.g. 30%) ---
+    # if opt_ltp is not None and entry_price is not None:
+    #     if opt_ltp <= entry_price * (1 - PREMIUM_SL_PCT):
+    #         return "SL_PREMIUM_PCT"
+
+    # --- Variant C (ACTIVE): spot reverses through opposite Gann level ---
+    if side == "CE":
+        if sell_lvl is not None and spot < sell_lvl:
+            return "SL_SELL_LVL"
+    else:  # PE
+        if buy_lvl is not None and spot > buy_lvl:
+            return "SL_BUY_LVL"
+
+    # ---------- (2) PROFIT TARGET ----------
+    if side == "CE":
+        if t1_lvl is not None and spot >= t1_lvl:
+            return "TARGET_T1"
+    else:  # PE
+        if s1_lvl is not None and spot <= s1_lvl:
+            return "TARGET_S1"
+
+    return None
+
+
+def _can_open_more(idx_name, counts):
+    """Per-day cap check. None means unlimited."""
+    if MAX_TRADES_PER_INDEX_PER_DAY is None:
+        return True
+    return counts.get(idx_name, 0) < MAX_TRADES_PER_INDEX_PER_DAY
 
 
 def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes):
@@ -93,22 +182,15 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes):
             s1_lvl   = (levels.get("sell") or {}).get("S1")
             prev_spot = _option_auto_state["last_spot"].get(idx_name)
 
-            # Exit open position (based on spot level hits)
+            # ---- EXIT check (see _check_exit_reason for the 3 conditions) ----
             open_t = open_by_underlying.get(idx_name)
             if open_t:
                 opt_q = option_data.get(open_t.get("option_key"))
                 opt_ltp = (opt_q or {}).get("ltp")
-                reason = None
-                if open_t.get("option_type") == "CE":
-                    if t1_lvl is not None and spot >= t1_lvl:
-                        reason = "TARGET_T1"
-                    elif sell_lvl is not None and spot < sell_lvl:
-                        reason = "SL_SELL_LVL"
-                else:  # PE
-                    if s1_lvl is not None and spot <= s1_lvl:
-                        reason = "TARGET_S1"
-                    elif buy_lvl is not None and spot > buy_lvl:
-                        reason = "SL_BUY_LVL"
+                reason = _check_exit_reason(
+                    open_t, opt_ltp, spot,
+                    buy_lvl, sell_lvl, t1_lvl, s1_lvl,
+                )
                 if reason and opt_ltp is not None:
                     _auto_close(open_t, float(opt_ltp), now, reason)
                     modified = True
@@ -116,9 +198,9 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes):
                     _option_auto_state["last_spot"][idx_name] = spot
                     continue
 
-            # Entry check — spot crossing
+            # ---- ENTRY check — spot crossing a Gann level ----
             if (idx_name not in open_by_underlying
-                    and counts.get(idx_name, 0) < AUTO_MAX_TRADES_PER_SCRIP
+                    and _can_open_more(idx_name, counts)
                     and prev_spot is not None):
                 option_type = None
                 if buy_lvl is not None and prev_spot <= buy_lvl < spot:

@@ -1,17 +1,15 @@
 """Paper-trades JSON store.
 
-paper_trades.json at the repo root. Writes are atomic (tmp + os.replace) and
-the file has a per-path lock (see _safe_io.file_lock) so the read-modify-write
-sequences in strategy/{stocks,options}.py are serialised.
+data/paper_trades.json. Writes are atomic (tmp + os.replace) and the file has
+a per-path lock (see _safe_io.file_lock) so the read-modify-write sequences in
+strategy/{stocks,options}.py are serialised across threads.
 """
 import os
 
 from backend.storage._safe_io import atomic_write_json, file_lock, read_json
 
-PAPER_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "paper_trades.json",
-)
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+PAPER_FILE = os.path.join(_REPO_ROOT, "data", "paper_trades.json")
 
 
 def read_paper_trades():

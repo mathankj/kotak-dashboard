@@ -43,6 +43,9 @@ def atomic_write_json(path, data):
     Writes to <path>.tmp then os.replace() — readers either see the old
     file or the new one, never a partial write.
     """
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)

@@ -7,10 +7,8 @@ import os
 
 from backend.storage._safe_io import atomic_write_json, file_lock, read_json
 
-ORDERS_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "orders_log.json",
-)
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ORDERS_FILE = os.path.join(_REPO_ROOT, "data", "orders_log.json")
 
 
 def append_order(entry):

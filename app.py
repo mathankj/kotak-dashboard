@@ -36,11 +36,7 @@ from backend.strategy.gann import (
     BUY_LEVEL_ORDER, SELL_LEVEL_ORDER,
     gann_levels, nearest_gann_level, compute_target_level_reached,
 )
-from backend.strategy.stocks import (
-    AUTO_STRATEGY_ENABLED, AUTO_HOURS_START, AUTO_HOURS_END,
-    AUTO_MAX_TRADES_PER_SCRIP, AUTO_QTY,
-    _auto_state, auto_strategy_tick, update_open_trades_mfe,
-)
+from backend.strategy.common import update_open_trades_mfe
 from backend.strategy.options import (
     AUTO_OPTION_STRATEGY_ENABLED, _option_auto_state, option_auto_strategy_tick,
 )
@@ -78,10 +74,7 @@ TABS = [
     {"key": "options", "url": "/options", "label": "Options"},
     {"key": "holdings", "url": "/", "label": "Holdings"},
     {"key": "positions", "url": "/positions", "label": "Positions"},
-    {"key": "orders", "url": "/orders", "label": "Orders"},
-    {"key": "trades", "url": "/trades", "label": "Trades"},
-    {"key": "limits", "url": "/limits", "label": "Limits"},
-    {"key": "orderlog", "url": "/orderlog", "label": "Order Log"},
+    {"key": "paper", "url": "/paper-trades", "label": "Paper Trades"},
     {"key": "history", "url": "/history", "label": "Login History"},
 ]
 
@@ -223,11 +216,9 @@ def health_api():
 @app.route("/api/gann-prices")
 def gann_prices_api():
     data, err = fetch_quotes()
-    # Run auto-strategy (paper trades only) + update MFE on any open trades
-    try:
-        auto_strategy_tick(data)
-    except Exception:
-        traceback.print_exc()
+    # Stock auto-buy is disabled — only update MFE / farthest-level on any
+    # open trades (used by the dashboard). Option auto-strategy runs from
+    # /api/option-prices, not here.
     try:
         update_open_trades_mfe(data)
     except Exception:
@@ -467,6 +458,27 @@ def paper_trades_api():
     return jsonify({"trades": trades, "stats": compute_stats(trades)})
 
 
+@app.route("/paper-trades")
+def paper_trades_view():
+    """Page that shows all paper trades + a 'Download as Excel' button."""
+    trades = read_paper_trades()
+    # Newest first; attach a human-readable duration for the template.
+    trades_sorted = sorted(
+        trades,
+        key=lambda t: (t.get("date") or "", t.get("entry_time") or ""),
+        reverse=True,
+    )
+    for t in trades_sorted:
+        t["duration_str"] = fmt_duration(t.get("duration_seconds"))
+    return render_template(
+        "paper_trades.html",
+        tabs=TABS,
+        active="paper",
+        trades=trades_sorted,
+        stats=compute_stats(trades),
+    )
+
+
 @app.route("/paper-trades.xlsx")
 def paper_trades_xlsx():
     """Export all paper trades as a formatted Excel file."""
@@ -526,7 +538,10 @@ def paper_trades_xlsx():
     from openpyxl.utils import get_column_letter
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
-    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_paper_export.xlsx")
+    # Write the xlsx to data/ (kept out of source listing) then stream it back.
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    os.makedirs(data_dir, exist_ok=True)
+    out = os.path.join(data_dir, "_paper_export.xlsx")
     wb.save(out)
     with open(out, "rb") as f:
         data = f.read()

@@ -8,10 +8,8 @@ import os
 from backend.storage._safe_io import atomic_write_json, file_lock, read_json
 from backend.utils import now_ist
 
-HISTORY_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "login_history.json",
-)
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+HISTORY_FILE = os.path.join(_REPO_ROOT, "data", "login_history.json")
 
 
 def append_history(status, detail):

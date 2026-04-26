@@ -103,10 +103,10 @@ def test_import_strategy_modules():
         BUY_LEVEL_ORDER, SELL_LEVEL_ORDER,
         gann_levels, nearest_gann_level, compute_target_level_reached,
     )
-    from backend.strategy.stocks import (  # noqa: F401
-        AUTO_STRATEGY_ENABLED, AUTO_HOURS_START, AUTO_HOURS_END,
-        AUTO_MAX_TRADES_PER_SCRIP, AUTO_QTY,
-        auto_strategy_tick, update_open_trades_mfe,
+    from backend.strategy.common import (  # noqa: F401
+        AUTO_HOURS_START, AUTO_HOURS_END,
+        _auto_in_hours, _auto_at_or_after_squareoff, _auto_close,
+        update_open_trades_mfe,
     )
     from backend.strategy.options import (  # noqa: F401
         AUTO_OPTION_STRATEGY_ENABLED, option_auto_strategy_tick,
