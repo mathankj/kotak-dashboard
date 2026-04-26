@@ -60,7 +60,6 @@
     </form>
   </div>
 </header>
-{% include "_pending_banner.html" %}
 <div class="tabs">
   {% for t in tabs %}
     <a href="{{ t.url }}" class="{% if t.key == active %}active{% endif %}">{{ t.label }}</a>

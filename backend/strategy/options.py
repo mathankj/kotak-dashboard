@@ -1,45 +1,46 @@
-"""Auto-trading strategy for index options — Phase 3 (intent-gated).
+"""Auto-trading strategy for index options — Phase 4 (LIVE, fully automatic).
 
 Plain English:
   - Watch the index spot (NIFTY 50, BANKNIFTY, SENSEX).
-  - When spot crosses BUY level upward -> propose buying 1 lot ATM CE.
-  - When spot crosses SELL level downward -> propose buying 1 lot ATM PE.
+  - When spot crosses BUY level upward -> buy 1 lot ATM CE at market premium.
+  - When spot crosses SELL level downward -> buy 1 lot ATM PE at market premium.
   - For each OPEN trade, watch THREE exits (first hit wins):
       1. Stop loss   (3 variants — see EXIT block below; one is active)
       2. Profit T1   (CE: spot >= T1; PE: spot <= S1)
       3. Time exit   (force-close at 15:15 IST)
 
-Phase 3 change vs. Phase 2:
-  This module no longer writes to paper_trades.json directly. Instead, every
-  signal becomes a "pending intent" via backend.strategy.pending_intents.
-  Ganesh sees a banner on the dashboard, clicks CONFIRM, and ONLY THEN does
-  /api/intent-confirm call place_order_safe() and write the trade record.
+Phase 4 change vs. Phase 3:
+  No more pending-intent banner. No human confirm step. Every signal goes
+  straight through `place_order_safe()` and writes to the trade ledger.
+  The single safety wrapper still gates: margin pre-check, kill switch,
+  Kotak error handling. Position verification still runs before any EXIT
+  (refuses to send a SELL if Kotak shows no matching open position).
 
-  When LIVE_MODE=False the flow is identical EXCEPT place_order_safe short-
-  circuits to PAPER mode (no Kotak call). This lets Ganesh rehearse the full
-  live UX with zero risk before flipping the master switch.
+  The kill switch (data/HALTED.flag, /STOP route) is the panic button.
+  Auto-strategy keeps proposing signals while halted, but place_order_safe
+  refuses to send them — they're audited as BLOCKED_HALTED and skipped.
 
-  Before queuing an EXIT intent in LIVE mode, we verify with Kotak that the
-  position actually exists (via backend.safety.positions). If Kotak says no
-  position, we DO NOT propose the exit — refuses to send a SELL into nothing
-  (which would open a fresh short).
-
-Note: the caller passes `gann_quotes` (the stock-side fetch_quotes result) so
-this module doesn't need to import fetch_quotes — that would create an
-app.py <-> strategy circular import. The `client` arg is optional; only
-used to verify positions when LIVE_MODE=True.
+LIVE_MODE master switch:
+  Editing this constant is the ONE intentional ceremony to enable / disable
+  real-money trading. Must be edited in source, committed, pushed, and the
+  service restarted. No web toggle. - matha
 """
 import threading
 
+from backend.kotak.client import safe_call
 from backend.kotak.instruments import INDEX_OPTIONS_CONFIG
 from backend.safety.audit import audit
+from backend.safety.orders import (
+    place_order_safe,
+    RESULT_OK, RESULT_PAPER, RESULT_BLOCKED_HALTED,
+    RESULT_BLOCKED_MARGIN, RESULT_KOTAK_ERROR,
+)
 from backend.safety.positions import verify_open_position
-from backend.storage.trades import read_paper_trades
+from backend.storage.trades import (
+    read_paper_trades, write_paper_trades, next_paper_id,
+)
 from backend.strategy.common import (
     _auto_at_or_after_squareoff, _auto_in_hours,
-)
-from backend.strategy.pending_intents import (
-    has_pending_for, queue_intent,
 )
 from backend.utils import now_ist
 
@@ -49,19 +50,19 @@ from backend.utils import now_ist
 # ======================================================================
 # When True  -> place_order_safe() will fire REAL Kotak orders for every
 #               auto-strategy entry / exit. Real money moves.
-# When False -> auto-strategy keeps writing to paper_trades.json only.
-#               No call to client.place_order ever happens. SAFE.
+# When False -> place_order_safe() short-circuits to PAPER mode. No call
+#               to client.place_order is ever made. SAFE rehearsal.
 #
-# Flip ceremony (Phase 3 only):
-#   1. Confirm Phase 2 paper-mode tests passed for >= 2 days.
+# Flip ceremony:
+#   1. Confirm Phase 3 paper-mode tests passed for >= 2 days (recommended).
 #   2. Confirm IP whitelist is active in Kotak Neo developer portal.
 #   3. Confirm kill switch (header STOP button) works on staging.
-#   4. Edit this line to True. Commit. Push. systemctl restart kotak.
+#   4. Edit this line. Commit. Push. systemctl restart kotak.
 #
 # DO NOT flip this from a config file or env var. The deliberate
 # code-edit + commit + restart IS the safety. - matha
 # ======================================================================
-LIVE_MODE = False
+LIVE_MODE = True
 
 # ----------------------------------------------------------------------
 # TUNABLES
@@ -166,7 +167,7 @@ def _option_trading_symbol(idx_name, atm, option_type, expiry):
     Format example: NIFTY26APR25000CE   (yymmm + strike + CE/PE)
     `expiry` is whatever option_index_meta gave us — a date or a string. We
     accept both. If we can't form a clean symbol we return None and the
-    intent is refused upstream (better than firing a malformed order).
+    order is refused upstream (better than firing a malformed order).
     """
     if not expiry:
         return None
@@ -181,6 +182,31 @@ def _option_trading_symbol(idx_name, atm, option_type, expiry):
         return None
 
 
+def _fetch_available_cash(client):
+    """Best-effort margin fetch. None means 'skip the pre-check'.
+
+    place_order_safe treats available_cash=None as 'don't gate on margin'
+    (so a flaky limits() call doesn't block legitimate trades). Margin is
+    still ultimately enforced by Kotak itself.
+    """
+    if client is None:
+        return None
+    try:
+        ld, _ = safe_call(client.limits, segment="ALL",
+                          exchange="ALL", product="ALL")
+        if isinstance(ld, dict):
+            for k in ("Net", "net", "CashAvailable", "cashAvailable",
+                      "AvailableCash", "availableCash", "DepositValue"):
+                if k in ld:
+                    try:
+                        return float(ld[k])
+                    except (TypeError, ValueError):
+                        pass
+    except Exception:
+        pass
+    return None
+
+
 def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                               client=None):
     """One tick of the option auto-strategy.
@@ -188,12 +214,10 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
     option_data:        {key: {index, strike, option_type, ltp, ...}}
     option_index_meta:  {index_name: {spot, atm, expiry, ...}}
     gann_quotes:        stock-side quotes (need .levels for the index spots)
-    client:             Kotak NeoAPI client. Required when LIVE_MODE=True
-                        (used by verify_open_position). Optional otherwise.
+    client:             Kotak NeoAPI client. Required when LIVE_MODE=True.
 
-    The strategy NEVER writes paper_trades.json directly. It produces pending
-    intents; the /api/intent-confirm route is the single place where trades
-    actually get recorded (after Ganesh confirms and place_order_safe runs).
+    Phase 4: every signal goes straight through place_order_safe and writes
+    a trade row on success. No banner, no human confirm.
     """
     if not AUTO_OPTION_STRATEGY_ENABLED or not option_index_meta:
         return
@@ -202,7 +226,7 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
     with _option_auto_state["lock"]:
         trades = read_paper_trades()
 
-        # 1. SQUARE OFF at/after 15:15 — propose EXIT intents for everything OPEN
+        # 1. SQUARE OFF at/after 15:15 — close everything OPEN
         if _auto_at_or_after_squareoff(now):
             for t in trades:
                 if (t.get("status") != "OPEN"
@@ -211,14 +235,14 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                 q = option_data.get(t.get("option_key"))
                 if not q or q.get("ltp") is None:
                     continue
-                _propose_exit(t, float(q["ltp"]), "AUTO_SQUARE_OFF",
+                _execute_exit(t, float(q["ltp"]), "AUTO_SQUARE_OFF",
                               option_index_meta, client)
             return
 
         if not _auto_in_hours(now):
             return
 
-        # Daily per-index trade cap
+        # Daily per-index trade cap — counts trades placed today
         today = now.strftime("%Y-%m-%d")
         counts = {}
         for t in trades:
@@ -254,7 +278,7 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                     buy_lvl, sell_lvl, t1_lvl, s1_lvl,
                 )
                 if reason and opt_ltp is not None:
-                    _propose_exit(open_t, float(opt_ltp), reason,
+                    _execute_exit(open_t, float(opt_ltp), reason,
                                   option_index_meta, client)
                     _option_auto_state["last_spot"][idx_name] = spot
                     continue
@@ -274,72 +298,107 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                     opt_q = option_data.get(opt_key)
                     opt_ltp = (opt_q or {}).get("ltp")
                     if opt_ltp is not None:
-                        _propose_entry(idx_name, atm, option_type, opt_key,
-                                       float(opt_ltp), float(spot),
-                                       m.get("expiry"))
-                        # Don't increment counts here — we increment when
-                        # the intent is CONFIRMED (in /api/intent-confirm).
-                        # Otherwise rejecting an intent would still burn the cap.
+                        placed = _execute_entry(
+                            idx_name, atm, option_type, opt_key,
+                            float(opt_ltp), float(spot),
+                            m.get("expiry"), client,
+                        )
+                        if placed:
+                            counts[idx_name] = counts.get(idx_name, 0) + 1
 
             _option_auto_state["last_spot"][idx_name] = spot
 
 
-def _propose_entry(idx_name, atm, option_type, opt_key,
-                   opt_ltp, spot, expiry):
-    """Queue a pending ENTRY intent. Skip if one is already pending for
-    this scrip (avoids stacking 30 duplicates while Ganesh decides)."""
-    if has_pending_for(opt_key):
-        return
+def _execute_entry(idx_name, atm, option_type, opt_key,
+                   opt_ltp, spot, expiry, client):
+    """Place a real BUY order via place_order_safe and write trade ledger row.
+
+    Returns True if the order was PLACED (LIVE) or recorded (PAPER), False
+    if it was refused. The caller uses this to decide whether to bump the
+    daily count.
+    """
     cfg = INDEX_OPTIONS_CONFIG.get(idx_name) or {}
     lot_size = cfg.get("lot_size")
     if not lot_size:
-        # Fail-safe: refuse to propose without a known lot size.
-        audit("INTENT_REFUSED_NO_LOT_SIZE", scrip=opt_key, idx=idx_name)
-        return
+        audit("ORDER_REFUSED_NO_LOT_SIZE", scrip=opt_key, idx=idx_name)
+        return False
     trading_symbol = _option_trading_symbol(idx_name, atm, option_type, expiry)
     if not trading_symbol:
-        audit("INTENT_REFUSED_NO_TRADING_SYMBOL",
+        audit("ORDER_REFUSED_NO_TRADING_SYMBOL",
               scrip=opt_key, idx=idx_name, expiry=str(expiry))
-        return
-    intent = queue_intent(
-        kind="ENTRY",
-        scrip_symbol=opt_key,
-        trading_symbol=trading_symbol,
-        exchange=cfg["exchange_segment"],
-        side="B",
-        qty=lot_size,                 # 1 lot in shares (e.g. 75 for NIFTY)
-        price=opt_ltp,
-        lot_size=lot_size,
-        source="auto_options",
-        extra={
-            "asset_type": "option",
-            "underlying": idx_name,
-            "strike": atm,
-            "option_type": option_type,
-            "expiry": str(expiry) if expiry else None,
-            "trigger_spot": round(spot, 2),
-            "trigger_level": "BUY" if option_type == "CE" else "SELL",
-        },
+        return False
+
+    scrip = {
+        "symbol": opt_key,
+        "trading_symbol": trading_symbol,
+        "exchange": cfg["exchange_segment"],
+    }
+    res = place_order_safe(
+        client=client, scrip=scrip, side="B",
+        qty=lot_size, price=opt_ltp,
+        order_type="L", product="MIS", validity="DAY",
+        trigger="0", tag=f"auto:{opt_key}",
+        live_mode=LIVE_MODE,
+        available_cash=_fetch_available_cash(client),
+        lot_size=lot_size, source="auto_options",
     )
-    audit("INTENT_QUEUED_ENTRY", intent_id=intent["id"], scrip=opt_key,
-          qty=intent["qty"], price=intent["price"])
+
+    if res["result"] not in (RESULT_OK, RESULT_PAPER):
+        # HALTED / MARGIN / KOTAK_ERROR — wrapper already audited the failure.
+        return False
+
+    # Build and persist the trade row.
+    mode = "LIVE" if res["result"] == RESULT_OK else "PAPER"
+    kotak_order_id = res.get("order_id") if mode == "LIVE" else None
+    now = now_ist()
+    trades = read_paper_trades()
+    row = {
+        "id": next_paper_id(trades),
+        "date": now.strftime("%Y-%m-%d"),
+        "scrip": opt_key,
+        "option_key": opt_key,
+        "asset_type": "option",
+        "underlying": idx_name,
+        "strike": atm,
+        "option_type": option_type,
+        "expiry": str(expiry) if expiry else None,
+        "trading_symbol": trading_symbol,
+        "order_type": "BUY",
+        "entry_time": now.strftime("%H:%M:%S"),
+        "entry_ts": now.timestamp(),
+        "entry_price": round(opt_ltp, 2),
+        "qty": lot_size,
+        "trigger_spot": round(spot, 2),
+        "trigger_level": "BUY" if option_type == "CE" else "SELL",
+        "max_min_target_price": round(opt_ltp, 2),
+        "target_level_reached": None,
+        "exit_time": None, "exit_ts": None,
+        "exit_price": None, "exit_reason": None,
+        "pnl_points": None, "pnl_pct": None, "duration_seconds": None,
+        "status": "OPEN",
+        "auto": True,
+        "mode": mode,
+        "kotak_entry_order_id": kotak_order_id,
+        "kotak_exit_order_id": None,
+    }
+    trades.insert(0, row)
+    write_paper_trades(trades)
+    audit("AUTO_ENTRY_PLACED", scrip=opt_key, mode=mode,
+          kotak_order_id=kotak_order_id, qty=lot_size, price=opt_ltp)
+    return True
 
 
-def _propose_exit(open_trade, opt_ltp, reason, option_index_meta, client):
-    """Queue a pending EXIT intent for an OPEN trade.
+def _execute_exit(open_trade, opt_ltp, reason, option_index_meta, client):
+    """Place a real SELL order to close `open_trade` and update the ledger.
 
-    LIVE_MODE additionally verifies with Kotak that the position is still
-    open before queuing (don't send a SELL into thin air). PAPER skips
-    verification — there's nothing real to verify.
+    LIVE only: verify with Kotak that the position is still open before
+    sending the SELL (don't open a fresh short on a closed position).
+    PAPER skips verification — there's nothing real to verify.
     """
     opt_key = open_trade.get("option_key")
-    if has_pending_for(opt_key):
-        return
     idx_name = open_trade.get("underlying")
     cfg = INDEX_OPTIONS_CONFIG.get(idx_name) or {}
     lot_size = cfg.get("lot_size") or open_trade.get("qty") or 1
-    # Trading symbol: prefer the one we recorded at entry (survives expiry
-    # confusion); fall back to rebuilding it.
     trading_symbol = (open_trade.get("trading_symbol")
                       or _option_trading_symbol(
                           idx_name, open_trade.get("strike"),
@@ -347,40 +406,66 @@ def _propose_exit(open_trade, opt_ltp, reason, option_index_meta, client):
                           (option_index_meta.get(idx_name) or {}).get("expiry"),
                       ))
     if not trading_symbol:
-        audit("EXIT_INTENT_REFUSED_NO_TRADING_SYMBOL", scrip=opt_key)
-        return
+        audit("EXIT_REFUSED_NO_TRADING_SYMBOL", scrip=opt_key)
+        return False
 
-    # LIVE only: verify Kotak shows the position open before proposing exit.
+    # LIVE only: verify Kotak shows the position open before exit.
     if LIVE_MODE:
         if client is None:
-            audit("EXIT_INTENT_REFUSED_NO_CLIENT", scrip=opt_key,
-                  reason=reason)
-            return
+            audit("EXIT_REFUSED_NO_CLIENT", scrip=opt_key, reason=reason)
+            return False
         ok, info = verify_open_position(client, trading_symbol, side="BUY")
         if not ok:
-            audit("EXIT_INTENT_REFUSED_NO_KOTAK_POSITION",
+            audit("EXIT_REFUSED_NO_KOTAK_POSITION",
                   scrip=opt_key, trading_symbol=trading_symbol,
                   kotak_info=info)
-            return
+            return False
 
     qty = int(open_trade.get("qty") or lot_size)
-    intent = queue_intent(
-        kind="EXIT",
-        scrip_symbol=opt_key,
-        trading_symbol=trading_symbol,
-        exchange=cfg.get("exchange_segment", "nse_fo"),
-        side="S",                     # closing a long with a SELL
-        qty=qty,
-        price=opt_ltp,
-        lot_size=lot_size,
-        source="auto_options",
-        extra={
-            "asset_type": "option",
-            "underlying": idx_name,
-            "exit_reason": reason,
-            "linked_open_trade_id": open_trade.get("id"),
-            "entry_price": open_trade.get("entry_price"),
-        },
+    scrip = {
+        "symbol": opt_key,
+        "trading_symbol": trading_symbol,
+        "exchange": cfg.get("exchange_segment", "nse_fo"),
+    }
+    res = place_order_safe(
+        client=client, scrip=scrip, side="S",
+        qty=qty, price=opt_ltp,
+        order_type="L", product="MIS", validity="DAY",
+        trigger="0", tag=f"auto:exit:{opt_key}",
+        live_mode=LIVE_MODE,
+        available_cash=_fetch_available_cash(client),
+        lot_size=lot_size, source="auto_options",
     )
-    audit("INTENT_QUEUED_EXIT", intent_id=intent["id"], scrip=opt_key,
-          reason=reason, qty=qty, price=opt_ltp)
+
+    if res["result"] not in (RESULT_OK, RESULT_PAPER):
+        return False
+
+    mode = "LIVE" if res["result"] == RESULT_OK else "PAPER"
+    kotak_order_id = res.get("order_id") if mode == "LIVE" else None
+    now = now_ist()
+    exit_price = float(opt_ltp)
+    entry_price = float(open_trade.get("entry_price") or exit_price)
+    pnl = (exit_price - entry_price) if open_trade.get("order_type") == "BUY" \
+          else (entry_price - exit_price)
+    # Update the ledger row in place. Re-read to avoid clobbering concurrent
+    # writes from other paths (manual ticket, etc.).
+    trades = read_paper_trades()
+    for t in trades:
+        if t.get("id") == open_trade.get("id") and t.get("status") == "OPEN":
+            t["exit_time"] = now.strftime("%H:%M:%S")
+            t["exit_ts"] = now.timestamp()
+            t["exit_price"] = round(exit_price, 2)
+            t["exit_reason"] = reason
+            t["pnl_points"] = round(pnl, 2)
+            t["pnl_pct"] = (round((pnl / entry_price) * 100, 2)
+                            if entry_price else 0.0)
+            t["duration_seconds"] = round(
+                now.timestamp() - float(t.get("entry_ts") or now.timestamp()), 1)
+            t["status"] = "CLOSED"
+            t["mode"] = mode
+            t["kotak_exit_order_id"] = kotak_order_id
+            break
+    write_paper_trades(trades)
+    audit("AUTO_EXIT_PLACED", scrip=opt_key, mode=mode, reason=reason,
+          kotak_order_id=kotak_order_id, qty=qty, price=opt_ltp)
+    return True
