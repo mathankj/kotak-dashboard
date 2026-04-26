@@ -38,6 +38,12 @@ def find_scrip(symbol):
 
 # Index option chains. Each renders an ATM ± window chain (CE+Strike+PE) and
 # resolves the nearest future expiry dynamically via search_scrip.
+# lot_size = number of shares in 1 lot for each index option contract.
+# These are SEBI/exchange-set values that change occasionally (NIFTY moved
+# 50 -> 75 in late 2024; BANKNIFTY 15 -> 35). VERIFY before flipping
+# LIVE_MODE — wrong lot size = wrong qty = very wrong order. Source of
+# truth is the Kotak instrument master ("lLotSize" field) but we hardcode
+# here so the bot fails-safe if the master fetch is slow/down.
 INDEX_OPTIONS_CONFIG = {
     "NIFTY": {
         "label": "NIFTY 50",
@@ -45,6 +51,7 @@ INDEX_OPTIONS_CONFIG = {
         "exchange_segment": "nse_fo",
         "strike_step": 50,
         "atm_window": 5,
+        "lot_size": 75,           # NIFTY weekly/monthly, current as of 2025
     },
     "BANKNIFTY": {
         "label": "BANK NIFTY",
@@ -52,6 +59,7 @@ INDEX_OPTIONS_CONFIG = {
         "exchange_segment": "nse_fo",
         "strike_step": 100,
         "atm_window": 5,
+        "lot_size": 35,           # BANKNIFTY monthly, current as of 2025
     },
     "SENSEX": {
         "label": "SENSEX",
@@ -59,6 +67,7 @@ INDEX_OPTIONS_CONFIG = {
         "exchange_segment": "bse_fo",
         "strike_step": 100,
         "atm_window": 5,
+        "lot_size": 20,           # SENSEX weekly, current as of 2025
     },
 }
 
