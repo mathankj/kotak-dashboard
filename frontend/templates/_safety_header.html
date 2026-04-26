@@ -1,0 +1,35 @@
+{# Safety status pill + kill switch button. Included from every template's
+   <header>. Shows nothing in paper mode (LIVE_MODE=False) so the dashboard
+   stays unchanged for Ganesh until Phase 3. #}
+<style>
+  .safety-pill {
+    display: inline-block; padding: 6px 12px; border-radius: 6px;
+    font-size: 12px; font-weight: 700; letter-spacing: 0.5px;
+    text-transform: uppercase; margin-right: 8px;
+  }
+  .safety-pill.live    { background: #166534; color: #d1fae5; }
+  .safety-pill.halted  { background: #f59e0b; color: #1c1917; }
+  .stop-btn {
+    padding: 8px 14px; background: #dc2626; color: white;
+    text-decoration: none; border-radius: 6px; font-size: 13px;
+    font-weight: 700; margin-right: 8px;
+  }
+  .stop-btn:hover { background: #b91c1c; }
+  .halted-link {
+    padding: 8px 14px; background: #f59e0b; color: #1c1917;
+    text-decoration: none; border-radius: 6px; font-size: 13px;
+    font-weight: 700; margin-right: 8px;
+  }
+</style>
+{% if live_mode %}
+  {% if halted %}
+    <a class="halted-link" href="/STOP" title="Kill switch is engaged">
+      &#9888; HALTED &mdash; click for details
+    </a>
+  {% else %}
+    <span class="safety-pill live">&#x25CF; LIVE</span>
+    <a class="stop-btn" href="/STOP" title="Engage kill switch">
+      &#x1F534; STOP TRADING
+    </a>
+  {% endif %}
+{% endif %}

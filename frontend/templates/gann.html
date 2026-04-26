@@ -142,6 +142,7 @@
 </style>
 </head>
 <body>
+{% include "_pending_banner.html" %}
 <header>
   <div>
     <span class="title">Gann Trader</span>
@@ -158,6 +159,7 @@
     </span>
     <span class="clock" id="clock">--:--:--</span>
     <span class="ucc">UCC: {{ ucc }}</span>
+    {% include "_safety_header.html" %}
     <form method="post" action="/refresh" style="margin:0">
       <button style="padding:6px 12px;background:#16a34a;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;">Refresh Login</button>
     </form>

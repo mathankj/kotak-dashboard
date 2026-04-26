@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
-<title>Paper Trades - Kotak Neo Dashboard</title>
+<title>Trade Log - Kotak Neo Dashboard</title>
 <style>
   * { box-sizing: border-box; }
   body { font-family: -apple-system, 'Segoe UI', sans-serif;
@@ -45,14 +45,22 @@
   .stat .lbl { font-size: 11px; color: #71717a; text-transform: uppercase;
                letter-spacing: 0.5px; }
   .stat .val { font-size: 18px; color: #fafafa; font-weight: 600; margin-top: 4px; }
+  .mode-pill { padding: 2px 8px; border-radius: 4px; font-size: 10px;
+               font-weight: 700; letter-spacing: 0.5px; }
+  .mode-LIVE  { background: #166534; color: #d1fae5; }
+  .mode-PAPER { background: #475569; color: #f1f5f9; }
 </style>
 </head>
 <body>
+{% include "_pending_banner.html" %}
 <header>
   <h1>Kotak Neo Dashboard</h1>
-  <form method="post" action="/refresh" style="margin:0">
-    <button class="refresh" type="submit">Refresh Login</button>
-  </form>
+  <div style="display:flex;align-items:center;gap:0">
+    {% include "_safety_header.html" %}
+    <form method="post" action="/refresh" style="margin:0">
+      <button class="refresh" type="submit">Refresh Login</button>
+    </form>
+  </div>
 </header>
 <div class="tabs">
   {% for t in tabs %}
@@ -77,13 +85,14 @@
 
 <div class="card">
   <div class="card-head">
-    <h2>Paper Trades ({{ trades|length }})</h2>
+    <h2>Trade Log ({{ trades|length }})</h2>
     <a class="download" href="/paper-trades.xlsx">Download as Excel</a>
   </div>
   {% if trades %}
     <table>
       <thead>
         <tr>
+          <th>Mode</th>
           <th>Date</th><th>Scrip</th><th>Side</th>
           <th>Entry Time</th><th class="num">Entry</th>
           <th>Exit Time</th><th class="num">Exit</th>
@@ -94,7 +103,10 @@
       </thead>
       <tbody>
         {% for t in trades %}
+          {# Default to PAPER for legacy rows that pre-date the mode field #}
+          {% set mode = t.get('mode') or 'PAPER' %}
           <tr>
+            <td><span class="mode-pill mode-{{ mode }}">{{ mode }}</span></td>
             <td>{{ t.get('date', '') }}</td>
             <td>{{ t.get('scrip', '') }}</td>
             <td class="{% if t.get('order_type') == 'BUY' %}buy{% else %}sell{% endif %}">

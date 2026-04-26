@@ -65,12 +65,14 @@
 </style>
 </head>
 <body>
+{% include "_pending_banner.html" %}
 <header>
   <div>
     <span class="title">Options Chain</span>
     <span id="live" class="live">● live</span>
   </div>
   <div style="display:flex;gap:10px;align-items:center;">
+    {% include "_safety_header.html" %}
     <span class="clock" id="clock">00:00:00 IST</span>
     {% if ucc %}<span class="ucc">UCC: {{ ucc }}</span>{% endif %}
   </div>

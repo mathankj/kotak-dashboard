@@ -68,6 +68,7 @@
 </style>
 </head>
 <body>
+{% include "_pending_banner.html" %}
 <header>
   <div>
     <h1>Kotak Neo Dashboard</h1>
@@ -77,9 +78,12 @@
       {% if error %}<span class="err">Login error: {{ error }}</span>{% endif %}
     </div>
   </div>
-  <form method="post" action="/refresh" style="margin:0">
-    <button class="refresh" type="submit">Refresh Login</button>
-  </form>
+  <div style="display:flex;align-items:center;gap:0">
+    {% include "_safety_header.html" %}
+    <form method="post" action="/refresh" style="margin:0">
+      <button class="refresh" type="submit">Refresh Login</button>
+    </form>
+  </div>
 </header>
 
 <div class="tabs">

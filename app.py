@@ -38,7 +38,21 @@ from backend.strategy.gann import (
 )
 from backend.strategy.common import update_open_trades_mfe
 from backend.strategy.options import (
-    AUTO_OPTION_STRATEGY_ENABLED, _option_auto_state, option_auto_strategy_tick,
+    AUTO_OPTION_STRATEGY_ENABLED, LIVE_MODE,
+    _option_auto_state, option_auto_strategy_tick,
+)
+from backend.safety.kill_switch import is_halted, halt, halt_info
+from backend.safety.orders import (
+    place_order_safe,
+    RESULT_OK, RESULT_PAPER, RESULT_BLOCKED_HALTED,
+    RESULT_BLOCKED_MARGIN, RESULT_KOTAK_ERROR,
+)
+from backend.safety.audit import audit, read_audit_tail
+from backend.strategy.pending_intents import (
+    list_active as list_active_intents,
+    list_recent as list_recent_intents,
+    get as get_intent,
+    mark_confirmed, mark_rejected, mark_placed, mark_failed,
 )
 
 app = Flask(__name__,
@@ -74,7 +88,8 @@ TABS = [
     {"key": "options", "url": "/options", "label": "Options"},
     {"key": "holdings", "url": "/", "label": "Holdings"},
     {"key": "positions", "url": "/positions", "label": "Positions"},
-    {"key": "paper", "url": "/paper-trades", "label": "Paper Trades"},
+    {"key": "paper", "url": "/paper-trades", "label": "Trade Log"},
+    {"key": "audit", "url": "/audit", "label": "Audit"},
     {"key": "history", "url": "/history", "label": "Login History"},
 ]
 
@@ -284,11 +299,19 @@ def option_prices_api():
             "ts": now_ist().strftime("%H:%M:%S IST"),
         })
     data, meta, err = fetch_option_quotes()
-    # Run paper auto-strategy on each tick. Pass gann_quotes so the strategy
+    # Run option auto-strategy on each tick. Pass gann_quotes so the strategy
     # module doesn't need to import fetch_quotes (would be a circular import).
+    # Pass `client` so the strategy can verify positions with Kotak before
+    # proposing exits when LIVE_MODE is True. In paper mode the client arg
+    # is unused.
     try:
         gann_quotes, _ = fetch_quotes()
-        option_auto_strategy_tick(data, meta, gann_quotes)
+        try:
+            client_for_strategy = ensure_client()
+        except Exception:
+            client_for_strategy = None  # Strategy will refuse live exits without it
+        option_auto_strategy_tick(data, meta, gann_quotes,
+                                  client=client_for_strategy)
     except Exception as e:
         print(f"[option_auto] tick failed: {type(e).__name__}: {e}")
     # Group by index: chains[index] = {spot, atm, expiry, rows:[{strike, ce:{...}, pe:{...}, is_atm}]}
@@ -635,7 +658,7 @@ def place_order_api():
             append_order(log_entry)
             return jsonify({"ok": False, "error": "Price required for LIMIT order"}), 400
 
-    # Place the order
+    # Login (must happen before margin fetch + safe wrapper)
     try:
         client = ensure_client()
     except Exception as e:
@@ -643,48 +666,72 @@ def place_order_api():
         append_order(log_entry)
         return jsonify({"ok": False, "error": str(e)}), 500
 
+    # Fetch available cash for the margin pre-check inside place_order_safe.
+    # Best-effort: if Kotak limits() fails, we just skip the check (wrapper
+    # treats available_cash=None as 'skip').
+    available_cash = None
     try:
-        resp = client.place_order(
-            exchange_segment=scrip["exchange"],
-            product=product,
-            price=price if order_type == "L" else "0",
-            order_type=order_type,
-            quantity=qty,
-            validity=validity,
-            trading_symbol=scrip["trading_symbol"],
-            transaction_type=side,
-            trigger_price=trigger,
-            tag="gann-ui",
-        )
-    except Exception as e:
-        log_entry["message"] = f"{type(e).__name__}: {e}"
+        ld, _ = safe_call(client.limits, segment="ALL", exchange="ALL", product="ALL")
+        if isinstance(ld, dict):
+            for k in ("Net", "net", "CashAvailable", "cashAvailable",
+                      "AvailableCash", "availableCash", "DepositValue"):
+                if k in ld:
+                    try:
+                        available_cash = float(ld[k]); break
+                    except (TypeError, ValueError):
+                        pass
+    except Exception:
+        pass
+
+    # Single safe entry-point. Handles LIVE_MODE / kill switch / margin /
+    # broker call / response parsing in one place. See backend/safety/orders.py.
+    res = place_order_safe(
+        client=client, scrip=scrip, side=side, qty=qty, price=price,
+        order_type=order_type, product=product, validity=validity,
+        trigger=trigger, tag="gann-ui",
+        live_mode=LIVE_MODE, available_cash=available_cash,
+        lot_size=1, source="manual_ticket",
+    )
+
+    # Persist a row to orders_log.json (for the /orderlog UI). Map wrapper
+    # result -> the existing log_entry shape so the orderlog page stays the same.
+    if res["result"] == RESULT_OK:
+        log_entry["status"] = "PLACED"
+        log_entry["kotak_order_id"] = res["order_id"]
+        log_entry["message"] = res["message"]
         append_order(log_entry)
-        return jsonify({"ok": False, "error": log_entry["message"]}), 500
+        return jsonify({"ok": True, "order_id": res["order_id"],
+                        "message": res["message"], "raw": res["raw"]})
 
-    # Parse response
-    if isinstance(resp, dict):
-        # success path: resp commonly has nOrdNo / data.orderId
-        oid = (resp.get("nOrdNo")
-               or (resp.get("data") or {}).get("orderId")
-               or (resp.get("data") or {}).get("nOrdNo"))
-        err = resp.get("error") or resp.get("Error") or resp.get("errMsg")
-        msg = resp.get("stat") or resp.get("Message") or resp.get("statusDescription")
-        if oid:
-            log_entry["status"] = "PLACED"
-            log_entry["kotak_order_id"] = str(oid)
-            log_entry["message"] = msg or "Order accepted"
-            append_order(log_entry)
-            return jsonify({"ok": True, "order_id": str(oid),
-                           "message": log_entry["message"], "raw": resp})
-        if err:
-            err_str = err if isinstance(err, str) else json.dumps(err)
-            log_entry["message"] = err_str
-            append_order(log_entry)
-            return jsonify({"ok": False, "error": err_str, "raw": resp}), 400
+    if res["result"] == RESULT_PAPER:
+        # LIVE_MODE is False — the manual ticket was clicked but we're in paper
+        # mode. Surface a clear message so the operator isn't confused into
+        # thinking a real order went through.
+        log_entry["status"] = "PAPER"
+        log_entry["message"] = res["message"]
+        append_order(log_entry)
+        return jsonify({"ok": False, "error": res["message"],
+                        "paper_mode": True}), 400
 
-    log_entry["message"] = f"Unexpected response: {json.dumps(resp)[:200]}"
+    if res["result"] == RESULT_BLOCKED_HALTED:
+        log_entry["status"] = "HALTED"
+        log_entry["message"] = res["message"]
+        append_order(log_entry)
+        return jsonify({"ok": False, "error": res["message"],
+                        "halted": True}), 423  # 423 Locked
+
+    if res["result"] == RESULT_BLOCKED_MARGIN:
+        log_entry["status"] = "INSUFFICIENT_FUNDS"
+        log_entry["message"] = res["message"]
+        append_order(log_entry)
+        return jsonify({"ok": False, "error": res["message"]}), 402  # Payment Required
+
+    # RESULT_KOTAK_ERROR or anything unrecognised
+    log_entry["status"] = "REJECTED"
+    log_entry["message"] = res["message"]
     append_order(log_entry)
-    return jsonify({"ok": False, "error": "Unexpected response", "raw": resp}), 500
+    return jsonify({"ok": False, "error": res["message"],
+                    "raw": res["raw"]}), 400
 
 
 @app.route("/orderlog")
@@ -711,6 +758,250 @@ def orderlog_csv():
         lines.append(",".join(vals))
     return Response("\n".join(lines), mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=orders_log.csv"})
+
+
+# ---------- PENDING INTENTS (Phase 3 manual-confirm gate) ----------
+# Auto-strategy proposes orders; Ganesh confirms via banner before they fire.
+
+@app.route("/api/pending-intents")
+def pending_intents_api():
+    """Active (PENDING) intents for the dashboard banner. Polled every 2s."""
+    return jsonify({
+        "intents": list_active_intents(),
+        "recent": list_recent_intents(20),
+        "live_mode": LIVE_MODE,
+        "halted": is_halted(),
+        "ts": now_ist().strftime("%H:%M:%S IST"),
+    })
+
+
+def _build_trade_record_from_intent(intent, kotak_order_id, mode):
+    """Build a paper_trades.json row from a CONFIRMED intent.
+
+    `mode` is "LIVE" if Kotak accepted the order, "PAPER" if LIVE_MODE was
+    False (rehearsal). The row shape mirrors the existing paper_trades
+    format so the Trade Log UI keeps working unchanged.
+    """
+    extra = intent.get("extra") or {}
+    now = now_ist()
+    base = {
+        "id": next_paper_id(read_paper_trades()),
+        "date": now.strftime("%Y-%m-%d"),
+        "scrip": intent["scrip_symbol"],
+        "option_key": intent["scrip_symbol"],
+        "asset_type": extra.get("asset_type", "option"),
+        "underlying": extra.get("underlying"),
+        "strike": extra.get("strike"),
+        "option_type": extra.get("option_type"),
+        "expiry": extra.get("expiry"),
+        "trading_symbol": intent.get("trading_symbol"),
+        "order_type": "BUY" if intent["side"] == "B" else "SELL",
+        "entry_time": now.strftime("%H:%M:%S"),
+        "entry_ts": now.timestamp(),
+        "entry_price": intent["price"],
+        "qty": intent["qty"],
+        "trigger_spot": extra.get("trigger_spot"),
+        "trigger_level": extra.get("trigger_level"),
+        "max_min_target_price": intent["price"],
+        "target_level_reached": None,
+        "exit_time": None, "exit_ts": None,
+        "exit_price": None, "exit_reason": None,
+        "pnl_points": None, "pnl_pct": None, "duration_seconds": None,
+        "status": "OPEN",
+        "auto": True,
+        "mode": mode,                           # NEW in Phase 3
+        "kotak_entry_order_id": kotak_order_id, # NEW in Phase 3
+        "kotak_exit_order_id": None,
+        "intent_id": intent["id"],
+    }
+    return base
+
+
+def _close_existing_trade_from_exit_intent(intent, kotak_order_id, mode):
+    """Close the linked OPEN trade (set by the strategy when it queued the
+    EXIT intent). Updates paper_trades.json in place.
+
+    Returns the closed trade dict, or None if linkage was lost.
+    """
+    extra = intent.get("extra") or {}
+    open_id = extra.get("linked_open_trade_id")
+    trades = read_paper_trades()
+    target = None
+    for t in trades:
+        if t.get("id") == open_id and t.get("status") == "OPEN":
+            target = t
+            break
+    if target is None:
+        return None
+    now = now_ist()
+    exit_price = float(intent["price"])
+    entry_price = float(target.get("entry_price") or exit_price)
+    if target.get("order_type") == "BUY":
+        pnl = exit_price - entry_price
+    else:
+        pnl = entry_price - exit_price
+    target["exit_time"] = now.strftime("%H:%M:%S")
+    target["exit_ts"] = now.timestamp()
+    target["exit_price"] = round(exit_price, 2)
+    target["exit_reason"] = extra.get("exit_reason", "MANUAL")
+    target["pnl_points"] = round(pnl, 2)
+    target["pnl_pct"] = (round((pnl / entry_price) * 100, 2)
+                        if entry_price else 0.0)
+    target["duration_seconds"] = round(
+        now.timestamp() - float(target.get("entry_ts") or now.timestamp()), 1)
+    target["status"] = "CLOSED"
+    target["mode"] = mode
+    target["kotak_exit_order_id"] = kotak_order_id
+    write_paper_trades(trades)
+    return target
+
+
+@app.route("/api/intent-confirm", methods=["POST"])
+def intent_confirm_api():
+    """Human clicked CONFIRM on a pending intent. This is the ONE place that
+    fires the live order (via place_order_safe) and writes the trade ledger."""
+    payload = request.get_json(force=True, silent=True) or {}
+    intent_id = (payload.get("id") or "").strip()
+    if not intent_id:
+        return jsonify({"ok": False, "error": "id required"}), 400
+    intent = get_intent(intent_id)
+    if not intent:
+        return jsonify({"ok": False, "error": "intent not found"}), 404
+    if intent["status"] != "PENDING":
+        return jsonify({"ok": False,
+                        "error": f"intent is {intent['status']}, "
+                                 "no longer actionable"}), 409
+
+    audit("INTENT_CONFIRMED", intent_id=intent_id,
+          source="web", scrip=intent["scrip_symbol"])
+    mark_confirmed(intent_id)
+
+    # Login + margin fetch (same as manual ticket path)
+    try:
+        client = ensure_client()
+    except Exception as e:
+        mark_failed(intent_id, f"login: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    available_cash = None
+    try:
+        ld, _ = safe_call(client.limits, segment="ALL", exchange="ALL", product="ALL")
+        if isinstance(ld, dict):
+            for k in ("Net", "net", "CashAvailable", "cashAvailable",
+                      "AvailableCash", "availableCash", "DepositValue"):
+                if k in ld:
+                    try:
+                        available_cash = float(ld[k]); break
+                    except (TypeError, ValueError):
+                        pass
+    except Exception:
+        pass
+
+    # Build a synthetic 'scrip' shape for place_order_safe (it expects the
+    # same dict shape as SCRIPS entries). Trading_symbol comes from intent.
+    scrip_for_wrapper = {
+        "symbol": intent["scrip_symbol"],
+        "trading_symbol": intent["trading_symbol"],
+        "exchange": intent["exchange"],
+    }
+    res = place_order_safe(
+        client=client, scrip=scrip_for_wrapper,
+        side=intent["side"], qty=intent["qty"], price=intent["price"],
+        order_type="L", product="MIS", validity="DAY",
+        trigger="0", tag=f"intent:{intent_id}",
+        live_mode=LIVE_MODE, available_cash=available_cash,
+        lot_size=intent.get("lot_size", 1),
+        source=intent.get("source", "auto_options"),
+    )
+
+    # Map wrapper result to UI response + persist trade record.
+    if res["result"] == RESULT_OK:
+        mark_placed(intent_id, res["order_id"])
+        if intent["kind"] == "ENTRY":
+            row = _build_trade_record_from_intent(intent, res["order_id"], "LIVE")
+            trades = read_paper_trades()
+            trades.insert(0, row)
+            write_paper_trades(trades)
+        else:  # EXIT
+            _close_existing_trade_from_exit_intent(intent, res["order_id"], "LIVE")
+        return jsonify({"ok": True, "result": "PLACED",
+                        "order_id": res["order_id"],
+                        "message": res["message"]})
+
+    if res["result"] == RESULT_PAPER:
+        # LIVE_MODE was False — record as PAPER trade so rehearsal sees the
+        # full lifecycle exactly like a real trade would, just without Kotak.
+        mark_placed(intent_id, "PAPER")
+        if intent["kind"] == "ENTRY":
+            row = _build_trade_record_from_intent(intent, None, "PAPER")
+            trades = read_paper_trades()
+            trades.insert(0, row)
+            write_paper_trades(trades)
+        else:
+            _close_existing_trade_from_exit_intent(intent, None, "PAPER")
+        return jsonify({"ok": True, "result": "PAPER",
+                        "message": res["message"]})
+
+    # All other results are failures (HALTED / MARGIN / KOTAK_ERROR)
+    mark_failed(intent_id, res["message"])
+    return jsonify({"ok": False, "result": res["result"],
+                    "error": res["message"], "raw": res.get("raw")}), 400
+
+
+@app.route("/api/intent-reject", methods=["POST"])
+def intent_reject_api():
+    """Human clicked REJECT on a pending intent. No order placed."""
+    payload = request.get_json(force=True, silent=True) or {}
+    intent_id = (payload.get("id") or "").strip()
+    reason = (payload.get("reason") or "user_rejected").strip()
+    if not intent_id:
+        return jsonify({"ok": False, "error": "id required"}), 400
+    intent = get_intent(intent_id)
+    if not intent:
+        return jsonify({"ok": False, "error": "intent not found"}), 404
+    if intent["status"] != "PENDING":
+        return jsonify({"ok": False,
+                        "error": f"intent is {intent['status']}"}), 409
+    mark_rejected(intent_id, reason=reason)
+    audit("INTENT_REJECTED", intent_id=intent_id, source="web", reason=reason)
+    return jsonify({"ok": True})
+
+
+@app.route("/audit")
+def audit_view():
+    """Last 100 audit events — human-readable. Useful for forensics after
+    a halt or unexpected behaviour."""
+    return render_template("audit.html",
+                           tabs=TABS, active="audit",
+                           events=list(reversed(read_audit_tail(100))))
+
+
+# ---------- KILL SWITCH ----------
+# /STOP shows a confirmation page (GET) so a fat-finger swipe doesn't halt
+# trading. /STOP/confirm (POST) is what actually engages the halt. Re-arming
+# is intentionally NOT a web action — Ganesh must SSH in and remove
+# data/HALTED.flag manually after investigating.
+@app.route("/STOP", methods=["GET"])
+def stop_view():
+    return render_template("stop_confirm.html",
+                           tabs=TABS, active=None,
+                           live_mode=LIVE_MODE,
+                           halted=is_halted(),
+                           halt_info=halt_info())
+
+
+@app.route("/STOP/confirm", methods=["POST"])
+def stop_confirm():
+    reason = (request.form.get("reason") or "manual_web").strip()
+    halt(reason=reason)
+    audit("KILL_SWITCH_HALT", source="web", reason=reason)
+    return redirect(url_for("stop_view"))
+
+
+# Make LIVE_MODE + halt state available to every template (header button)
+@app.context_processor
+def _inject_safety_state():
+    return {"live_mode": LIVE_MODE, "halted": is_halted()}
 
 
 @app.route("/refresh", methods=["POST", "GET"])
@@ -746,7 +1037,12 @@ def _preload_option_universe():
 if __name__ == "__main__":
     print("=" * 60)
     print("Kotak Neo Dashboard starting...")
+    mode = "LIVE (real money)" if LIVE_MODE else "PAPER (no real orders)"
+    print(f"Trading mode: {mode}")
+    if is_halted():
+        print("!! KILL SWITCH IS ENGAGED — new live orders will be refused.")
     print("Open http://localhost:5000 in your browser")
     print("=" * 60)
+    audit("MODE_STARTUP", live_mode=LIVE_MODE, halted=is_halted())
     # threaded=True: don't block other requests while a slow search_scrip runs
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)

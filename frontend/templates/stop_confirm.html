@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>STOP TRADING - Kotak Neo Dashboard</title>
+<style>
+  body { font-family: -apple-system, 'Segoe UI', sans-serif;
+         background: #0f1419; color: #d4d4d8; margin: 0; padding: 20px; }
+  header { display: flex; justify-content: space-between; align-items: center;
+           border-bottom: 2px solid #27272a; padding-bottom: 12px; margin-bottom: 20px; }
+  h1 { margin: 0; color: #fafafa; font-size: 24px; }
+  .card { background: #18181b; border: 1px solid #27272a;
+          border-radius: 8px; padding: 30px; max-width: 720px; }
+  h2 { margin-top: 0; color: #fafafa; }
+  p  { line-height: 1.6; }
+  .danger {
+    background: #450a0a; border: 1px solid #7f1d1d; color: #fca5a5;
+    padding: 16px; border-radius: 8px; margin: 20px 0;
+  }
+  .ok {
+    background: #052e16; border: 1px solid #166534; color: #86efac;
+    padding: 16px; border-radius: 8px; margin: 20px 0;
+  }
+  pre { background: #0f1419; padding: 12px; border-radius: 6px;
+        font-size: 12px; color: #fbbf24; overflow-x: auto; }
+  .row { display: flex; gap: 12px; align-items: center; margin-top: 24px; }
+  button.confirm {
+    padding: 14px 24px; background: #dc2626; color: white; border: none;
+    border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: 700;
+  }
+  button.confirm:hover { background: #b91c1c; }
+  a.cancel {
+    padding: 14px 24px; background: #27272a; color: #d4d4d8;
+    text-decoration: none; border-radius: 6px; font-size: 16px;
+  }
+  a.cancel:hover { background: #3f3f46; color: #fafafa; }
+  input[type=text] { padding: 10px 12px; background: #0f1419;
+                     color: #fafafa; border: 1px solid #3f3f46;
+                     border-radius: 6px; width: 320px; font-size: 14px; }
+  label { display: block; margin-top: 16px; color: #a1a1aa;
+          font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+</style>
+</head>
+<body>
+{% include "_pending_banner.html" %}
+<header>
+  <h1>Kotak Neo Dashboard - Kill Switch</h1>
+  <a href="/" style="color:#71717a">&laquo; back to dashboard</a>
+</header>
+
+<div class="card">
+{% if halted %}
+  <div class="ok">
+    <h2 style="margin-top:0">TRADING IS HALTED</h2>
+    <p>The kill switch is engaged. <strong>No NEW live orders will be placed</strong>
+       by the manual ticket OR the auto-strategy until the flag is removed.</p>
+    <p>Existing OPEN positions are NOT auto-squared — normal exit logic
+       (SL / Target / 15:15) keeps running. To force-close a stuck position,
+       close it from the Kotak app/website.</p>
+  </div>
+  <h2>Halt details</h2>
+  <pre>{{ halt_info }}</pre>
+  <h2>To resume trading</h2>
+  <p>Re-arming is intentionally manual — there is no web button to UN-halt.
+     SSH into the server and run:</p>
+  <pre>rm /home/kotak/kotak-dashboard/data/HALTED.flag
+sudo systemctl restart kotak</pre>
+  <p>Reading the audit log first (<code>data/audit.log</code>) to understand
+     what triggered the halt is strongly recommended.</p>
+
+{% elif not live_mode %}
+  <div class="danger">
+    <h2 style="margin-top:0">No need to halt — system is in PAPER mode</h2>
+    <p>LIVE_MODE is currently <strong>False</strong>. The bot is not placing
+       any real Kotak orders, so there is nothing to stop.</p>
+    <p>The kill switch only matters when LIVE_MODE = True (Phase 3+).</p>
+  </div>
+  <a href="/" class="cancel">Back to dashboard</a>
+
+{% else %}
+  <div class="danger">
+    <h2 style="margin-top:0">Confirm: HALT live trading?</h2>
+    <p>This will engage the kill switch immediately. Effect:</p>
+    <ul>
+      <li><strong>NEW orders</strong> from manual ticket and auto-strategy
+          will be refused with a clear error message.</li>
+      <li><strong>OPEN positions stay open</strong> — normal exits (SL /
+          Target / 15:15) keep running. To force-close a position, use the
+          Kotak app/website directly.</li>
+      <li>Re-arming requires SSH access (no web un-halt). This is deliberate
+          — prevents accidental re-enable mid-incident.</li>
+    </ul>
+  </div>
+  <form method="post" action="/STOP/confirm">
+    <label for="reason">Reason (optional, written to data/HALTED.flag)</label>
+    <input id="reason" name="reason" type="text"
+           placeholder="e.g. wrong signals / market gap / suspicious behaviour"/>
+    <div class="row">
+      <button class="confirm" type="submit">YES, HALT TRADING NOW</button>
+      <a class="cancel" href="/">Cancel - go back</a>
+    </div>
+  </form>
+{% endif %}
+</div>
+</body>
+</html>

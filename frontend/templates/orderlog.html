@@ -34,9 +34,13 @@
 </style>
 </head>
 <body>
+{% include "_pending_banner.html" %}
 <header>
   <div><span class="title">Order Log</span></div>
-  <a class="dlbtn" href="/orderlog.csv">Download CSV</a>
+  <div style="display:flex;gap:8px;align-items:center">
+    {% include "_safety_header.html" %}
+    <a class="dlbtn" href="/orderlog.csv">Download CSV</a>
+  </div>
 </header>
 
 <div class="tabs">

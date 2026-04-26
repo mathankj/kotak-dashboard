@@ -1,0 +1,139 @@
+{# Sticky banner that polls /api/pending-intents every 2s. Shows one card
+   per PENDING intent with CONFIRM / REJECT buttons + countdown.
+   Included from every template's body so the prompt follows Ganesh
+   regardless of which tab he's on. #}
+<style>
+  .intent-bar {
+    position: sticky; top: 0; z-index: 9999;
+    margin: -20px -20px 20px -20px; padding: 0;
+    background: transparent;
+  }
+  .intent-card {
+    margin: 0 0 8px 0; padding: 14px 18px;
+    border-radius: 0; display: flex; align-items: center; gap: 16px;
+    font-size: 14px; flex-wrap: wrap;
+  }
+  .intent-card.entry { background: #1e40af; color: #fff;
+                       border-bottom: 3px solid #1e3a8a; }
+  .intent-card.exit  { background: #b45309; color: #fff;
+                       border-bottom: 3px solid #92400e; }
+  .intent-kind { font-weight: 800; font-size: 13px; letter-spacing: 0.5px;
+                 padding: 4px 10px; border-radius: 4px;
+                 background: rgba(0,0,0,0.25); }
+  .intent-msg  { flex: 1; min-width: 220px; font-weight: 600; }
+  .intent-msg b { font-weight: 800; }
+  .intent-countdown { font-family: monospace; font-size: 13px;
+                      background: rgba(0,0,0,0.3); padding: 4px 10px;
+                      border-radius: 4px; }
+  .intent-btn { padding: 8px 16px; border: 0; border-radius: 6px;
+                font-size: 13px; font-weight: 700; cursor: pointer;
+                text-transform: uppercase; letter-spacing: 0.3px; }
+  .intent-btn.confirm { background: #16a34a; color: #fff; }
+  .intent-btn.confirm:hover { background: #15803d; }
+  .intent-btn.reject  { background: #dc2626; color: #fff; }
+  .intent-btn.reject:hover  { background: #b91c1c; }
+  .intent-btn:disabled { opacity: 0.5; cursor: wait; }
+  .intent-result { padding: 8px 12px; border-radius: 4px;
+                   font-size: 12px; font-weight: 600; }
+  .intent-result.ok  { background: #052e16; color: #86efac; }
+  .intent-result.err { background: #450a0a; color: #fca5a5; }
+</style>
+<div id="intent-bar" class="intent-bar"></div>
+<script>
+(function() {
+  const bar = document.getElementById('intent-bar');
+  if (!bar) return;
+  const seen = {};   // id -> last-rendered status (avoid re-render flicker)
+
+  function fmtCountdown(secs) {
+    secs = Math.max(0, Math.floor(secs));
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return m + ':' + (s < 10 ? '0' + s : s);
+  }
+
+  function render(intents) {
+    // Wipe and re-render. Cheap because there are usually 0-1 intents.
+    bar.innerHTML = '';
+    if (!intents || intents.length === 0) return;
+    intents.forEach(function(it) {
+      const card = document.createElement('div');
+      card.className = 'intent-card ' + (it.kind === 'EXIT' ? 'exit' : 'entry');
+      const total = it.qty;
+      const lots = it.lot_size ? (total / it.lot_size) : 1;
+      const exitNote = it.extra && it.extra.exit_reason
+                       ? ' (' + it.extra.exit_reason + ')' : '';
+      card.innerHTML =
+        '<span class="intent-kind">PENDING ' + it.kind + exitNote + '</span>' +
+        '<span class="intent-msg">'
+          + (it.side === 'B' ? 'BUY' : 'SELL') + ' '
+          + '<b>' + lots + ' lot' + (lots > 1 ? 's' : '') + '</b> '
+          + '<b>' + it.scrip_symbol + '</b> '
+          + '@ Rs.' + Number(it.price).toFixed(2) +
+        '</span>' +
+        '<span class="intent-countdown" data-expires="' + it.expires_at_ts + '">'
+          + fmtCountdown(it.expires_at_ts - (Date.now()/1000)) +
+        '</span>' +
+        '<button class="intent-btn confirm" data-id="' + it.id + '">CONFIRM ORDER</button>' +
+        '<button class="intent-btn reject"  data-id="' + it.id + '">REJECT</button>' +
+        '<span class="intent-result" id="ir-' + it.id + '" style="display:none"></span>';
+      bar.appendChild(card);
+      seen[it.id] = it.status;
+    });
+  }
+
+  function poll() {
+    fetch('/api/pending-intents', {cache: 'no-store'})
+      .then(function(r) { return r.json(); })
+      .then(function(j) { render(j.intents || []); })
+      .catch(function() { /* silently swallow — banner just won't update */ });
+  }
+
+  function tickCountdowns() {
+    const now = Date.now() / 1000;
+    document.querySelectorAll('.intent-countdown').forEach(function(el) {
+      const exp = parseFloat(el.dataset.expires) || 0;
+      el.textContent = fmtCountdown(exp - now);
+    });
+  }
+
+  bar.addEventListener('click', function(ev) {
+    const btn = ev.target.closest('.intent-btn');
+    if (!btn) return;
+    const id = btn.dataset.id;
+    const isConfirm = btn.classList.contains('confirm');
+    btn.disabled = true;
+    btn.parentElement.querySelectorAll('.intent-btn')
+       .forEach(function(b) { b.disabled = true; });
+    const url = isConfirm ? '/api/intent-confirm' : '/api/intent-reject';
+    fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id: id})
+    })
+    .then(function(r) { return r.json().then(function(j) { return [r.ok, j]; }); })
+    .then(function(arr) {
+      const ok = arr[0], j = arr[1];
+      const out = document.getElementById('ir-' + id);
+      if (out) {
+        out.style.display = '';
+        if (ok && j.ok) {
+          out.className = 'intent-result ok';
+          out.textContent = (j.result === 'PAPER'
+            ? 'Paper mode: rehearsal recorded'
+            : 'PLACED. Kotak order id: ' + (j.order_id || '—'));
+        } else {
+          out.className = 'intent-result err';
+          out.textContent = j.error || 'Failed';
+        }
+      }
+      // Re-poll soon so the banner reflects new state
+      setTimeout(poll, 600);
+    });
+  });
+
+  poll();
+  setInterval(poll, 2000);
+  setInterval(tickCountdowns, 1000);
+})();
+</script>

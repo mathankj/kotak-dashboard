@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Audit Log - Kotak Neo Dashboard</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif;
+         background: #0f1419; color: #d4d4d8; margin: 0; padding: 20px; }
+  header { display: flex; justify-content: space-between; align-items: center;
+           border-bottom: 2px solid #27272a; padding-bottom: 12px; margin-bottom: 20px; }
+  h1 { margin: 0; color: #fafafa; font-size: 24px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tabs a { padding: 8px 16px; background: #18181b; color: #a1a1aa;
+            text-decoration: none; border-radius: 6px; font-size: 14px;
+            border: 1px solid #27272a; }
+  .tabs a.active { background: #2563eb; color: white; border-color: #2563eb; }
+  .card { background: #18181b; border: 1px solid #27272a;
+          border-radius: 8px; padding: 20px; }
+  .card .head { display: flex; justify-content: space-between;
+                align-items: center; margin-bottom: 16px; }
+  h2 { margin: 0; color: #fafafa; font-size: 18px; }
+  .help { color: #71717a; font-size: 12px; margin-bottom: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; padding: 10px 12px; background: #27272a;
+       color: #a1a1aa; font-weight: 600; font-size: 11px;
+       text-transform: uppercase; letter-spacing: 0.5px; }
+  td { padding: 8px 12px; border-bottom: 1px solid #27272a;
+       color: #d4d4d8; vertical-align: top; }
+  tr:hover td { background: #1f1f23; }
+  .ev { font-weight: 700; padding: 2px 8px; border-radius: 4px;
+        font-size: 11px; display: inline-block; white-space: nowrap; }
+  .ev-PLACE_ORDER_OK         { background: #166534; color: #d1fae5; }
+  .ev-PLACE_ORDER_PAPER      { background: #1e40af; color: #dbeafe; }
+  .ev-PLACE_ORDER_INTENT     { background: #475569; color: #f1f5f9; }
+  .ev-BLOCKED_HALTED         { background: #f59e0b; color: #1c1917; }
+  .ev-BLOCKED_MARGIN         { background: #b45309; color: #fff; }
+  .ev-PLACE_ORDER_REJECTED   { background: #991b1b; color: #fee2e2; }
+  .ev-PLACE_ORDER_EXCEPTION  { background: #991b1b; color: #fee2e2; }
+  .ev-PLACE_ORDER_UNEXPECTED { background: #991b1b; color: #fee2e2; }
+  .ev-INTENT_QUEUED_ENTRY    { background: #1e40af; color: #fff; }
+  .ev-INTENT_QUEUED_EXIT     { background: #b45309; color: #fff; }
+  .ev-INTENT_CONFIRMED       { background: #166534; color: #d1fae5; }
+  .ev-INTENT_REJECTED        { background: #71717a; color: #fff; }
+  .ev-KILL_SWITCH_HALT       { background: #dc2626; color: #fff; }
+  .ev-MODE_STARTUP           { background: #4f46e5; color: #fff; }
+  .ev-EXIT_INTENT_REFUSED_NO_KOTAK_POSITION { background: #f59e0b; color: #1c1917; }
+  pre { font-family: monospace; font-size: 11px; margin: 0;
+        white-space: pre-wrap; word-break: break-word; color: #fbbf24; }
+  .empty { color: #71717a; font-style: italic; padding: 20px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Kotak Neo Dashboard</h1>
+  <div style="display:flex;align-items:center;gap:0">
+    {% include "_safety_header.html" %}
+    <form method="post" action="/refresh" style="margin:0">
+      <button style="padding:8px 16px;background:#16a34a;color:white;border:none;border-radius:6px;cursor:pointer;font-size:14px;" type="submit">Refresh Login</button>
+    </form>
+  </div>
+</header>
+{% include "_pending_banner.html" %}
+<div class="tabs">
+  {% for t in tabs %}
+    <a href="{{ t.url }}" class="{% if t.key == active %}active{% endif %}">{{ t.label }}</a>
+  {% endfor %}
+</div>
+
+<div class="card">
+  <div class="head">
+    <h2>Audit Log (last {{ events|length }} events)</h2>
+  </div>
+  <div class="help">
+    Newest at top. Every order intent, block, kill-switch toggle, and
+    LIVE/PAPER mode change is recorded here AND in <code>data/audit.log</code>
+    (one JSON line per event). The full log is never auto-deleted.
+  </div>
+  {% if events %}
+    <table>
+      <thead>
+        <tr>
+          <th style="width:160px">Time (IST)</th>
+          <th style="width:230px">Event</th>
+          <th>Details</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in events %}
+          <tr>
+            <td>{{ e.get('ts', '') }}</td>
+            <td><span class="ev ev-{{ e.get('event', '') }}">{{ e.get('event', '?') }}</span></td>
+            <td>
+              <pre>{% for k, v in e.items() if k not in ('ts', 'event') %}{{ k }}={{ v }}{% if not loop.last %}  {% endif %}{% endfor %}</pre>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="empty">No audit events yet.</div>
+  {% endif %}
+</div>
+</body>
+</html>
