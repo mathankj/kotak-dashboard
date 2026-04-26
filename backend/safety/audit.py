@@ -1,0 +1,74 @@
+"""Append-only audit log of every order intent.
+
+Plain English:
+  Every time the bot considers placing an order — whether it ends up sending
+  to Kotak (LIVE) or just recording a paper trade — one line is appended to
+  `data/audit.log`. The line is JSON so it stays grep-able AND machine
+  parseable, but each line stands alone (JSONL, not a JSON array) so an
+  abrupt process kill never corrupts the file.
+
+What gets logged:
+  * Every place_order_safe() call (intent, blocks, successes, failures)
+  * Every kill switch toggle (HALT / UNHALT)
+  * Every LIVE_MODE state change announced at startup
+
+The log is NEVER rotated/truncated automatically. Ganesh wants to be able
+to read it line-by-line for forensics. If it gets too big later, archive
+manually (mv audit.log audit.YYYY-MM.log).
+"""
+import json
+import os
+from datetime import datetime
+
+from backend.utils import now_ist
+
+_REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+AUDIT_FILE = os.path.join(_REPO_ROOT, "data", "audit.log")
+
+
+def audit(event, **fields):
+    """Append one event to the audit log. Never raises — audit failures
+    must not break order flow.
+
+    event: short uppercase string ("PLACE_ORDER", "KILL_SWITCH_HALT",
+           "MODE_STARTUP", "BLOCKED_HALTED", "BLOCKED_MARGIN", ...)
+    fields: anything JSON-serialisable — scrip, side, qty, price, reason, etc.
+    """
+    try:
+        os.makedirs(os.path.dirname(AUDIT_FILE), exist_ok=True)
+        record = {
+            "ts": now_ist().isoformat(),
+            "event": event,
+            **fields,
+        }
+        with open(AUDIT_FILE, "a") as f:
+            f.write(json.dumps(record, default=str) + "\n")
+    except Exception:
+        # Last-resort: if we can't even write to disk, print so something
+        # appears in journalctl / app.log. Never propagate.
+        try:
+            print(f"[audit-fail] {event} {fields}")
+        except Exception:
+            pass
+
+
+def read_audit_tail(n=100):
+    """Read last n lines of the audit log as parsed JSON records."""
+    if not os.path.exists(AUDIT_FILE):
+        return []
+    try:
+        with open(AUDIT_FILE, "r") as f:
+            lines = f.readlines()
+        out = []
+        for line in lines[-n:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                out.append({"raw": line})
+        return out
+    except Exception:
+        return []
