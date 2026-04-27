@@ -28,6 +28,7 @@ from backend.quotes import (
     fetch_quotes, fetch_option_quotes, fetch_future_quotes, build_option_chain,
     build_all_option_tokens, _feed,
 )
+from backend.snapshot import _store as _snapshot
 from backend.storage.trades import (
     LEDGER_FILE, read_trade_ledger, write_trade_ledger, next_trade_id,
 )
@@ -464,6 +465,31 @@ def option_prices_api():
         "option_trades": option_trades,
         "ts": now_ist().strftime("%H:%M:%S IST"),
     })
+
+
+@app.route("/api/option-prices-v2")
+def option_prices_v2_api():
+    """Hot-cache version of /api/option-prices.
+
+    Pattern (Zerodha "Scaling with common sense"): the SnapshotStore producer
+    thread refreshes the payload every 2s and json.dumps it once. This route
+    just returns the pre-built bytes — no I/O, no compute on the request
+    thread. Target: <20 ms p50 vs ~10 s for the v1 route.
+
+    Includes x-snapshot-* headers for benchmarking visibility.
+    """
+    blob, built_at, build_ms = _snapshot.options_payload()
+    age_ms = (time.time() - built_at) * 1000.0 if built_at else -1.0
+    resp = Response(blob, mimetype="application/json")
+    resp.headers["X-Snapshot-Age-Ms"] = f"{age_ms:.0f}"
+    resp.headers["X-Snapshot-Build-Ms"] = f"{build_ms:.0f}"
+    return resp
+
+
+@app.route("/api/snapshot-stats")
+def snapshot_stats_api():
+    """Diagnostic: how the SnapshotStore producer is keeping up."""
+    return jsonify(_snapshot.stats())
 
 
 # ---------- Futures routes ----------
@@ -1081,5 +1107,8 @@ if __name__ == "__main__":
     # Kick off the autonomous strategy ticker BEFORE app.run blocks. Daemon
     # thread, dies with the process on shutdown.
     _start_strategy_ticker_once()
+    # Start the SnapshotStore producer — pre-builds /api/option-prices-v2
+    # payload bytes every 2s so HTTP requests are O(1) reads.
+    _snapshot.start()
     # threaded=True: don't block other requests while a slow search_scrip runs
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
