@@ -9,6 +9,7 @@ Open: http://localhost:5000
 import os
 import json
 import threading
+import time
 import traceback
 from datetime import datetime
 from flask import Flask, render_template, jsonify, redirect, url_for, request, Response
@@ -39,7 +40,7 @@ from backend.strategy.gann import (
     BUY_LEVEL_ORDER, SELL_LEVEL_ORDER,
     gann_levels, nearest_gann_level, compute_target_level_reached,
 )
-from backend.strategy.common import update_open_trades_mfe
+from backend.strategy.common import update_open_trades_mfe, _auto_in_hours
 from backend.strategy.options import (
     AUTO_OPTION_STRATEGY_ENABLED, LIVE_MODE,
     _option_auto_state, option_auto_strategy_tick,
@@ -742,6 +743,63 @@ def refresh():
     return redirect(url_for("holdings_view"))
 
 
+# ============================================================
+# Autonomous strategy ticker — runs option_auto_strategy_tick()
+# every 3 seconds during market hours, regardless of whether any
+# browser has the Options page open.
+#
+# Why: in Phase 4 (LIVE), we cannot depend on a human keeping a
+# tab open. The bot must see every tick autonomously. Browser
+# polling still calls the same tick function (idempotent — guarded
+# by the strategy's per-path lock) but is no longer the only
+# trigger. - matha
+# ============================================================
+TICKER_INTERVAL_SECONDS = 3
+_ticker_state = {"started": False}
+
+
+def _strategy_ticker_loop():
+    """Daemon thread body. Sleep / check hours / tick / repeat. Errors are
+    swallowed and logged so a single bad tick can't kill the loop."""
+    print("[ticker] autonomous strategy ticker started "
+          f"(every {TICKER_INTERVAL_SECONDS}s during 09:15-15:15 IST)")
+    while True:
+        try:
+            now = now_ist()
+            if _auto_in_hours(now):
+                try:
+                    data, meta, _err = fetch_option_quotes()
+                    if meta:
+                        gann_quotes, _ = fetch_quotes()
+                        try:
+                            client_for_strategy = ensure_client()
+                        except Exception:
+                            client_for_strategy = None
+                        option_auto_strategy_tick(
+                            data, meta, gann_quotes,
+                            client=client_for_strategy,
+                        )
+                except Exception as e:
+                    print(f"[ticker] tick failed: "
+                          f"{type(e).__name__}: {e}")
+        except Exception as e:
+            # Outermost guard — should be unreachable but keeps the
+            # thread alive even on truly unexpected failures.
+            print(f"[ticker] loop guard caught: "
+                  f"{type(e).__name__}: {e}")
+        time.sleep(TICKER_INTERVAL_SECONDS)
+
+
+def _start_strategy_ticker_once():
+    """Idempotent — safe to call from multiple boot paths."""
+    if _ticker_state["started"]:
+        return
+    _ticker_state["started"] = True
+    t = threading.Thread(target=_strategy_ticker_loop,
+                         daemon=True, name="strategy-ticker")
+    t.start()
+
+
 def _preload_option_universe():
     """Warm up the F&O universe cache in background so first /options visit
     is fast instead of waiting 90s for 3 sequential search_scrip calls."""
@@ -768,5 +826,8 @@ if __name__ == "__main__":
     print("Open http://localhost:5000 in your browser")
     print("=" * 60)
     audit("MODE_STARTUP", live_mode=LIVE_MODE, halted=is_halted())
+    # Kick off the autonomous strategy ticker BEFORE app.run blocks. Daemon
+    # thread, dies with the process on shutdown.
+    _start_strategy_ticker_once()
     # threaded=True: don't block other requests while a slow search_scrip runs
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
