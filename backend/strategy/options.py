@@ -220,6 +220,51 @@ def _fetch_available_cash(client):
     return None
 
 
+def _compute_entry_signal(idx_name, spot, prev_spot, levels, cfg,
+                          already_evaluated_open):
+    """Pure decision: which side (if any), and should the caller stamp
+    `open_evaluated` immediately?
+
+    Returns ("CE"|"PE"|None, stamp_now: bool).
+
+    stamp_now=True means: caller should stamp open_evaluated[idx]=today
+    NOW. stamp_now=False means: caller defers (used when side IS set on
+    the market-open path, since we want to wait until opt_ltp is
+    available before burning the open-evaluation slot).
+
+    No I/O, no ledger reads, no order placement — just the
+    market-open-path / crossing-path logic that previously lived
+    inline in the live tick. Shared by live and paper books.
+    """
+    entry_cfg = cfg["entry"]
+    mo_buy_lvl  = config_loader.resolve_buy_level (levels, entry_cfg["market_open_buy_level"])
+    mo_sell_lvl = config_loader.resolve_sell_level(levels, entry_cfg["market_open_sell_level"])
+    cr_buy_lvl  = config_loader.resolve_buy_level (levels, entry_cfg["crossing_buy_level"])
+    cr_sell_lvl = config_loader.resolve_sell_level(levels, entry_cfg["crossing_sell_level"])
+
+    side = None
+    stamp_now = False
+    if not already_evaluated_open:
+        if entry_cfg["market_open_path"]:
+            if mo_buy_lvl is not None and spot > mo_buy_lvl:
+                side = "CE"
+            elif mo_sell_lvl is not None and spot < mo_sell_lvl:
+                side = "PE"
+            # Stamp NOW only if no signal — defer if side is set.
+            stamp_now = (side is None)
+        else:
+            # Path A disabled — stamp NOW so subsequent ticks fall
+            # through to the crossing branch.
+            stamp_now = True
+    elif prev_spot is not None and entry_cfg["crossing_path"]:
+        if cr_buy_lvl is not None and prev_spot <= cr_buy_lvl < spot:
+            side = "CE"
+        elif cr_sell_lvl is not None and prev_spot >= cr_sell_lvl > spot:
+            side = "PE"
+
+    return side, stamp_now
+
+
 def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                               client=None):
     """One tick of the option auto-strategy.
@@ -327,45 +372,26 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
             #       "prev_spot ≤ BUY < spot" rule applies.
             if (idx_name not in open_by_underlying
                     and _can_open_more(idx_name, counts)):
-                option_type = None
                 today_str = today  # already computed above
                 already_evaluated_open = (
                     _option_auto_state["open_evaluated"].get(idx_name)
                         == today_str
                     or counts.get(idx_name, 0) > 0
                 )
-                if not already_evaluated_open:
-                    # (a) MARKET-OPEN evaluation — runs only if enabled.
-                    # If disabled we still mark "evaluated" so subsequent
-                    # ticks fall straight through to the crossing branch.
-                    # Uses market_open_buy_level / market_open_sell_level
-                    # picks (BUY/BUY_WA, SELL/SELL_WA) from config.
-                    if entry_cfg["market_open_path"]:
-                        if mo_buy_lvl is not None and spot > mo_buy_lvl:
-                            option_type = "CE"
-                        elif mo_sell_lvl is not None and spot < mo_sell_lvl:
-                            option_type = "PE"
-                        if option_type is None:
-                            # Spot is in the channel — no signal at open. Mark
-                            # evaluated so we don't keep re-checking; subsequent
-                            # ticks fall into the crossing branch as intended.
-                            _option_auto_state["open_evaluated"][idx_name] = today_str
-                        # If option_type IS set, we leave open_evaluated UNSET
-                        # here. It gets stamped down below right before the
-                        # _execute_entry call — so a missing opt_ltp at this
-                        # exact tick won't burn the open-evaluation slot for
-                        # the day. Retries on the next tick when LTP lands.
-                    else:
-                        # Path A disabled — skip directly to crossing logic
-                        # by stamping evaluated immediately.
-                        _option_auto_state["open_evaluated"][idx_name] = today_str
-                elif prev_spot is not None and entry_cfg["crossing_path"]:
-                    # (b) CROSSING — runs only if enabled. Uses
-                    # crossing_buy_level / crossing_sell_level picks.
-                    if cr_buy_lvl is not None and prev_spot <= cr_buy_lvl < spot:
-                        option_type = "CE"
-                    elif cr_sell_lvl is not None and prev_spot >= cr_sell_lvl > spot:
-                        option_type = "PE"
+                option_type, stamp_now = _compute_entry_signal(
+                    idx_name, spot, prev_spot, levels, cfg_full,
+                    already_evaluated_open=already_evaluated_open,
+                )
+                if stamp_now:
+                    # In-channel at market open, or market_open_path
+                    # disabled — mark evaluated so we don't re-check
+                    # market-open every tick. (Crossing branch never
+                    # needs a stamp.)
+                    _option_auto_state["open_evaluated"][idx_name] = today_str
+                # If option_type IS set on the market-open path, the
+                # stamp is deferred — it lands at ~line 379 just before
+                # _execute_entry, so a missing opt_ltp at this exact
+                # tick won't burn the open-evaluation slot for the day.
 
                 if option_type:
                     opt_key = f"{idx_name} {atm} {option_type}"
