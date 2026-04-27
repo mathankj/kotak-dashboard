@@ -33,6 +33,7 @@ Format of each line:
 """
 import json
 import os
+from datetime import datetime
 
 from backend.utils import now_ist
 
@@ -95,12 +96,43 @@ def read_recent_blocked(n=200):
     return out
 
 
+def _parse_iso(ts):
+    """Parse an ISO-8601 timestamp into a tz-aware datetime, or None.
+
+    Accepts both server format (IST `+05:30`) and browser `Date.toISOString()`
+    output (UTC `Z`). We normalize `Z` -> `+00:00` because Python's
+    `fromisoformat` only learned to handle `Z` in 3.11. After parsing we
+    can compare across timezones safely (string compare cannot — `"04..."`
+    sorts before `"09..."` even when 04:00 UTC is later than 09:00 IST).
+    """
+    if not ts:
+        return None
+    try:
+        s = ts.replace("Z", "+00:00") if ts.endswith("Z") else ts
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
 def read_blocked_since(since_ts):
     """Return blocked-attempt records strictly newer than `since_ts` (ISO string).
     Used by the toaster's poll endpoint. Always returns at most the last 50,
     newest first, to bound the payload.
+
+    Cross-timezone safe: the browser cursor is UTC (`...Z`) but server records
+    are IST (`+05:30`). We parse both to tz-aware datetimes so the comparison
+    is real wall-clock ordering, not lexicographic string ordering.
     """
     rows = read_recent_blocked(50)
     if not since_ts:
         return rows
-    return [r for r in rows if (r.get("ts") or "") > since_ts]
+    since_dt = _parse_iso(since_ts)
+    if since_dt is None:
+        # Unparseable cursor -> treat as no cursor (return everything).
+        return rows
+    out = []
+    for r in rows:
+        r_dt = _parse_iso(r.get("ts"))
+        if r_dt is not None and r_dt > since_dt:
+            out.append(r)
+    return out
