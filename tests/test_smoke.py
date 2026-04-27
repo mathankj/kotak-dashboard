@@ -88,12 +88,24 @@ def test_import_storage_modules():
     from backend.storage.trades import (  # noqa: F401
         LEDGER_FILE, read_trade_ledger, write_trade_ledger, next_trade_id,
     )
+    from backend.storage.paper_ledger import (  # noqa: F401
+        LEDGER_FILE as PAPER_LEDGER_FILE,
+        read_paper_ledger, write_paper_ledger, next_paper_id,
+    )
     from backend.storage.orders import (  # noqa: F401
         ORDERS_FILE, append_order, read_orders,
     )
     from backend.storage.history import (  # noqa: F401
         HISTORY_FILE, append_history, read_history,
     )
+
+
+def test_next_paper_id_empty_and_increment():
+    """next_paper_id mirrors next_trade_id semantics."""
+    from backend.storage.paper_ledger import next_paper_id
+    assert next_paper_id([]) == "1"
+    assert next_paper_id([{"id": "5"}, {"id": "3"}]) == "6"
+    assert next_paper_id([{"id": "abc"}, {"id": "2"}]) == "3"
 
 
 def test_import_strategy_modules():
