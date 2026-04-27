@@ -143,8 +143,14 @@
 </div>
 
 <script>
+// Server-side render hand-off: app.py injects the warm chain payload here so
+// the page paints immediately on reload/tab-switch instead of flashing
+// "Loading…" while the JS does its first /api/option-prices fetch.
+// Will be `null` only on the first hit of the day (universe not yet warm).
+window.__INITIAL_OPTION_DATA__ = {{ initial_data | tojson if initial_data else 'null' }};
+
 let currentIdx = "{{ indices[0].key if indices else '' }}";
-let lastData = null;
+let lastData = window.__INITIAL_OPTION_DATA__ || null;
 
 document.getElementById('idxTabs').addEventListener('click', (e) => {
   if (e.target.tagName !== 'BUTTON') return;
@@ -257,7 +263,12 @@ function tickClock() {
     ist.toTimeString().slice(0, 8) + ' IST';
 }
 setInterval(tickClock, 1000); tickClock();
-setInterval(refresh, 3000); refresh();
+// If the server already gave us data, paint it instantly (no flash of
+// "Loading…") and let the 3s poller take over for live updates. If the
+// server couldn't (cold universe), fall back to fetching immediately.
+if (lastData) { render(lastData); }
+setInterval(refresh, 3000);
+if (!lastData) { refresh(); }
 </script>
 {% include "_blocker_toaster.html" %}
 </body>

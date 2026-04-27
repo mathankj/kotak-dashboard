@@ -268,14 +268,94 @@ def gann_prices_api():
 
 
 # ---------- Options routes ----------
+def _build_option_chain_payload():
+    """Build the same dict /api/option-prices returns, for server-side render.
+
+    Returns None when the F&O universe cache isn't warm yet (first hit of
+    the day) so the template falls back to the "Loading…" placeholder and
+    the JS poller takes over.
+
+    Why a separate helper: we want the /options page to come down with all
+    three index chains already in the HTML so reload + tab-switch are
+    instant — no flash of "Loading option chain…" while the JS does its
+    first fetch. We deliberately do NOT call option_auto_strategy_tick()
+    here; the autonomous background ticker (in __main__) already runs the
+    strategy every 3s, so calling it from the page render would be a
+    duplicate tick and could double-stamp open_evaluated.
+    """
+    today = now_ist().strftime("%Y-%m-%d")
+    universe_ready = (
+        _option_universe["date"] == today
+        and all(i in _option_universe["by_index"] for i in INDEX_OPTIONS_CONFIG)
+    )
+    if not universe_ready:
+        return None
+    data, meta, err = fetch_option_quotes()
+    chains = {}
+    for idx_name, m in meta.items():
+        chains[idx_name] = {
+            "label": INDEX_OPTIONS_CONFIG[idx_name]["label"],
+            "spot": m.get("spot"),
+            "atm": m.get("atm"),
+            "expiry": m.get("expiry"),
+            "error": m.get("error"),
+            "rows": [],
+        }
+    by_idx_strike = {}
+    for q in data.values():
+        idx = q["index"]; s = q["strike"]
+        by_idx_strike.setdefault(idx, {}).setdefault(s, {})[q["option_type"]] = q
+    for idx_name, per_strike in by_idx_strike.items():
+        cfg = INDEX_OPTIONS_CONFIG[idx_name]
+        atm = chains[idx_name]["atm"]
+        step = cfg["strike_step"]
+        win = cfg["atm_window"]
+        strikes = [atm + i * step for i in range(-win, win + 1)] if atm else sorted(per_strike.keys())
+        for s in strikes:
+            legs = per_strike.get(s, {})
+            chains[idx_name]["rows"].append({
+                "strike": s,
+                "is_atm": atm is not None and s == atm,
+                "ce": legs.get("CE"),
+                "pe": legs.get("PE"),
+            })
+    all_trades = read_trade_ledger()
+    option_trades = [
+        t for t in all_trades
+        if t.get("asset_type") == "option"
+        and (t.get("status") == "OPEN" or t.get("date") == today)
+    ]
+    for t in option_trades:
+        if t.get("status") == "OPEN":
+            q = data.get(t.get("option_key"))
+            if q and q.get("ltp") is not None:
+                t["live_ltp"] = q["ltp"]
+                t["live_pnl_points"] = round(float(q["ltp"]) - float(t["entry_price"]), 2)
+    return {
+        "chains": chains,
+        "error": err,
+        "option_trades": option_trades,
+        "ts": now_ist().strftime("%H:%M:%S IST"),
+    }
+
+
 @app.route("/options")
 def options_view():
+    # Server-side render the initial chain so reload/tab-switch is instant.
+    # If the universe isn't warm yet, initial_data is None and the page
+    # falls back to the "Loading…" placeholder + JS poller (unchanged path).
+    try:
+        initial_data = _build_option_chain_payload()
+    except Exception as e:
+        print(f"[options_view] initial render failed: {type(e).__name__}: {e}")
+        initial_data = None
     return render_template(
         "options.html",
         tabs=TABS,
         active="options",
         indices=[{"key": k, "label": v["label"]} for k, v in INDEX_OPTIONS_CONFIG.items()],
         ucc=os.getenv("KOTAK_UCC", ""),
+        initial_data=initial_data,
     )
 
 
