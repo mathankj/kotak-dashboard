@@ -11,28 +11,35 @@ plumbing that any strategy needs:
   update_open_trades_mfe(quotes)      track max favourable price + farthest Gann level
                                       reached on every OPEN trade in the ledger
 """
+from backend import config_loader
 from backend.storage.trades import read_trade_ledger, write_trade_ledger
 from backend.strategy.gann import compute_target_level_reached
 
 
 # ---------- trading window ----------
+# Defaults — overridden live by config.yaml via config_loader.trading_window().
+# Kept here so anything still importing the constants keeps working.
 AUTO_HOURS_START = (9, 15)   # market opens
 AUTO_HOURS_END   = (15, 15)  # auto square-off cut-off
 
 
 def _auto_in_hours(now):
-    """True if 'now' is a weekday inside [09:15, 15:15) IST."""
+    """True if 'now' is a weekday inside [market_start, square_off) IST.
+    Window read fresh from config each call — supports hot-reload."""
     if now.weekday() >= 5:  # 5 = Sat, 6 = Sun
         return False
+    start, end = config_loader.trading_window()
     hm = (now.hour, now.minute)
-    return AUTO_HOURS_START <= hm < AUTO_HOURS_END
+    return start <= hm < end
 
 
 def _auto_at_or_after_squareoff(now):
-    """True if 'now' is a weekday at/after 15:15 IST. Weekend = idle (no force-exit)."""
+    """True if 'now' is a weekday at/after configured square-off time IST.
+    Weekend = idle (no force-exit)."""
     if now.weekday() >= 5:
         return False
-    return (now.hour, now.minute) >= AUTO_HOURS_END
+    _, end = config_loader.trading_window()
+    return (now.hour, now.minute) >= end
 
 
 # ---------- close a paper trade ----------

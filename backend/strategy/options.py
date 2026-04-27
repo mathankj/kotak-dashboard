@@ -33,6 +33,7 @@ LIVE_MODE master switch:
 """
 import threading
 
+from backend import config_loader
 from backend.kotak.client import safe_call
 from backend.kotak.instruments import INDEX_OPTIONS_CONFIG
 from backend.safety.audit import audit
@@ -74,18 +75,10 @@ LIVE_MODE = True
 # ----------------------------------------------------------------------
 # TUNABLES
 # ----------------------------------------------------------------------
+# Master enable flag for the whole auto-strategy. Code-only switch on
+# purpose; all OTHER tunables now live in config.yaml (editable from the
+# /config web page) — see backend/config_loader.py.
 AUTO_OPTION_STRATEGY_ENABLED = True
-
-# Set to None for unlimited entries per index per day.
-# Or an int (e.g. 2) to cap trades per index per day.
-MAX_TRADES_PER_INDEX_PER_DAY = None
-
-# Used by the ₹5-fixed SL variant (only matters if that variant is active).
-PREMIUM_SL_FIXED_POINTS = 5
-
-# Used by the % SL variant (only matters if that variant is active).
-# 0.30 = exit when premium drops to 70% of entry (a 30% loss).
-PREMIUM_SL_PCT = 0.30
 # ----------------------------------------------------------------------
 
 
@@ -101,76 +94,84 @@ _option_auto_state = {
 
 
 def _check_exit_reason(open_t, opt_ltp, spot,
-                       buy_lvl, sell_lvl, t1_lvl, s1_lvl):
+                       buy_lvl, sell_lvl, ce_target_lvl, pe_target_lvl):
     """Return the exit reason string for an open option trade, or None.
 
     =======================================================================
     EXIT CONDITIONS — checked in order, first hit wins.
     =======================================================================
 
-    1) STOP LOSS — three variants. Only ONE is active at a time.
-       To switch: comment out the active block, uncomment the desired one.
-       Currently active: variant C (spot reaches opposite Gann level).
+    1) STOP LOSS — three variants. The ACTIVE one is selected by
+       config.yaml -> stoploss.active (A | B | C). All three remain in
+       code so Ganesh can flip between them from the /config page.
 
-       Variant A — Fixed premium drop (e.g. ₹5):
-       --------------------------------------------------------
-       # if opt_ltp is not None and opt_ltp <= entry_price - PREMIUM_SL_FIXED_POINTS:
-       #     return "SL_PREMIUM_FIXED"
+       Variant A — Fixed premium drop (₹X below entry).
+                   Param:  stoploss.variant_a_premium_drop_rs
+       Variant B — Percentage premium drop (X% from entry).
+                   Param:  stoploss.variant_b_premium_drop_pct
+       Variant C — Spot reverses through OPPOSITE Gann level.
+                   CE: spot < SELL  |  PE: spot > BUY
+                   No params.
 
-       Variant B — Premium percentage drop (e.g. 30%):
-       --------------------------------------------------------
-       # if opt_ltp is not None and opt_ltp <= entry_price * (1 - PREMIUM_SL_PCT):
-       #     return "SL_PREMIUM_PCT"
+    2) PROFIT TARGET — spot reaches the configured Gann level.
+       config.yaml -> target.ce_level / target.pe_level. The level value
+       (T1/T2/.../WA) is resolved by the caller and passed in here.
 
-       Variant C — Spot reaches opposite Gann level (ACTIVE):
-       --------------------------------------------------------
-       (CE: spot < SELL level   |   PE: spot > BUY level)
-
-    2) PROFIT TARGET — spot reaches T1 (CE) or S1 (PE).
-
-    3) TIME SQUAREOFF — clock hits 15:15 IST. Handled at top of tick(),
-       not in this function.
+    3) TIME SQUAREOFF — clock hits configured square_off time. Handled at
+       the top of tick(), not in this function.
     =======================================================================
     """
     entry_price = open_t.get("entry_price")
     side = open_t.get("option_type")  # 'CE' or 'PE'
 
-    # ---------- (1) STOP LOSS — pick ONE variant ----------
+    cfg = config_loader.get()
+    sl_cfg = cfg["stoploss"]
+    active_sl = sl_cfg["active"]   # validated to A|B|C by loader
 
-    # --- Variant A: fixed premium drop (e.g. ₹5 below entry) ---
-    # if opt_ltp is not None and entry_price is not None:
-    #     if opt_ltp <= entry_price - PREMIUM_SL_FIXED_POINTS:
-    #         return "SL_PREMIUM_FIXED"
+    # ---------- (1) STOP LOSS — exactly ONE variant runs ----------
+    if active_sl == "A":
+        # Fixed ₹X premium drop below entry.
+        drop_rs = sl_cfg["variant_a_premium_drop_rs"]
+        if opt_ltp is not None and entry_price is not None:
+            if opt_ltp <= entry_price - drop_rs:
+                return "SL_PREMIUM_FIXED"
 
-    # --- Variant B: percentage premium drop (e.g. 30%) ---
-    # if opt_ltp is not None and entry_price is not None:
-    #     if opt_ltp <= entry_price * (1 - PREMIUM_SL_PCT):
-    #         return "SL_PREMIUM_PCT"
+    elif active_sl == "B":
+        # Percentage premium drop from entry. 30 -> exit when premium <= 70% of entry.
+        drop_pct = sl_cfg["variant_b_premium_drop_pct"]
+        if opt_ltp is not None and entry_price is not None:
+            if opt_ltp <= entry_price * (1 - drop_pct / 100.0):
+                return "SL_PREMIUM_PCT"
 
-    # --- Variant C (ACTIVE): spot reverses through opposite Gann level ---
-    if side == "CE":
-        if sell_lvl is not None and spot < sell_lvl:
-            return "SL_SELL_LVL"
-    else:  # PE
-        if buy_lvl is not None and spot > buy_lvl:
-            return "SL_BUY_LVL"
+    else:  # "C"
+        # Spot reverses through opposite Gann level.
+        if side == "CE":
+            if sell_lvl is not None and spot < sell_lvl:
+                return "SL_SELL_LVL"
+        else:  # PE
+            if buy_lvl is not None and spot > buy_lvl:
+                return "SL_BUY_LVL"
 
     # ---------- (2) PROFIT TARGET ----------
+    # ce_target_lvl / pe_target_lvl are the resolved numeric Gann level
+    # values for the configured target name (T1/T2/T3/BUY_WA on CE side,
+    # S1/S2/S3/SELL_WA on PE side).
     if side == "CE":
-        if t1_lvl is not None and spot >= t1_lvl:
-            return "TARGET_T1"
+        if ce_target_lvl is not None and spot >= ce_target_lvl:
+            return f"TARGET_{cfg['target']['ce_level']}"
     else:  # PE
-        if s1_lvl is not None and spot <= s1_lvl:
-            return "TARGET_S1"
+        if pe_target_lvl is not None and spot <= pe_target_lvl:
+            return f"TARGET_{cfg['target']['pe_level']}"
 
     return None
 
 
 def _can_open_more(idx_name, counts):
-    """Per-day cap check. None means unlimited."""
-    if MAX_TRADES_PER_INDEX_PER_DAY is None:
+    """Per-day cap check. None (or missing) in config means unlimited."""
+    cap = config_loader.per_day_cap(idx_name)
+    if cap is None:
         return True
-    return counts.get(idx_name, 0) < MAX_TRADES_PER_INDEX_PER_DAY
+    return counts.get(idx_name, 0) < cap
 
 
 def _option_trading_symbol(idx_name, atm, option_type, expiry):
@@ -276,8 +277,12 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
             levels  = gq.get("levels") or {}
             buy_lvl  = (levels.get("buy")  or {}).get("BUY")
             sell_lvl = (levels.get("sell") or {}).get("SELL")
-            t1_lvl   = (levels.get("buy")  or {}).get("T1")
-            s1_lvl   = (levels.get("sell") or {}).get("S1")
+            # Profit-target levels per config: CE side reads from `buy`
+            # group (BUY/BUY_WA/T1/T2/T3); PE side reads from `sell` group
+            # (SELL/SELL_WA/S1/S2/S3).
+            cfg_target = config_loader.get()["target"]
+            ce_target_lvl = (levels.get("buy")  or {}).get(cfg_target["ce_level"])
+            pe_target_lvl = (levels.get("sell") or {}).get(cfg_target["pe_level"])
             prev_spot = _option_auto_state["last_spot"].get(idx_name)
 
             # ---- EXIT check ----
@@ -287,7 +292,7 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                 opt_ltp = (opt_q or {}).get("ltp")
                 reason = _check_exit_reason(
                     open_t, opt_ltp, spot,
-                    buy_lvl, sell_lvl, t1_lvl, s1_lvl,
+                    buy_lvl, sell_lvl, ce_target_lvl, pe_target_lvl,
                 )
                 if reason and opt_ltp is not None:
                     _execute_exit(open_t, float(opt_ltp), reason,
@@ -309,29 +314,37 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                     and _can_open_more(idx_name, counts)):
                 option_type = None
                 today_str = today  # already computed above
+                entry_cfg = config_loader.get()["entry"]
                 already_evaluated_open = (
                     _option_auto_state["open_evaluated"].get(idx_name)
                         == today_str
                     or counts.get(idx_name, 0) > 0
                 )
                 if not already_evaluated_open:
-                    # (a) MARKET-OPEN evaluation
-                    if buy_lvl is not None and spot > buy_lvl:
-                        option_type = "CE"
-                    elif sell_lvl is not None and spot < sell_lvl:
-                        option_type = "PE"
-                    if option_type is None:
-                        # Spot is in the channel — no signal at open. Mark
-                        # evaluated so we don't keep re-checking; subsequent
-                        # ticks fall into the crossing branch as intended.
+                    # (a) MARKET-OPEN evaluation — runs only if enabled.
+                    # If disabled we still mark "evaluated" so subsequent
+                    # ticks fall straight through to the crossing branch.
+                    if entry_cfg["market_open_path"]:
+                        if buy_lvl is not None and spot > buy_lvl:
+                            option_type = "CE"
+                        elif sell_lvl is not None and spot < sell_lvl:
+                            option_type = "PE"
+                        if option_type is None:
+                            # Spot is in the channel — no signal at open. Mark
+                            # evaluated so we don't keep re-checking; subsequent
+                            # ticks fall into the crossing branch as intended.
+                            _option_auto_state["open_evaluated"][idx_name] = today_str
+                        # If option_type IS set, we leave open_evaluated UNSET
+                        # here. It gets stamped down below right before the
+                        # _execute_entry call — so a missing opt_ltp at this
+                        # exact tick won't burn the open-evaluation slot for
+                        # the day. Retries on the next tick when LTP lands.
+                    else:
+                        # Path A disabled — skip directly to crossing logic
+                        # by stamping evaluated immediately.
                         _option_auto_state["open_evaluated"][idx_name] = today_str
-                    # If option_type IS set, we leave open_evaluated UNSET
-                    # here. It gets stamped down below right before the
-                    # _execute_entry call — so a missing opt_ltp at this
-                    # exact tick won't burn the open-evaluation slot for
-                    # the day. Retries on the next tick when LTP lands.
-                elif prev_spot is not None:
-                    # (b) CROSSING
+                elif prev_spot is not None and entry_cfg["crossing_path"]:
+                    # (b) CROSSING — runs only if enabled.
                     if buy_lvl is not None and prev_spot <= buy_lvl < spot:
                         option_type = "CE"
                     elif sell_lvl is not None and prev_spot >= sell_lvl > spot:
@@ -379,12 +392,15 @@ def _execute_entry(idx_name, atm, option_type, opt_key,
             trigger_level="BUY" if option_type == "CE" else "SELL",
         )
         return False
+    # Apply user-configured lot multiplier from config.yaml. Final qty =
+    # broker's lot_size × multiplier (e.g. NIFTY 75 × 2 = 150 qty).
+    qty = lot_size * config_loader.lot_multiplier(idx_name)
     trading_symbol = _option_trading_symbol(idx_name, atm, option_type, expiry)
     if not trading_symbol:
         audit("ORDER_REFUSED_NO_TRADING_SYMBOL",
               scrip=opt_key, idx=idx_name, expiry=str(expiry))
         append_blocked(
-            kind="ENTRY", scrip=opt_key, side="B", qty=lot_size, price=opt_ltp,
+            kind="ENTRY", scrip=opt_key, side="B", qty=qty, price=opt_ltp,
             result="NO_TRADING_SYMBOL",
             message=f"Could not build trading symbol for expiry={expiry}",
             underlying=idx_name, strike=atm, option_type=option_type,
@@ -400,7 +416,7 @@ def _execute_entry(idx_name, atm, option_type, opt_key,
     }
     res = place_order_safe(
         client=client, scrip=scrip, side="B",
-        qty=lot_size, price=opt_ltp,
+        qty=qty, price=opt_ltp,
         order_type="L", product="MIS", validity="DAY",
         trigger="0", tag=f"auto:{opt_key}",
         live_mode=LIVE_MODE,
@@ -413,7 +429,7 @@ def _execute_entry(idx_name, atm, option_type, opt_key,
         # Record a Blockers row so Ganesh sees the refused attempt with full
         # context (scrip, side, qty, price, reason) without parsing audit.log.
         append_blocked(
-            kind="ENTRY", scrip=opt_key, side="B", qty=lot_size,
+            kind="ENTRY", scrip=opt_key, side="B", qty=qty,
             price=opt_ltp, result=res["result"], message=res["message"],
             underlying=idx_name, strike=atm, option_type=option_type,
             trading_symbol=trading_symbol, trigger_spot=spot,
@@ -441,7 +457,7 @@ def _execute_entry(idx_name, atm, option_type, opt_key,
         "entry_time": now.strftime("%H:%M:%S"),
         "entry_ts": now.timestamp(),
         "entry_price": round(opt_ltp, 2),
-        "qty": lot_size,
+        "qty": qty,
         "trigger_spot": round(spot, 2),
         "trigger_level": "BUY" if option_type == "CE" else "SELL",
         "max_min_target_price": round(opt_ltp, 2),
@@ -458,7 +474,7 @@ def _execute_entry(idx_name, atm, option_type, opt_key,
     trades.insert(0, row)
     write_trade_ledger(trades)
     audit("AUTO_ENTRY_PLACED", scrip=opt_key, mode=mode,
-          kotak_order_id=kotak_order_id, qty=lot_size, price=opt_ltp)
+          kotak_order_id=kotak_order_id, qty=qty, price=opt_ltp)
     return True
 
 

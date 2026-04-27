@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Config - Kotak Neo Dashboard</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif;
+         background: #0f1419; color: #d4d4d8; margin: 0; padding: 20px; }
+  header { display: flex; justify-content: space-between; align-items: center;
+           border-bottom: 2px solid #27272a; padding-bottom: 12px; margin-bottom: 20px; }
+  h1 { margin: 0; color: #fafafa; font-size: 24px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tabs a { padding: 8px 16px; background: #18181b; color: #a1a1aa;
+            text-decoration: none; border-radius: 6px; font-size: 14px;
+            border: 1px solid #27272a; }
+  .tabs a.active { background: #2563eb; color: white; border-color: #2563eb; }
+  .tabs a:hover:not(.active) { background: #27272a; color: #fafafa; }
+  .refresh { padding: 8px 16px; background: #16a34a; color: white; border: none;
+             border-radius: 6px; cursor: pointer; font-size: 14px; }
+  .card { background: #18181b; border: 1px solid #27272a;
+          border-radius: 8px; padding: 24px; margin-bottom: 16px; }
+  h2 { margin: 0 0 6px 0; color: #fafafa; font-size: 18px; }
+  .sub { color: #a1a1aa; font-size: 13px; margin-bottom: 20px; }
+  .row { display: grid; grid-template-columns: 200px 1fr; gap: 14px;
+         align-items: center; padding: 8px 0; border-top: 1px solid #1f1f23; }
+  .row:first-of-type { border-top: none; }
+  .lbl { color: #d4d4d8; font-size: 14px; font-weight: 500; }
+  .hint { color: #71717a; font-size: 12px; margin-top: 2px; }
+  .opt { display: flex; flex-direction: column; gap: 8px; }
+  .opt label { display: flex; align-items: flex-start; gap: 10px;
+               padding: 10px 12px; background: #1c1f24; border: 1px solid #27272a;
+               border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .opt label:hover { border-color: #3f3f46; background: #1f2329; }
+  .opt input[type=radio] { margin-top: 3px; accent-color: #2563eb; }
+  .opt label.active { border-color: #2563eb; background: #1e293b; }
+  .opt .name { font-weight: 600; color: #fafafa; }
+  .opt .desc { color: #a1a1aa; font-size: 12px; margin-top: 2px; display: block; }
+  input[type=text], input[type=number], select {
+      background: #0f1419; border: 1px solid #27272a; color: #fafafa;
+      padding: 8px 10px; border-radius: 4px; font-size: 14px;
+      font-family: inherit; width: 140px; }
+  input:focus, select:focus { outline: none; border-color: #2563eb; }
+  .toggle { display: flex; align-items: center; gap: 10px; }
+  .toggle input { accent-color: #2563eb; width: 18px; height: 18px; }
+  .save-bar { position: sticky; bottom: 0; background: #0f1419;
+              padding: 16px 0; border-top: 1px solid #27272a;
+              display: flex; gap: 12px; align-items: center; }
+  .save { padding: 10px 22px; background: #2563eb; color: white; border: none;
+          border-radius: 6px; cursor: pointer; font-size: 15px; font-weight: 600; }
+  .save:hover { background: #1d4ed8; }
+  .save:disabled { background: #3f3f46; cursor: not-allowed; }
+  .msg { font-size: 13px; }
+  .msg.ok  { color: #4ade80; }
+  .msg.err { color: #f87171; white-space: pre-wrap; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .idx { background: #1c1f24; padding: 12px; border-radius: 6px;
+         border: 1px solid #27272a; }
+  .idx h4 { margin: 0 0 8px 0; color: #fafafa; font-size: 13px;
+            text-transform: uppercase; letter-spacing: 0.5px; }
+  .lead { color: #a1a1aa; font-size: 13px; margin-bottom: 16px;
+          background: #1c1917; border-left: 3px solid #f59e0b;
+          padding: 10px 14px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Kotak Neo Dashboard</h1>
+  <div style="display:flex;align-items:center;gap:0">
+    {% include "_safety_header.html" %}
+    <form method="post" action="/refresh" style="margin:0">
+      <button class="refresh" type="submit">Refresh Login</button>
+    </form>
+  </div>
+</header>
+<div class="tabs">
+  {% for t in tabs %}
+    <a href="{{ t.url }}" class="{% if t.key == active %}active{% endif %}">{{ t.label }}</a>
+  {% endfor %}
+</div>
+
+<div class="lead">
+  Change auto-strategy behaviour here. Settings save instantly and the
+  next strategy tick (within 3 seconds) picks them up — no restart.
+</div>
+
+<form id="cfgForm">
+
+<!-- 1. Timings -->
+<div class="card">
+  <h2>1. Timings (IST)</h2>
+  <div class="sub">When the auto-strategy is allowed to enter trades and when it force-closes.</div>
+  <div class="row">
+    <div class="lbl">Market start
+      <div class="hint">Entry evaluation begins.</div>
+    </div>
+    <input type="text" name="timings.market_start" value="{{ cfg.timings.market_start }}" placeholder="HH:MM">
+  </div>
+  <div class="row">
+    <div class="lbl">Square-off
+      <div class="hint">Force-close every OPEN position at/after this time.</div>
+    </div>
+    <input type="text" name="timings.square_off" value="{{ cfg.timings.square_off }}" placeholder="HH:MM">
+  </div>
+</div>
+
+<!-- 2. Entry logic -->
+<div class="card">
+  <h2>2. Entry (Buy) Logic</h2>
+  <div class="sub">Tick which signal paths are allowed to enter trades. Both can run together.</div>
+  <div class="row">
+    <div class="lbl">Path A — Market-Open Snapshot
+      <div class="hint">First tick of the day per index: if spot is ALREADY past BUY → buy CE; past SELL → buy PE.</div>
+    </div>
+    <label class="toggle">
+      <input type="checkbox" name="entry.market_open_path" {% if cfg.entry.market_open_path %}checked{% endif %}>
+      <span>Enabled</span>
+    </label>
+  </div>
+  <div class="row">
+    <div class="lbl">Path B — Live Crossing
+      <div class="hint">Spot crosses BUY upward → buy CE. Spot crosses SELL downward → buy PE.</div>
+    </div>
+    <label class="toggle">
+      <input type="checkbox" name="entry.crossing_path" {% if cfg.entry.crossing_path %}checked{% endif %}>
+      <span>Enabled</span>
+    </label>
+  </div>
+</div>
+
+<!-- 3. Stoploss -->
+<div class="card">
+  <h2>3. Stoploss</h2>
+  <div class="sub">Three variants exist in the strategy. Pick ONE — the others stay dormant.</div>
+  <div class="opt">
+    <label>
+      <input type="radio" name="stoploss.active" value="A" {% if cfg.stoploss.active=='A' %}checked{% endif %}>
+      <span>
+        <span class="name">Variant A — Fixed premium drop</span>
+        <span class="desc">Exit when option premium falls
+          <input type="number" name="stoploss.variant_a_premium_drop_rs" min="0" step="0.5" style="width:70px"
+                 value="{{ cfg.stoploss.variant_a_premium_drop_rs }}"> ₹ below entry price.</span>
+      </span>
+    </label>
+    <label>
+      <input type="radio" name="stoploss.active" value="B" {% if cfg.stoploss.active=='B' %}checked{% endif %}>
+      <span>
+        <span class="name">Variant B — Percentage premium drop</span>
+        <span class="desc">Exit when option premium drops
+          <input type="number" name="stoploss.variant_b_premium_drop_pct" min="0" max="100" step="1" style="width:70px"
+                 value="{{ cfg.stoploss.variant_b_premium_drop_pct }}">% from entry price.</span>
+      </span>
+    </label>
+    <label>
+      <input type="radio" name="stoploss.active" value="C" {% if cfg.stoploss.active=='C' %}checked{% endif %}>
+      <span>
+        <span class="name">Variant C — Opposite Gann level</span>
+        <span class="desc">CE: exit if spot drops below SELL level. PE: exit if spot rises above BUY level. (No params.)</span>
+      </span>
+    </label>
+  </div>
+</div>
+
+<!-- 4. Profit target -->
+<div class="card">
+  <h2>4. Profit Target</h2>
+  <div class="sub">Which Gann level closes a winning trade. Set independently per side.</div>
+  <div class="row">
+    <div class="lbl">CE target level
+      <div class="hint">Above-open levels. Default T1.</div>
+    </div>
+    <select name="target.ce_level">
+      {% for lvl in ['T1','T2','T3','BUY_WA'] %}
+        <option value="{{ lvl }}" {% if cfg.target.ce_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="row">
+    <div class="lbl">PE target level
+      <div class="hint">Below-open levels. Default S1.</div>
+    </div>
+    <select name="target.pe_level">
+      {% for lvl in ['S1','S2','S3','SELL_WA'] %}
+        <option value="{{ lvl }}" {% if cfg.target.pe_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+      {% endfor %}
+    </select>
+  </div>
+</div>
+
+<!-- 5. Lot multipliers -->
+<div class="card">
+  <h2>5. Lot Multipliers</h2>
+  <div class="sub">Final qty = broker lot size × this number. Per index.</div>
+  <div class="grid3">
+    {% for idx, lot in [('NIFTY',75),('BANKNIFTY',35),('SENSEX',20)] %}
+      <div class="idx">
+        <h4>{{ idx }}</h4>
+        <div class="hint">Broker lot: {{ lot }}</div>
+        <input type="number" name="lots.{{ idx }}" min="1" step="1" value="{{ cfg.lots[idx] }}" style="width:100%">
+        <div class="hint">×{{ cfg.lots[idx] }} = {{ lot * cfg.lots[idx] }} qty per trade</div>
+      </div>
+    {% endfor %}
+  </div>
+</div>
+
+<!-- 6. Per-day cap -->
+<div class="card">
+  <h2>6. Per-Day Trade Cap</h2>
+  <div class="sub">Max entries per index per day. Leave blank = unlimited.</div>
+  <div class="grid3">
+    {% for idx in ['NIFTY','BANKNIFTY','SENSEX'] %}
+      <div class="idx">
+        <h4>{{ idx }}</h4>
+        <input type="number" name="per_day_cap.{{ idx }}" min="1" step="1"
+               value="{% if cfg.per_day_cap[idx] is not none %}{{ cfg.per_day_cap[idx] }}{% endif %}"
+               placeholder="unlimited" style="width:100%">
+      </div>
+    {% endfor %}
+  </div>
+</div>
+
+<div class="save-bar">
+  <button type="submit" class="save" id="saveBtn">Save Changes</button>
+  <span id="msg" class="msg"></span>
+</div>
+</form>
+
+<script>
+// Build a nested object from form fields with dotted names like "stoploss.active".
+function gather() {
+  const out = {};
+  const form = document.getElementById('cfgForm');
+  // Radios first (so the unchecked ones don't appear as null).
+  const radios = {};
+  form.querySelectorAll('input[type=radio]').forEach(r => {
+    if (r.checked) radios[r.name] = r.value;
+  });
+  Object.entries(radios).forEach(([k, v]) => setNested(out, k, v));
+
+  form.querySelectorAll('input[type=text], input[type=number], select').forEach(el => {
+    let val = el.value;
+    if (el.type === 'number') {
+      val = (val === '' ? null : Number(val));
+    }
+    setNested(out, el.name, val);
+  });
+  form.querySelectorAll('input[type=checkbox]').forEach(el => {
+    setNested(out, el.name, el.checked);
+  });
+  return out;
+}
+
+function setNested(obj, dotted, val) {
+  const parts = dotted.split('.');
+  let cur = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    cur[parts[i]] = cur[parts[i]] || {};
+    cur = cur[parts[i]];
+  }
+  cur[parts[parts.length - 1]] = val;
+}
+
+document.getElementById('cfgForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById('saveBtn');
+  const msg = document.getElementById('msg');
+  btn.disabled = true; msg.textContent = 'Saving...'; msg.className = 'msg';
+  try {
+    const r = await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(gather()),
+    });
+    const d = await r.json();
+    if (d.ok) {
+      msg.textContent = 'Saved. Strategy will pick this up on the next tick.';
+      msg.className = 'msg ok';
+    } else {
+      msg.textContent = 'Validation failed:\n' + (d.error || 'unknown');
+      msg.className = 'msg err';
+    }
+  } catch (err) {
+    msg.textContent = 'Network error: ' + err;
+    msg.className = 'msg err';
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+
+{% include "_blocker_toaster.html" %}
+</body>
+</html>

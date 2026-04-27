@@ -35,6 +35,7 @@ from backend.storage.orders import ORDERS_FILE, append_order, read_orders
 from backend.storage.blocked import (
     append_blocked, read_recent_blocked, read_blocked_since,
 )
+from backend import config_loader
 from backend.strategy.gann import (
     GANN_STEP, SELL_LEVELS, BUY_LEVELS, LEVEL_COLORS,
     BUY_LEVEL_ORDER, SELL_LEVEL_ORDER,
@@ -98,6 +99,7 @@ TABS = [
     {"key": "positions", "url": "/positions", "label": "Positions"},
     {"key": "trades", "url": "/trades", "label": "Trade Log"},
     {"key": "blockers", "url": "/blockers", "label": "Blockers"},
+    {"key": "config", "url": "/config", "label": "Config"},
     {"key": "audit", "url": "/audit", "label": "Audit"},
     {"key": "history", "url": "/history", "label": "Login History"},
 ]
@@ -597,6 +599,37 @@ def blocked_list_api():
         "blocks": read_recent_blocked(500),
         "ts": now_ist().isoformat(),
     })
+
+
+# ---------- Config (user-tunable strategy params) ----------
+@app.route("/config")
+def config_view():
+    """Render the strategy-config form. All values come from config.yaml
+    via config_loader (which hot-reloads on file mtime change)."""
+    return render_template(
+        "config.html",
+        tabs=TABS,
+        active="config",
+        cfg=config_loader.get(),
+    )
+
+
+@app.route("/api/config", methods=["GET", "POST"])
+def config_api():
+    """GET returns the current config. POST validates + writes config.yaml.
+    The strategy tick picks up changes on its next pass (within ~3s)."""
+    if request.method == "GET":
+        return jsonify({"ok": True, "config": config_loader.get()})
+    payload = request.get_json(force=True, silent=True) or {}
+    try:
+        saved = config_loader.save(payload)
+        audit("CONFIG_SAVED", keys=list(saved.keys()))
+        return jsonify({"ok": True, "config": saved})
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"ok": False,
+                        "error": f"{type(e).__name__}: {e}"}), 500
 
 
 @app.route("/api/margin-summary")
