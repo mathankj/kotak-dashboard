@@ -117,8 +117,8 @@ VALID_APPLY_TO = {"options", "futures", "both"}
 VALID_STOPLOSS = {"A", "B", "C"}
 VALID_BUY_LEVELS  = {"BUY", "BUY_WA"}
 VALID_SELL_LEVELS = {"SELL", "SELL_WA"}
-VALID_CE_TARGETS = {"T1", "T2", "T3", "BUY_WA"}
-VALID_PE_TARGETS = {"S1", "S2", "S3", "SELL_WA"}
+VALID_CE_TARGETS = {"T1", "T2", "T3", "T4", "T5", "BUY_WA"}
+VALID_PE_TARGETS = {"S1", "S2", "S3", "S4", "S5", "SELL_WA"}
 INDEX_NAMES = ("NIFTY", "BANKNIFTY", "SENSEX")
 
 
