@@ -181,6 +181,45 @@ def _fetch_available_cash(client):
     return None
 
 
+# ---------- entry signal helper (shared with paper book) ----------
+def _compute_futures_entry_signal(idx_name, spot, prev_spot, levels, cfg,
+                                  already_evaluated_open):
+    """Pure decision: which side ("BUY"|"SELL"|None) and stamp_now flag.
+
+    Mirrors backend.strategy.options._compute_entry_signal but produces
+    futures-side semantics (BUY = long, SELL = short).
+
+    stamp_now=True means: caller should stamp open_evaluated[idx]=today
+    NOW. stamp_now=False means: caller defers (used when side IS set on
+    the market-open path, since we want to wait until fut_ltp is
+    available before burning the open-evaluation slot).
+    """
+    entry_cfg = cfg["entry"]
+    mo_buy_lvl  = config_loader.resolve_buy_level (levels, entry_cfg["market_open_buy_level"])
+    mo_sell_lvl = config_loader.resolve_sell_level(levels, entry_cfg["market_open_sell_level"])
+    cr_buy_lvl  = config_loader.resolve_buy_level (levels, entry_cfg["crossing_buy_level"])
+    cr_sell_lvl = config_loader.resolve_sell_level(levels, entry_cfg["crossing_sell_level"])
+
+    side = None
+    stamp_now = False
+    if not already_evaluated_open:
+        if entry_cfg["market_open_path"]:
+            if mo_buy_lvl is not None and spot > mo_buy_lvl:
+                side = "BUY"
+            elif mo_sell_lvl is not None and spot < mo_sell_lvl:
+                side = "SELL"
+            stamp_now = (side is None)
+        else:
+            stamp_now = True
+    elif prev_spot is not None and entry_cfg["crossing_path"]:
+        if cr_buy_lvl is not None and prev_spot <= cr_buy_lvl < spot:
+            side = "BUY"
+        elif cr_sell_lvl is not None and prev_spot >= cr_sell_lvl > spot:
+            side = "SELL"
+
+    return side, stamp_now
+
+
 # ---------- main tick ----------
 def future_auto_strategy_tick(future_data, gann_quotes, client=None):
     """One tick of the futures auto-strategy.
@@ -277,26 +316,20 @@ def future_auto_strategy_tick(future_data, gann_quotes, client=None):
             # ---- ENTRY check ----
             if (idx_name not in open_by_underlying
                     and _can_open_more(idx_name, counts)):
-                side = None  # "BUY" (long) or "SELL" (short)
                 already_evaluated_open = (
                     _future_auto_state["open_evaluated"].get(idx_name) == today
                     or counts.get(idx_name, 0) > 0
                 )
-                if not already_evaluated_open:
-                    if entry_cfg["market_open_path"]:
-                        if mo_buy_lvl is not None and spot > mo_buy_lvl:
-                            side = "BUY"
-                        elif mo_sell_lvl is not None and spot < mo_sell_lvl:
-                            side = "SELL"
-                        if side is None:
-                            _future_auto_state["open_evaluated"][idx_name] = today
-                    else:
-                        _future_auto_state["open_evaluated"][idx_name] = today
-                elif prev_spot is not None and entry_cfg["crossing_path"]:
-                    if cr_buy_lvl is not None and prev_spot <= cr_buy_lvl < spot:
-                        side = "BUY"
-                    elif cr_sell_lvl is not None and prev_spot >= cr_sell_lvl > spot:
-                        side = "SELL"
+                side, stamp_now = _compute_futures_entry_signal(
+                    idx_name, spot, prev_spot, levels, cfg,
+                    already_evaluated_open=already_evaluated_open,
+                )
+                if stamp_now:
+                    _future_auto_state["open_evaluated"][idx_name] = today
+                # If side is set on the market-open path, the stamp is
+                # deferred — it lands just before _execute_futures_entry
+                # below, so a missing fut_ltp at this tick won't burn
+                # the open-evaluation slot.
 
                 if side and fut_ltp is not None:
                     _future_auto_state["open_evaluated"][idx_name] = today
