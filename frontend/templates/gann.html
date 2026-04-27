@@ -37,19 +37,30 @@
   th.group-sell { background: #6b7280; color: #fff; }
   th.group-buy  { background: #6b7280; color: #fff; }
   th.group-ltp  { background: #1f2937; color: #fff; }
-  /* LTP cell gets coloured based on nearest gann level */
-  td.ltp { font-weight: 700; background: #f9fafb; font-size: 13px;
-           transition: background 0.3s, color 0.3s; }
-  td.ltp.lvl-S3      { background: #B71C1C; color: #fff; }
-  td.ltp.lvl-S2      { background: #C62828; color: #fff; }
-  td.ltp.lvl-S1      { background: #D32F2F; color: #fff; }
-  td.ltp.lvl-SELL_WA { background: #FF9800; color: #fff; }
-  td.ltp.lvl-SELL    { background: #EF9A9A; color: #7f1d1d; }
-  td.ltp.lvl-BUY     { background: #A5D6A7; color: #14532d; }
-  td.ltp.lvl-BUY_WA  { background: #FF9800; color: #fff; }
-  td.ltp.lvl-T1      { background: #81C784; color: #fff; }
-  td.ltp.lvl-T2      { background: #66BB6A; color: #fff; }
-  td.ltp.lvl-T3      { background: #388E3C; color: #fff; }
+  /* LTP cell + matching level cells share the same colour palette.
+     Selectors are unprefixed so level <td>s pick them up too — the JS
+     adds .lvl-* on a level cell once LTP has crossed that level
+     (sell-side: LTP <= level price; buy-side: LTP >= level price). */
+  td.ltp { font-weight: 700; background: #f9fafb; font-size: 13px; }
+  td[data-col].lvl-on, td.ltp[class*="lvl-"] { transition: background 0.3s, color 0.3s; }
+  td.lvl-S3      { background: #B71C1C; color: #fff; }
+  td.lvl-S2      { background: #C62828; color: #fff; }
+  td.lvl-S1      { background: #D32F2F; color: #fff; }
+  td.lvl-SELL_WA { background: #FF9800; color: #fff; }
+  td.lvl-SELL    { background: #EF9A9A; color: #7f1d1d; }
+  td.lvl-BUY     { background: #A5D6A7; color: #14532d; }
+  td.lvl-BUY_WA  { background: #FF9800; color: #fff; }
+  td.lvl-T1      { background: #81C784; color: #fff; }
+  td.lvl-T2      { background: #66BB6A; color: #fff; }
+  td.lvl-T3      { background: #388E3C; color: #fff; }
+  /* Level cells turn semi-bold once they're "crossed" so the heatmap
+     reads at a glance even on dense rows. */
+  td[data-col].lvl-S3,  td[data-col].lvl-S2,  td[data-col].lvl-S1,
+  td[data-col].lvl-SELL_WA, td[data-col].lvl-SELL,
+  td[data-col].lvl-BUY, td[data-col].lvl-BUY_WA,
+  td[data-col].lvl-T1, td[data-col].lvl-T2, td[data-col].lvl-T3 {
+    font-weight: 600;
+  }
   /* Header counter + toggle */
   .counter { display: inline-flex; gap: 10px; align-items: center;
              background: #f3f4f6; padding: 6px 12px; border-radius: 6px;
@@ -263,20 +274,30 @@ function fmt(v) {
   return n.toFixed(2);
 }
 
-// Paint a level cell as plain text (no colouring — only LTP cell gets coloured)
-function paintCell(td, level, value, ltp) {
-  if (!td) return;
-  if (value === null || value === undefined) {
-    td.textContent = "-";
-  } else {
-    td.textContent = fmt(value);
-  }
-}
-
 const LTP_LEVEL_CLASSES = [
   "lvl-S3","lvl-S2","lvl-S1","lvl-SELL_WA","lvl-SELL",
   "lvl-BUY","lvl-BUY_WA","lvl-T1","lvl-T2","lvl-T3",
 ];
+
+// "Crossed" heatmap: a level cell lights up once LTP has reached or moved
+// past it. Sell ladder lights up as price falls (LTP <= level price); buy
+// ladder lights up as price rises (LTP >= level price). Colours match
+// the LTP cell so the row reads as a single gradient.
+function paintCell(td, level, value, ltp) {
+  if (!td) return;
+  td.classList.remove(...LTP_LEVEL_CLASSES);
+  if (value === null || value === undefined) {
+    td.textContent = "-";
+    return;
+  }
+  td.textContent = fmt(value);
+  const ltpN = Number(ltp);
+  const valN = Number(value);
+  if (!isFinite(ltpN) || !isFinite(valN)) return;
+  const isSellSide = SELL_LVLS.includes(level);
+  const crossed = isSellSide ? (ltpN <= valN) : (ltpN >= valN);
+  if (crossed) td.classList.add("lvl-" + level);
+}
 
 function paintLtpCell(td, nearest) {
   if (!td) return;
