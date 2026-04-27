@@ -384,6 +384,7 @@ def trades_view():
         active="trades",
         trades=trades_sorted,
         stats=compute_stats(trades),
+        cfg=config_loader.get(),
     )
 
 
@@ -405,6 +406,7 @@ def paper_trades_view():
         active="paper_trades",
         trades=rows_sorted,
         stats=compute_stats(rows),
+        cfg=config_loader.get(),
     )
 
 

@@ -97,6 +97,9 @@
           <th>Exit Time</th><th class="num">Exit</th>
           <th>Exit Reason</th>
           <th class="num">P&amp;L pts</th><th class="num">P&amp;L %</th>
+          {% if cfg and cfg.stoploss.active == 'D' %}
+            <th class="num">Trail SL</th>
+          {% endif %}
           <th>Duration</th>
         </tr>
       </thead>
@@ -124,6 +127,12 @@
             <td class="num {% if plp is not none and plp >= 0 %}pos{% elif plp is not none %}neg{% endif %}">
               {% if plp is not none %}{{ '%+.2f'|format(plp) }}%{% else %}—{% endif %}
             </td>
+            {% if cfg and cfg.stoploss.active == 'D' %}
+              {% set trail = t.get('trail_sl_price') %}
+              <td class="num">
+                {% if t.get('status') == 'OPEN' and trail is not none %}{{ '%.2f'|format(trail) }}{% else %}—{% endif %}
+              </td>
+            {% endif %}
             <td>{{ t.get('duration_str', '') or '—' }}</td>
           </tr>
         {% endfor %}
