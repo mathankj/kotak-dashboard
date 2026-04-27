@@ -64,7 +64,8 @@
 
 <div class="card">
   <div class="card-head">
-    <h2>Blocked Order Attempts ({{ blocks|length }})</h2>
+    <h2>Blocked Order Attempts (<span id="blkCount">{{ blocks|length }}</span>)</h2>
+    <span id="blkLive" style="font-size:11px;color:#16a34a;">● live</span>
   </div>
   <div class="lead">
     Every order the safety wrapper refused to send to Kotak. Use this to see
@@ -72,7 +73,9 @@
     couldn't &mdash; e.g. zero balance, kill switch engaged, broker error,
     or no matching position to exit.
   </div>
-  {% if blocks %}
+  {# Always render the table (even when empty) so the JS poller can fill it
+     in live as the autonomous ticker writes new blocked-attempt entries.
+     Empty state is handled inside <tbody> as a single placeholder row. #}
     <table>
       <thead>
         <tr>
@@ -88,7 +91,10 @@
           <th>Source</th>
         </tr>
       </thead>
-      <tbody>
+      <tbody id="blkBody">
+        {% if not blocks %}
+          <tr><td colspan="10" class="empty" style="text-align:center;">No blocked attempts yet. (Live-updates every 3s.)</td></tr>
+        {% endif %}
         {% for b in blocks %}
           <tr>
             <td>{{ b.get('ts', '')[11:19] }}<br><span style="color:#71717a;font-size:11px">{{ b.get('ts', '')[:10] }}</span></td>
@@ -109,10 +115,65 @@
         {% endfor %}
       </tbody>
     </table>
-  {% else %}
-    <div class="empty">No blocked attempts yet. (When the auto-strategy tries to place an order that gets refused &mdash; e.g. insufficient margin &mdash; you'll see it here.)</div>
-  {% endif %}
 </div>
+
+<script>
+// Live-refresh the blocked-attempts table every 3s so the count and rows
+// update on their own as the autonomous ticker writes new entries — no
+// manual page refresh required. The toaster (_blocker_toaster.html) handles
+// the popup notification on top of this.
+const BLK_POLL_MS = 3000;
+
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function rowHtml(b) {
+  const ts = b.ts || '';
+  const time = ts.slice(11, 19);
+  const date = ts.slice(0, 10);
+  const sideHtml = b.side
+    ? `<span class="pill pill-side-${escHtml(b.side)}">${b.side === 'B' ? 'BUY' : 'SELL'}</span>`
+    : '-';
+  const priceHtml = (b.price != null && b.price !== '')
+    ? Number(b.price).toFixed(2)
+    : '-';
+  return `<tr>
+    <td>${escHtml(time)}<br><span style="color:#71717a;font-size:11px">${escHtml(date)}</span></td>
+    <td><span class="pill pill-blocked">BLOCKED</span></td>
+    <td><span class="pill pill-kind">${escHtml(b.kind || '-')}</span></td>
+    <td>${escHtml(b.scrip || '')}</td>
+    <td>${sideHtml}</td>
+    <td class="num">${escHtml(b.qty || '-')}</td>
+    <td class="num">${priceHtml}</td>
+    <td><span class="reason">${escHtml(b.result || '')}</span></td>
+    <td class="msg">${escHtml(b.message || '')}</td>
+    <td><span class="pill pill-source">${escHtml(b.source || '-')}</span></td>
+  </tr>`;
+}
+
+async function refreshBlockers() {
+  const live = document.getElementById('blkLive');
+  try {
+    const r = await fetch('/api/blocked-list', {cache: 'no-store'});
+    const d = await r.json();
+    const blocks = d.blocks || [];
+    document.getElementById('blkCount').textContent = blocks.length;
+    const body = document.getElementById('blkBody');
+    if (body) {
+      body.innerHTML = blocks.length
+        ? blocks.map(rowHtml).join('')
+        : '<tr><td colspan="10" class="empty" style="text-align:center;">No blocked attempts yet. (Live-updates every 3s.)</td></tr>';
+    }
+    live.textContent = '● live'; live.style.color = '#16a34a';
+  } catch (e) {
+    live.textContent = '● stale'; live.style.color = '#dc2626';
+  }
+}
+setInterval(refreshBlockers, BLK_POLL_MS);
+</script>
 
 {% include "_blocker_toaster.html" %}
 </body>

@@ -587,6 +587,18 @@ def recent_blocks_api():
     })
 
 
+@app.route("/api/blocked-list")
+def blocked_list_api():
+    """Live-table feed for the /blockers page. Returns the same list the
+    page first server-renders (last 500 blocks, newest first). Polled by
+    the page every 3s so the count + rows update without a manual refresh
+    when the autonomous ticker writes new entries."""
+    return jsonify({
+        "blocks": read_recent_blocked(500),
+        "ts": now_ist().isoformat(),
+    })
+
+
 @app.route("/api/margin-summary")
 def margin_summary_api():
     """Return available cash so the order ticket can show margin headroom."""
