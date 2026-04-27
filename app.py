@@ -25,7 +25,7 @@ from backend.kotak.instruments import (
     _fetch_index_fo_universe, _parse_item_strike, _parse_item_expiry_date,
 )
 from backend.quotes import (
-    fetch_quotes, fetch_option_quotes, build_option_chain,
+    fetch_quotes, fetch_option_quotes, fetch_future_quotes, build_option_chain,
     build_all_option_tokens, _feed,
 )
 from backend.storage.trades import (
@@ -45,6 +45,10 @@ from backend.strategy.common import update_open_trades_mfe, _auto_in_hours
 from backend.strategy.options import (
     AUTO_OPTION_STRATEGY_ENABLED, LIVE_MODE,
     _option_auto_state, option_auto_strategy_tick,
+)
+from backend.strategy.futures import (
+    AUTO_FUTURE_STRATEGY_ENABLED,
+    _future_auto_state, future_auto_strategy_tick,
 )
 from backend.safety.kill_switch import is_halted, halt, halt_info
 from backend.safety.orders import (
@@ -904,6 +908,21 @@ def _strategy_ticker_loop():
                             data, meta, gann_quotes,
                             client=client_for_strategy,
                         )
+                        # Futures runs alongside options. Independent ledger
+                        # rows (asset_type=future), per-index enable flags
+                        # in config.yaml -> futures.enabled.{IDX}. Skips the
+                        # fetch entirely if no index is enabled.
+                        if config_loader.futures_any_enabled():
+                            try:
+                                fut_data, _fut_err = fetch_future_quotes()
+                                if fut_data:
+                                    future_auto_strategy_tick(
+                                        fut_data, gann_quotes,
+                                        client=client_for_strategy,
+                                    )
+                            except Exception as e:
+                                print(f"[ticker] futures tick failed: "
+                                      f"{type(e).__name__}: {e}")
                 except Exception as e:
                     print(f"[ticker] tick failed: "
                           f"{type(e).__name__}: {e}")

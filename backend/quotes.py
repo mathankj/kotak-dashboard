@@ -16,6 +16,7 @@ from backend.kotak.client import ensure_client
 from backend.kotak.instruments import (
     SCRIPS, INDEX_OPTIONS_CONFIG,
     _fetch_index_fo_universe, _parse_item_strike, _parse_item_expiry_date,
+    _fetch_nearest_index_future,
 )
 from backend.kotak.quote_feed import QuoteFeed
 from backend.strategy.gann import gann_levels
@@ -34,6 +35,9 @@ WS_FRESH_SECONDS = 5.0   # WS tick considered fresh if newer than this
 
 # Option chain cache (keyed by "<INDEX> <STRIKE> CE/PE")
 _option_quote_cache = {"ts": 0.0, "data": {}, "error": None, "meta": {}}
+
+# Futures cache: {idx_name: {trading_symbol, token, exchange, expiry, lot_size, ltp}}
+_future_quote_cache = {"ts": 0.0, "data": {}, "error": None}
 
 
 def _ensure_feed_started():
@@ -397,3 +401,119 @@ def fetch_option_quotes(force=False):
     _option_quote_cache["meta"] = idx_meta
     _option_quote_cache["error"] = last_err
     return out, idx_meta, last_err
+
+
+def fetch_future_quotes(force=False):
+    """Live quotes for nearest-expiry index futures (NIFTY/BANKNIFTY/SENSEX).
+
+    Returns ({idx_name: rec}, error_str). Each rec carries:
+      trading_symbol, token, exchange, expiry, lot_size, ltp
+    Same TTL + WS overlay pattern as fetch_option_quotes — futures are
+    static per day so we only fetch the contract metadata once per index
+    via _fetch_nearest_index_future, then poll quotes by token.
+    """
+    now = time.time()
+    if (not force
+            and (now - _future_quote_cache["ts"]) < QUOTE_TTL
+            and _future_quote_cache["data"]):
+        return _future_quote_cache["data"], _future_quote_cache["error"]
+
+    by_idx = {}
+    last_err = None
+    for idx_name in INDEX_OPTIONS_CONFIG.keys():
+        rec, err = _fetch_nearest_index_future(idx_name)
+        if err:
+            last_err = err
+            continue
+        by_idx[idx_name] = {
+            "trading_symbol": rec.get("pTrdSymbol"),
+            "token":          str(rec.get("pSymbol")),
+            "exchange":       rec.get("pExchSeg") or INDEX_OPTIONS_CONFIG[idx_name]["exchange_segment"],
+            "expiry":         rec.get("pExpiryDate"),
+            "lot_size":       int(rec.get("lLotSize") or 0) or None,
+            "ltp":            None,
+            "open":           None,
+            "low":            None,
+            "high":           None,
+        }
+    if not by_idx:
+        return {}, last_err or "no future contracts resolved"
+
+    try:
+        client = ensure_client()
+    except Exception as e:
+        return by_idx, f"login: {e}"
+
+    tokens = [{"instrument_token": v["token"], "exchange_segment": v["exchange"]}
+              for v in by_idx.values()]
+
+    def _call(qt):
+        try:
+            r = client.quotes(instrument_tokens=tokens, quote_type=qt)
+        except Exception as e:
+            return None, f"{qt}: {type(e).__name__}: {e}"
+        if r is None or r == "" or r == {} or r == []:
+            return [], None
+        if isinstance(r, dict) and "fault" in r:
+            return None, f"{qt}: {r['fault'].get('message', 'fault')}"
+        if isinstance(r, list):
+            return r, None
+        if isinstance(r, dict):
+            for key in ("data", "result", "quotes"):
+                v = r.get(key)
+                if isinstance(v, list):
+                    return v, None
+            if any(k in r for k in ("ohlc", "ltp", "exchange_token")):
+                return [r], None
+        return [], None
+
+    ohlc_items, e1 = _call("ohlc")
+    ltp_items, e2 = _call("ltp")
+    last_err = e1 or e2 or last_err
+
+    def index_by_key(items):
+        idx = {}
+        for it in (items or []):
+            if not isinstance(it, dict):
+                continue
+            k = (str(it.get("exchange", "")).strip().lower(),
+                 str(it.get("exchange_token", "")).strip().lower())
+            idx[k] = it
+        return idx
+
+    ohlc_idx = index_by_key(ohlc_items)
+    ltp_idx = index_by_key(ltp_items)
+    for idx_name, rec in by_idx.items():
+        k = (rec["exchange"].lower(), str(rec["token"]).lower())
+        ohlc_it = ohlc_idx.get(k, {})
+        ltp_it = ltp_idx.get(k, {})
+        ohlc = ohlc_it.get("ohlc") if isinstance(ohlc_it.get("ohlc"), dict) else {}
+        ltp_v = None
+        try:
+            ltp_v = float(ltp_it.get("ltp")) if ltp_it.get("ltp") not in (None, "", "0") else None
+        except (TypeError, ValueError):
+            pass
+        close = float(ohlc.get("close")) if ohlc.get("close") not in (None, "", "0") else None
+        if ltp_v is None and close is not None:
+            ltp_v = close
+        rec["ltp"] = ltp_v
+        rec["open"] = float(ohlc.get("open")) if ohlc.get("open") not in (None, "", "0") else None
+        rec["low"]  = float(ohlc.get("low"))  if ohlc.get("low")  not in (None, "", "0") else None
+        rec["high"] = float(ohlc.get("high")) if ohlc.get("high") not in (None, "", "0") else None
+        rec["close"] = close
+
+    # Overlay fresh WS LTPs and keep the future-subs slot up to date.
+    try:
+        _ensure_feed_started()
+        fut_subs = [{"instrument_token": v["token"],
+                     "exchange_segment": v["exchange"]} for v in by_idx.values()]
+        if _feed.set_future_subs(fut_subs):
+            print(f"[quote_feed] future subs updated: {len(fut_subs)} contracts")
+        _ws_overlay(by_idx, {n: (v["exchange"], v["token"]) for n, v in by_idx.items()})
+    except Exception as e:
+        print(f"[quote_feed] overlay (futures) failed: {type(e).__name__}: {e}")
+
+    _future_quote_cache["data"] = by_idx
+    _future_quote_cache["ts"] = now
+    _future_quote_cache["error"] = last_err
+    return by_idx, last_err

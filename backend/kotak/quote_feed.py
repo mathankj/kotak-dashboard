@@ -56,6 +56,7 @@ class QuoteFeed:
         self._index_subs = []   # list[{"instrument_token","exchange_segment"}]
         self._scrip_subs = []
         self._option_subs = []  # rebuilt by update_option_subs()
+        self._future_subs = []  # nearest-expiry index futures (NIFTY/BN/SENSEX)
         self._subs_lock = threading.Lock()
 
         # status / diagnostics
@@ -88,6 +89,18 @@ class QuoteFeed:
             self._option_subs = new
             return True
 
+    def set_future_subs(self, subs):
+        """Replace futures subscriptions (one nearest-expiry contract per
+        index). Same delta-resubscribe behavior as options. Kept in its
+        own slot so option-chain ATM drift can resub without touching
+        the (rarely-changing) futures set."""
+        with self._subs_lock:
+            new = list(subs or [])
+            if new == self._future_subs:
+                return False
+            self._future_subs = new
+            return True
+
     # ---------- public reads ----------
     def get(self, exchange, token):
         k = (str(exchange).lower(), str(token).lower())
@@ -104,6 +117,7 @@ class QuoteFeed:
                 "subs_index": len(self._index_subs),
                 "subs_scrip": len(self._scrip_subs),
                 "subs_option": len(self._option_subs),
+                "subs_future": len(self._future_subs),
                 "cached_keys": len(self._cache),
                 "last_tick_ts": self._last_tick_ts,
                 "last_tick_age": (time.time() - self._last_tick_ts)
@@ -222,23 +236,24 @@ class QuoteFeed:
         with self._subs_lock:
             return (list(self._index_subs),
                     list(self._scrip_subs),
-                    list(self._option_subs))
+                    list(self._option_subs),
+                    list(self._future_subs))
 
     def _do_subscribe(self, client):
-        """(Re)subscribe to current index + scrip + option sets."""
-        idx_subs, scrip_subs, opt_subs = self._all_subs_snapshot()
+        """(Re)subscribe to current index + scrip + option + future sets."""
+        idx_subs, scrip_subs, opt_subs, fut_subs = self._all_subs_snapshot()
         # Indices must use isIndex=True; non-index uses False.
         if idx_subs:
             try:
                 client.subscribe(instrument_tokens=idx_subs, isIndex=True)
             except Exception as e:
                 self._record_error("subscribe(index)", e)
-        non_index = scrip_subs + opt_subs
+        non_index = scrip_subs + opt_subs + fut_subs
         if non_index:
             try:
                 client.subscribe(instrument_tokens=non_index, isIndex=False)
             except Exception as e:
-                self._record_error("subscribe(scrip+option)", e)
+                self._record_error("subscribe(scrip+option+future)", e)
         self._last_subscribed_at = time.time()
 
     def _run(self):
@@ -257,10 +272,12 @@ class QuoteFeed:
             return
 
         last_opt_subs = list(self._option_subs)
+        last_fut_subs = list(self._future_subs)
         while not self._stop.is_set():
             self._stop.wait(2.0)
             with self._subs_lock:
                 cur_opts = list(self._option_subs)
+                cur_futs = list(self._future_subs)
             if cur_opts != last_opt_subs:
                 self._log(f"[quote_feed] option subs changed "
                           f"({len(last_opt_subs)} -> {len(cur_opts)}), "
@@ -277,3 +294,18 @@ class QuoteFeed:
                 except Exception as e:
                     self._record_error("resubscribe", e)
                 last_opt_subs = cur_opts
+            if cur_futs != last_fut_subs:
+                self._log(f"[quote_feed] future subs changed "
+                          f"({len(last_fut_subs)} -> {len(cur_futs)}), "
+                          "resubscribing")
+                try:
+                    new_set = [s for s in cur_futs if s not in last_fut_subs]
+                    if new_set:
+                        try:
+                            self._client.subscribe(instrument_tokens=new_set,
+                                                   isIndex=False)
+                        except Exception as e:
+                            self._record_error("subscribe(future_delta)", e)
+                except Exception as e:
+                    self._record_error("resubscribe(future)", e)
+                last_fut_subs = cur_futs

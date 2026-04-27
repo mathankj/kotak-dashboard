@@ -19,3 +19,30 @@ per_day_cap:
   NIFTY: null
   BANKNIFTY: null
   SENSEX: null
+futures:
+  enabled:
+    NIFTY: true
+    BANKNIFTY: true
+    SENSEX: true
+  entry:
+    market_open_path: true
+    crossing_path: true
+  stoploss:
+    active: C
+    variant_a_drop_rs: 20.0
+    variant_b_drop_pct: 1.0
+  target:
+    long_level: T1
+    short_level: S1
+  lots:
+    NIFTY: 1
+    BANKNIFTY: 1
+    SENSEX: 1
+  per_day_cap:
+    NIFTY: null
+    BANKNIFTY: null
+    SENSEX: null
+  round_step:
+    NIFTY: 50
+    BANKNIFTY: 100
+    SENSEX: 100

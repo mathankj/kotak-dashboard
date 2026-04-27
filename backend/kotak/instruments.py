@@ -125,3 +125,59 @@ def _parse_item_expiry_date(item):
         return datetime.strptime(s, "%d%b%Y").date()
     except (ValueError, TypeError):
         return None
+
+
+# ---------------------------------------------------------------------
+# INDEX FUTURES — nearest-expiry lookup per index, cached per day.
+# Live SDK returns FUTIDX (NSE) and IF (BSE) records via search_scrip.
+# Used by the futures auto-strategy in backend/strategy/futures.py.
+# ---------------------------------------------------------------------
+_future_universe = {"date": None, "by_index": {}, "error": None}
+
+
+def _fetch_nearest_index_future(index_name):
+    """Return (record_dict, err) for the nearest-expiry FUT contract of `index_name`.
+
+    record_dict has the SDK fields we need: pTrdSymbol, pSymbol (token),
+    pExchSeg, pExpiryDate, lLotSize. Cached per trading day so we only
+    hit search_scrip once per index per session.
+    """
+    cfg = INDEX_OPTIONS_CONFIG.get(index_name)
+    if not cfg:
+        return None, f"unknown index {index_name}"
+    today = now_ist().strftime("%Y-%m-%d")
+    if (_future_universe["date"] == today
+            and index_name in _future_universe["by_index"]):
+        return _future_universe["by_index"][index_name], None
+    try:
+        client = ensure_client()
+    except Exception as e:
+        return None, f"login: {e}"
+    try:
+        r = client.search_scrip(
+            exchange_segment=cfg["exchange_segment"],
+            symbol=index_name,
+        )
+    except Exception as e:
+        return None, f"search_scrip {index_name}: {type(e).__name__}: {e}"
+    # NSE uses FUTIDX, BSE uses IF for index futures.
+    futs = [
+        x for x in (r or []) if isinstance(x, dict)
+        and str(x.get("pSymbolName", "")).strip().upper() == index_name.upper()
+        and str(x.get("pInstType", "")).strip().upper() in ("FUTIDX", "IF")
+    ]
+    today_dt = now_ist().date()
+    parsed = []
+    for it in futs:
+        d = _parse_item_expiry_date(it)
+        if d and d >= today_dt:
+            parsed.append((d, it))
+    if not parsed:
+        return None, f"no future expiry for {index_name}"
+    parsed.sort(key=lambda p: p[0])
+    nearest = parsed[0][1]
+    if _future_universe["date"] != today:
+        _future_universe["date"] = today
+        _future_universe["by_index"] = {}
+    _future_universe["by_index"][index_name] = nearest
+    return nearest, None
