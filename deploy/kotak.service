@@ -1,0 +1,32 @@
+[Unit]
+Description=Kotak Neo Trading Dashboard (Flask)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kotak
+Group=kotak
+WorkingDirectory=/home/kotak/kotak-dashboard
+EnvironmentFile=/home/kotak/kotak-dashboard/.env
+ExecStart=/home/kotak/kotak-dashboard/.venv/bin/python /home/kotak/kotak-dashboard/app.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/home/kotak/kotak-dashboard/data/app.log
+StandardError=append:/home/kotak/kotak-dashboard/data/app.log
+
+# Hardening — least-privilege sandbox.
+# ProtectHome=read-only blocks all of /home by default; ReadWritePaths
+# whitelists the two paths the app actually writes to:
+#   - data/        : trades.json, audit.log, blocked_attempts.jsonl, app.log
+#   - repo root    : config.yaml is mutated from the /config web UI via an
+#                    atomic write (config.yaml.tmp + rename), which needs
+#                    write access to the parent directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/kotak/kotak-dashboard/data /home/kotak/kotak-dashboard
+
+[Install]
+WantedBy=multi-user.target
