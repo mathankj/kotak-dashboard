@@ -2,8 +2,14 @@
 
 Plain English:
   - Watch the index spot (NIFTY 50, BANKNIFTY, SENSEX).
-  - When spot crosses BUY level upward -> buy 1 lot ATM CE at market premium.
-  - When spot crosses SELL level downward -> buy 1 lot ATM PE at market premium.
+  - ENTRY — two paths:
+      (a) MARKET-OPEN: the first time we see an index today, if spot is
+          ALREADY above BUY -> buy 1 lot ATM CE; if ALREADY below SELL ->
+          buy 1 lot ATM PE. Fires once per index per day (gated by the
+          ledger via counts[idx]>0, so a restart can't double-fire).
+      (b) CROSSING: after the open evaluation, normal Gann logic — when
+          spot crosses BUY upward -> CE; when spot crosses SELL downward
+          -> PE.
   - For each OPEN trade, watch THREE exits (first hit wins):
       1. Stop loss   (3 variants — see EXIT block below; one is active)
       2. Profit T1   (CE: spot >= T1; PE: spot <= S1)
@@ -84,7 +90,12 @@ PREMIUM_SL_PCT = 0.30
 
 
 _option_auto_state = {
-    "last_spot": {},  # index_name -> last seen spot
+    "last_spot": {},        # index_name -> last seen spot
+    "open_evaluated": {},   # index_name -> "YYYY-MM-DD" once we've done the
+                            # market-open evaluation for that day. Resets at
+                            # midnight (in-memory, but counts[idx] from the
+                            # trade ledger is the persistent backstop — see
+                            # ENTRY block in option_auto_strategy_tick).
     "lock": threading.Lock(),
 }
 
@@ -284,15 +295,38 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                     _option_auto_state["last_spot"][idx_name] = spot
                     continue
 
-            # ---- ENTRY check — spot crossing a Gann level ----
+            # ---- ENTRY check ----
+            # Two paths:
+            #   (a) MARKET-OPEN evaluation — the first time we see this index
+            #       today (no auto trade yet, no prior tick recorded), fire
+            #       immediately if spot is already past a level. This is what
+            #       Ganesh wants: "if NIFTY opens above BUY, just buy CE."
+            #       counts[idx] is the persistent (ledger-derived) gate that
+            #       prevents this firing twice on the same day across restarts.
+            #   (b) CROSSING — for every subsequent tick, the original strict
+            #       "prev_spot ≤ BUY < spot" rule applies.
             if (idx_name not in open_by_underlying
-                    and _can_open_more(idx_name, counts)
-                    and prev_spot is not None):
+                    and _can_open_more(idx_name, counts)):
                 option_type = None
-                if buy_lvl is not None and prev_spot <= buy_lvl < spot:
-                    option_type = "CE"
-                elif sell_lvl is not None and prev_spot >= sell_lvl > spot:
-                    option_type = "PE"
+                today_str = today  # already computed above
+                already_evaluated_open = (
+                    _option_auto_state["open_evaluated"].get(idx_name)
+                        == today_str
+                    or counts.get(idx_name, 0) > 0
+                )
+                if not already_evaluated_open:
+                    # (a) MARKET-OPEN evaluation
+                    if buy_lvl is not None and spot > buy_lvl:
+                        option_type = "CE"
+                    elif sell_lvl is not None and spot < sell_lvl:
+                        option_type = "PE"
+                    _option_auto_state["open_evaluated"][idx_name] = today_str
+                elif prev_spot is not None:
+                    # (b) CROSSING
+                    if buy_lvl is not None and prev_spot <= buy_lvl < spot:
+                        option_type = "CE"
+                    elif sell_lvl is not None and prev_spot >= sell_lvl > spot:
+                        option_type = "PE"
 
                 if option_type:
                     opt_key = f"{idx_name} {atm} {option_type}"
