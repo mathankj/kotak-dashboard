@@ -8,10 +8,40 @@ Two entry points:
   get()           -> the parsed config dict (cached, mtime-checked)
   save(new_dict)  -> validate, atomically write yaml, invalidate cache
 
+Schema (UNIFIED — one config drives BOTH options + futures strategies):
+
+  apply_to: options | futures | both     # which strategy(s) to run
+
+  timings.market_start / square_off
+
+  entry.market_open_path        bool
+       .market_open_buy_level   BUY | BUY_WA       # which level fires bullish
+       .market_open_sell_level  SELL | SELL_WA     # which level fires bearish
+       .crossing_path           bool
+       .crossing_buy_level      BUY | BUY_WA
+       .crossing_sell_level     SELL | SELL_WA
+
+  stoploss.active   A | B | C
+          .variant_a_drop_rs        ₹ drop (option premium OR future LTP)
+          .variant_a_buy_level      BUY | BUY_WA   (cosmetic for A)
+          .variant_a_sell_level     SELL | SELL_WA (cosmetic for A)
+          .variant_b_drop_pct       % drop
+          .variant_b_buy_level      (cosmetic for B)
+          .variant_b_sell_level
+          .variant_c_buy_level      BUY | BUY_WA   (active — used by SHORT/PE exit)
+          .variant_c_sell_level     SELL | SELL_WA (active — used by LONG/CE exit)
+
+  target.ce_level   T1|T2|T3|BUY_WA   (also used as long_level for futures)
+        .pe_level   S1|S2|S3|SELL_WA  (also used as short_level for futures)
+
+  lots.{NIFTY|BANKNIFTY|SENSEX}        int >= 1   (multiplier on broker lot)
+  per_day_cap.{NIFTY|BANKNIFTY|SENSEX} null or int > 0
+
+  futures_round_step.{NIFTY|BANKNIFTY|SENSEX}  step for futures limit price
+
 Everything is intentionally defensive: a missing file, an unparseable
 file, or a malformed key falls back to the documented DEFAULTS rather
-than crashing the strategy. The /config UI surfaces validation errors
-on save, but the running tick loop never goes down because of bad yaml.
+than crashing the strategy.
 """
 import os
 import threading
@@ -23,91 +53,72 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_FILE = os.path.join(_REPO_ROOT, "config.yaml")
 
 
-# Defaults mirror the original hardcoded constants in strategy/options.py
-# and strategy/common.py. Any missing/invalid key falls back here.
+# Defaults mirror the original hardcoded constants. Any missing/invalid
+# key falls back here. Note: "both" by default = both strategies trade.
 DEFAULTS = {
+    "apply_to": "both",                        # options | futures | both
+
     "timings": {
         "market_start": "09:15",
         "square_off":   "15:15",
     },
+
     "entry": {
-        "market_open_path": True,
-        "crossing_path":    True,
+        "market_open_path":        True,
+        "market_open_buy_level":   "BUY",      # BUY | BUY_WA
+        "market_open_sell_level":  "SELL",     # SELL | SELL_WA
+        "crossing_path":           True,
+        "crossing_buy_level":      "BUY",
+        "crossing_sell_level":     "SELL",
     },
+
     "stoploss": {
-        "active": "C",                       # A | B | C
-        "variant_a_premium_drop_rs":  5,
-        "variant_b_premium_drop_pct": 30,
+        "active": "C",                         # A | B | C
+        # Variant A — fixed Rs drop (premium for options, LTP for futures).
+        "variant_a_drop_rs":     5,
+        "variant_a_buy_level":   "BUY",
+        "variant_a_sell_level":  "SELL",
+        # Variant B — % drop.
+        "variant_b_drop_pct":    30,
+        "variant_b_buy_level":   "BUY",
+        "variant_b_sell_level":  "SELL",
+        # Variant C — opposite-Gann reversal. THESE ARE USED.
+        "variant_c_buy_level":   "BUY",        # PE/SHORT exits when spot > this
+        "variant_c_sell_level":  "SELL",       # CE/LONG exits when spot < this
     },
+
     "target": {
-        "ce_level": "T1",                    # T1 | T2 | T3 | BUY_WA
-        "pe_level": "S1",                    # S1 | S2 | S3 | SELL_WA
+        "ce_level": "T1",                      # T1|T2|T3|BUY_WA  (also long for futures)
+        "pe_level": "S1",                      # S1|S2|S3|SELL_WA (also short for futures)
     },
+
     "lots": {
         "NIFTY":     1,
         "BANKNIFTY": 1,
         "SENSEX":    1,
     },
+
     "per_day_cap": {
-        "NIFTY":     None,                   # None = unlimited
+        "NIFTY":     None,                     # None = unlimited
         "BANKNIFTY": None,
         "SENSEX":    None,
     },
 
-    # --- FUTURES strategy (parallel to options, separate trades) ---
-    # Defaults all DISABLED so the bot doesn't start trading futures
-    # silently after a deploy. Ganesh enables per-index from /config
-    # once he's confirmed margin headroom.
-    "futures": {
-        # Default ON for all 3 indices — Ganesh approved 2026-04-27 to
-        # auto-trade futures alongside options out-of-the-box. He can
-        # disable per-index from /config if margin gets tight.
-        "enabled": {
-            "NIFTY":     True,
-            "BANKNIFTY": True,
-            "SENSEX":    True,
-        },
-        "entry": {
-            "market_open_path": True,
-            "crossing_path":    True,
-        },
-        "stoploss": {
-            "active": "C",                   # A | B | C
-            # Variant A: futures LTP moves by ₹X against entry (longer
-            # range than options because futures price is in points).
-            "variant_a_drop_rs":  20,
-            # Variant B: futures LTP moves by X% against entry.
-            "variant_b_drop_pct": 1.0,
-        },
-        "target": {
-            "long_level":  "T1",             # T1 | T2 | T3 | BUY_WA
-            "short_level": "S1",             # S1 | S2 | S3 | SELL_WA
-        },
-        "lots": {
-            "NIFTY":     1,                  # × broker lot size
-            "BANKNIFTY": 1,
-            "SENSEX":    1,
-        },
-        "per_day_cap": {
-            "NIFTY":     None,
-            "BANKNIFTY": None,
-            "SENSEX":    None,
-        },
-        # Round step for the limit price. BUY rounds DOWN, SELL rounds UP.
-        "round_step": {
-            "NIFTY":     50,
-            "BANKNIFTY": 100,
-            "SENSEX":    100,
-        },
+    # Futures-only retained: round step for the limit price.
+    # BUY rounds DOWN to step, SELL rounds UP.
+    "futures_round_step": {
+        "NIFTY":     50,
+        "BANKNIFTY": 100,
+        "SENSEX":    100,
     },
 }
 
+VALID_APPLY_TO = {"options", "futures", "both"}
 VALID_STOPLOSS = {"A", "B", "C"}
+VALID_BUY_LEVELS  = {"BUY", "BUY_WA"}
+VALID_SELL_LEVELS = {"SELL", "SELL_WA"}
 VALID_CE_TARGETS = {"T1", "T2", "T3", "BUY_WA"}
 VALID_PE_TARGETS = {"S1", "S2", "S3", "SELL_WA"}
-# Futures use the same Gann-level vocab as options (long = CE side, short = PE side).
-VALID_LONG_TARGETS  = VALID_CE_TARGETS
-VALID_SHORT_TARGETS = VALID_PE_TARGETS
 INDEX_NAMES = ("NIFTY", "BANKNIFTY", "SENSEX")
 
 
@@ -148,16 +159,69 @@ def _parse_hhmm(s):
 
 
 def _coerce(raw):
-    """Apply DEFAULTS underlay + light type coercion. Never raises."""
+    """Apply DEFAULTS underlay + light type coercion. Never raises.
+
+    Also strips legacy `futures.*` nested block from older config.yaml
+    versions (pre-unified schema). The new schema gets the round-step
+    from `futures_round_step` at the top level.
+    """
+    if isinstance(raw, dict):
+        # Migrate: pull round_step out of legacy futures block if needed.
+        legacy_fut = raw.get("futures") if isinstance(raw.get("futures"), dict) else None
+        if legacy_fut and "futures_round_step" not in raw:
+            rs = legacy_fut.get("round_step")
+            if isinstance(rs, dict):
+                raw["futures_round_step"] = rs
+        # Drop legacy block — its other keys are now shared.
+        raw.pop("futures", None)
+
     merged = _deep_merge(DEFAULTS, raw or {})
 
-    # Stoploss active must be A/B/C.
+    # apply_to
+    merged["apply_to"] = str(merged.get("apply_to", "both")).lower()
+    if merged["apply_to"] not in VALID_APPLY_TO:
+        merged["apply_to"] = "both"
+
+    # entry — booleans + level dropdowns
+    e = merged["entry"]
+    e["market_open_path"] = bool(e.get("market_open_path", True))
+    e["crossing_path"]    = bool(e.get("crossing_path", True))
+    for k, valid in (
+        ("market_open_buy_level",  VALID_BUY_LEVELS),
+        ("market_open_sell_level", VALID_SELL_LEVELS),
+        ("crossing_buy_level",     VALID_BUY_LEVELS),
+        ("crossing_sell_level",    VALID_SELL_LEVELS),
+    ):
+        v = str(e.get(k, "")).upper()
+        e[k] = v if v in valid else DEFAULTS["entry"][k]
+
+    # stoploss — active + numeric drops + per-variant level dropdowns
     sl = merged["stoploss"]
     sl["active"] = str(sl.get("active", "C")).upper()
     if sl["active"] not in VALID_STOPLOSS:
         sl["active"] = DEFAULTS["stoploss"]["active"]
+    try:
+        sl["variant_a_drop_rs"] = max(
+            0.0, float(sl.get("variant_a_drop_rs", 5)))
+    except (TypeError, ValueError):
+        sl["variant_a_drop_rs"] = 5.0
+    try:
+        sl["variant_b_drop_pct"] = max(
+            0.0, float(sl.get("variant_b_drop_pct", 30)))
+    except (TypeError, ValueError):
+        sl["variant_b_drop_pct"] = 30.0
+    for k, valid in (
+        ("variant_a_buy_level",  VALID_BUY_LEVELS),
+        ("variant_a_sell_level", VALID_SELL_LEVELS),
+        ("variant_b_buy_level",  VALID_BUY_LEVELS),
+        ("variant_b_sell_level", VALID_SELL_LEVELS),
+        ("variant_c_buy_level",  VALID_BUY_LEVELS),
+        ("variant_c_sell_level", VALID_SELL_LEVELS),
+    ):
+        v = str(sl.get(k, "")).upper()
+        sl[k] = v if v in valid else DEFAULTS["stoploss"][k]
 
-    # Target levels must be in the valid set per side.
+    # target levels
     tgt = merged["target"]
     tgt["ce_level"] = str(tgt.get("ce_level", "T1")).upper()
     if tgt["ce_level"] not in VALID_CE_TARGETS:
@@ -166,7 +230,7 @@ def _coerce(raw):
     if tgt["pe_level"] not in VALID_PE_TARGETS:
         tgt["pe_level"] = DEFAULTS["target"]["pe_level"]
 
-    # Lots: int >= 1 per index.
+    # lots: int >= 1 per index
     for idx in INDEX_NAMES:
         try:
             n = int(merged["lots"].get(idx, 1))
@@ -174,7 +238,7 @@ def _coerce(raw):
         except (TypeError, ValueError):
             merged["lots"][idx] = 1
 
-    # Per-day cap: None or positive int per index.
+    # per-day cap: None or positive int per index
     for idx in INDEX_NAMES:
         v = merged["per_day_cap"].get(idx)
         if v is None or v == "" or v == "null":
@@ -186,79 +250,13 @@ def _coerce(raw):
             except (TypeError, ValueError):
                 merged["per_day_cap"][idx] = None
 
-    # Stoploss variant A/B numbers — coerce to numeric, clamp >=0.
-    try:
-        sl["variant_a_premium_drop_rs"] = max(
-            0.0, float(sl.get("variant_a_premium_drop_rs", 5)))
-    except (TypeError, ValueError):
-        sl["variant_a_premium_drop_rs"] = 5.0
-    try:
-        sl["variant_b_premium_drop_pct"] = max(
-            0.0, float(sl.get("variant_b_premium_drop_pct", 30)))
-    except (TypeError, ValueError):
-        sl["variant_b_premium_drop_pct"] = 30.0
-
-    # Entry path booleans.
-    e = merged["entry"]
-    e["market_open_path"] = bool(e.get("market_open_path", True))
-    e["crossing_path"]    = bool(e.get("crossing_path", True))
-
-    # ---- FUTURES section ----
-    f = merged["futures"]
-
-    # Per-index enable flags (default OFF on missing).
-    for idx in INDEX_NAMES:
-        f["enabled"][idx] = bool(f["enabled"].get(idx, False))
-
-    # Entry paths (same booleans as options).
-    fe = f["entry"]
-    fe["market_open_path"] = bool(fe.get("market_open_path", True))
-    fe["crossing_path"]    = bool(fe.get("crossing_path", True))
-
-    # Stoploss variant.
-    fsl = f["stoploss"]
-    fsl["active"] = str(fsl.get("active", "C")).upper()
-    if fsl["active"] not in VALID_STOPLOSS:
-        fsl["active"] = "C"
-    try:
-        fsl["variant_a_drop_rs"] = max(0.0, float(fsl.get("variant_a_drop_rs", 20)))
-    except (TypeError, ValueError):
-        fsl["variant_a_drop_rs"] = 20.0
-    try:
-        fsl["variant_b_drop_pct"] = max(0.0, float(fsl.get("variant_b_drop_pct", 1)))
-    except (TypeError, ValueError):
-        fsl["variant_b_drop_pct"] = 1.0
-
-    # Target levels (long uses CE-side names, short uses PE-side names).
-    ft = f["target"]
-    ft["long_level"]  = str(ft.get("long_level",  "T1")).upper()
-    if ft["long_level"] not in VALID_LONG_TARGETS:
-        ft["long_level"] = "T1"
-    ft["short_level"] = str(ft.get("short_level", "S1")).upper()
-    if ft["short_level"] not in VALID_SHORT_TARGETS:
-        ft["short_level"] = "S1"
-
-    # Lots, per-day caps, round step (per index).
+    # futures round step: int >= 1 per index
     for idx in INDEX_NAMES:
         try:
-            n = int(f["lots"].get(idx, 1))
-            f["lots"][idx] = max(1, n)
+            n = int(merged["futures_round_step"].get(idx, 50))
+            merged["futures_round_step"][idx] = max(1, n)
         except (TypeError, ValueError):
-            f["lots"][idx] = 1
-        v = f["per_day_cap"].get(idx)
-        if v is None or v == "" or v == "null":
-            f["per_day_cap"][idx] = None
-        else:
-            try:
-                n = int(v)
-                f["per_day_cap"][idx] = n if n > 0 else None
-            except (TypeError, ValueError):
-                f["per_day_cap"][idx] = None
-        try:
-            n = int(f["round_step"].get(idx, 50))
-            f["round_step"][idx] = max(1, n)
-        except (TypeError, ValueError):
-            f["round_step"][idx] = 50
+            merged["futures_round_step"][idx] = DEFAULTS["futures_round_step"][idx]
 
     return merged
 
@@ -295,9 +293,26 @@ def validate(new):
     if not isinstance(new, dict):
         return ["Config must be a dict."]
 
+    if str(new.get("apply_to", "both")).lower() not in VALID_APPLY_TO:
+        errs.append(f"apply_to must be one of {sorted(VALID_APPLY_TO)}.")
+
     sl = (new.get("stoploss") or {})
     if str(sl.get("active", "")).upper() not in VALID_STOPLOSS:
         errs.append("stoploss.active must be one of A, B, C.")
+    for k in ("variant_a_buy_level", "variant_b_buy_level", "variant_c_buy_level"):
+        if str(sl.get(k, "BUY")).upper() not in VALID_BUY_LEVELS:
+            errs.append(f"stoploss.{k} must be BUY or BUY_WA.")
+    for k in ("variant_a_sell_level", "variant_b_sell_level", "variant_c_sell_level"):
+        if str(sl.get(k, "SELL")).upper() not in VALID_SELL_LEVELS:
+            errs.append(f"stoploss.{k} must be SELL or SELL_WA.")
+
+    e = (new.get("entry") or {})
+    for k in ("market_open_buy_level", "crossing_buy_level"):
+        if str(e.get(k, "BUY")).upper() not in VALID_BUY_LEVELS:
+            errs.append(f"entry.{k} must be BUY or BUY_WA.")
+    for k in ("market_open_sell_level", "crossing_sell_level"):
+        if str(e.get(k, "SELL")).upper() not in VALID_SELL_LEVELS:
+            errs.append(f"entry.{k} must be SELL or SELL_WA.")
 
     tgt = (new.get("target") or {})
     if str(tgt.get("ce_level", "")).upper() not in VALID_CE_TARGETS:
@@ -325,46 +340,18 @@ def validate(new):
             except (TypeError, ValueError):
                 errs.append(f"per_day_cap.{idx} must be an integer or empty.")
 
+    for idx in INDEX_NAMES:
+        try:
+            n = int((new.get("futures_round_step") or {}).get(idx, 50))
+            if n < 1:
+                errs.append(f"futures_round_step.{idx} must be >= 1.")
+        except (TypeError, ValueError):
+            errs.append(f"futures_round_step.{idx} must be an integer.")
+
     for key in ("market_start", "square_off"):
         v = (new.get("timings") or {}).get(key)
         if _parse_hhmm(v) is None:
             errs.append(f"timings.{key} must be HH:MM (24h).")
-
-    # ---- futures validation (only if section present) ----
-    fut = new.get("futures")
-    if isinstance(fut, dict):
-        fsl = fut.get("stoploss") or {}
-        if fsl and str(fsl.get("active", "")).upper() not in VALID_STOPLOSS:
-            errs.append("futures.stoploss.active must be one of A, B, C.")
-        ft = fut.get("target") or {}
-        if ft:
-            if str(ft.get("long_level", "")).upper() not in VALID_LONG_TARGETS:
-                errs.append(f"futures.target.long_level must be one of "
-                            f"{sorted(VALID_LONG_TARGETS)}.")
-            if str(ft.get("short_level", "")).upper() not in VALID_SHORT_TARGETS:
-                errs.append(f"futures.target.short_level must be one of "
-                            f"{sorted(VALID_SHORT_TARGETS)}.")
-        for idx in INDEX_NAMES:
-            try:
-                n = int((fut.get("lots") or {}).get(idx, 1))
-                if n < 1:
-                    errs.append(f"futures.lots.{idx} must be >= 1.")
-            except (TypeError, ValueError):
-                errs.append(f"futures.lots.{idx} must be an integer.")
-            try:
-                n = int((fut.get("round_step") or {}).get(idx, 50))
-                if n < 1:
-                    errs.append(f"futures.round_step.{idx} must be >= 1.")
-            except (TypeError, ValueError):
-                errs.append(f"futures.round_step.{idx} must be an integer.")
-            v = (fut.get("per_day_cap") or {}).get(idx)
-            if v not in (None, "", "null"):
-                try:
-                    n = int(v)
-                    if n <= 0:
-                        errs.append(f"futures.per_day_cap.{idx} must be positive or empty.")
-                except (TypeError, ValueError):
-                    errs.append(f"futures.per_day_cap.{idx} must be an integer or empty.")
 
     return errs
 
@@ -416,27 +403,34 @@ def per_day_cap(idx_name):
     return get()["per_day_cap"].get(idx_name)
 
 
-# ---- Futures-specific accessors ----
-
-def futures_enabled(idx_name):
-    """True if Ganesh has enabled the futures strategy for this index."""
-    return bool(get()["futures"]["enabled"].get(idx_name, False))
+def apply_to():
+    """Return current apply_to setting: 'options' | 'futures' | 'both'."""
+    return get().get("apply_to", "both")
 
 
-def futures_any_enabled():
-    """True if at least one index has futures trading turned on. Used to
-    short-circuit the futures tick when nothing is enabled."""
-    en = get()["futures"]["enabled"]
-    return any(en.get(i, False) for i in INDEX_NAMES)
+def options_enabled():
+    """True if options strategy should run."""
+    return apply_to() in ("options", "both")
 
 
-def futures_lot_multiplier(idx_name):
-    return get()["futures"]["lots"].get(idx_name, 1)
-
-
-def futures_per_day_cap(idx_name):
-    return get()["futures"]["per_day_cap"].get(idx_name)
+def futures_enabled():
+    """True if futures strategy should run."""
+    return apply_to() in ("futures", "both")
 
 
 def futures_round_step(idx_name):
-    return get()["futures"]["round_step"].get(idx_name, 50)
+    return get()["futures_round_step"].get(idx_name, 50)
+
+
+# ---- Per-row level resolvers ----
+# Each returns the actual numeric Gann level value for the chosen
+# BUY/BUY_WA or SELL/SELL_WA, given the levels dict from gann_levels(open).
+
+def resolve_buy_level(levels, choice):
+    """choice in {BUY, BUY_WA}. Returns numeric level or None."""
+    return (levels.get("buy") or {}).get(choice)
+
+
+def resolve_sell_level(levels, choice):
+    """choice in {SELL, SELL_WA}. Returns numeric level or None."""
+    return (levels.get("sell") or {}).get(choice)

@@ -40,9 +40,18 @@
       background: #0f1419; border: 1px solid #27272a; color: #fafafa;
       padding: 8px 10px; border-radius: 4px; font-size: 14px;
       font-family: inherit; width: 140px; }
+  select.inline { width: 110px; padding: 4px 8px; font-size: 12px;
+                  margin-left: 6px; }
   input:focus, select:focus { outline: none; border-color: #2563eb; }
   .toggle { display: flex; align-items: center; gap: 10px; }
   .toggle input { accent-color: #2563eb; width: 18px; height: 18px; }
+  .pickers { display: flex; gap: 12px; align-items: center;
+             margin-top: 6px; flex-wrap: wrap; }
+  .picker-grp { display: flex; align-items: center; gap: 4px;
+                background: #0f1419; padding: 4px 10px; border-radius: 4px;
+                border: 1px solid #27272a; }
+  .picker-grp .k { color: #71717a; font-size: 11px;
+                   text-transform: uppercase; letter-spacing: 0.5px; }
   .save-bar { position: sticky; bottom: 0; background: #0f1419;
               padding: 16px 0; border-top: 1px solid #27272a;
               display: flex; gap: 12px; align-items: center; }
@@ -61,6 +70,17 @@
   .lead { color: #a1a1aa; font-size: 13px; margin-bottom: 16px;
           background: #1c1917; border-left: 3px solid #f59e0b;
           padding: 10px 14px; border-radius: 4px; }
+  .apply-card { border-color: #2563eb; }
+  .apply-opt { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .apply-opt label { display: flex; flex-direction: column; align-items: center;
+                     padding: 14px; background: #1c1f24; border: 2px solid #27272a;
+                     border-radius: 8px; cursor: pointer; text-align: center;
+                     gap: 6px; }
+  .apply-opt label.sel { border-color: #2563eb; background: #1e293b; }
+  .apply-opt input[type=radio] { accent-color: #2563eb; }
+  .apply-opt .nm { font-weight: 700; color: #fafafa; font-size: 15px;
+                   text-transform: uppercase; letter-spacing: 0.5px; }
+  .apply-opt .ds { color: #a1a1aa; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -82,9 +102,31 @@
 <div class="lead">
   Change auto-strategy behaviour here. Settings save instantly and the
   next strategy tick (within 3 seconds) picks them up — no restart.
+  This is the SHARED config: same rules drive both options and futures.
 </div>
 
 <form id="cfgForm">
+
+<!-- 0. Apply to (master switch) -->
+<div class="card apply-card">
+  <h2>Apply To</h2>
+  <div class="sub">Single switch deciding which strategy(s) trade. The same Entry / Stoploss / Target
+    rules below apply to whichever sides are selected.</div>
+  <div class="apply-opt">
+    {% for v, nm, ds in [
+      ('options',  'Options Only',  'Trade ATM CE/PE only. Futures strategy stays idle.'),
+      ('futures',  'Futures Only',  'Trade nearest-expiry FUT (long+short). Options stays idle.'),
+      ('both',     'Both',          'Run both strategies in parallel. Independent ledger rows.'),
+    ] %}
+      <label class="{% if cfg.apply_to == v %}sel{% endif %}">
+        <input type="radio" name="apply_to" value="{{ v }}"
+               {% if cfg.apply_to == v %}checked{% endif %}>
+        <span class="nm">{{ nm }}</span>
+        <span class="ds">{{ ds }}</span>
+      </label>
+    {% endfor %}
+  </div>
+</div>
 
 <!-- 1. Timings -->
 <div class="card">
@@ -104,69 +146,173 @@
   </div>
 </div>
 
-<!-- 2. Entry logic -->
+<!-- 2. Entry logic with per-row level pickers -->
 <div class="card">
   <h2>2. Entry (Buy) Logic</h2>
-  <div class="sub">Tick which signal paths are allowed to enter trades. Both can run together.</div>
+  <div class="sub">Tick which signal paths are allowed to enter trades. Both can run together.
+    Each row picks WHICH Gann level fires bullish (BUY or BUY-WA) and WHICH fires bearish (SELL or SELL-WA).</div>
+
   <div class="row">
     <div class="lbl">Path A — Market-Open Snapshot
-      <div class="hint">First tick of the day per index: if spot is ALREADY past BUY → buy CE; past SELL → buy PE.</div>
+      <div class="hint">First tick of the day per index: if spot is ALREADY past the BUY pick → bullish entry; past the SELL pick → bearish entry.</div>
     </div>
-    <label class="toggle">
-      <input type="checkbox" name="entry.market_open_path" {% if cfg.entry.market_open_path %}checked{% endif %}>
-      <span>Enabled</span>
-    </label>
+    <div>
+      <label class="toggle">
+        <input type="checkbox" name="entry.market_open_path" {% if cfg.entry.market_open_path %}checked{% endif %}>
+        <span>Enabled</span>
+      </label>
+      <div class="pickers">
+        <div class="picker-grp">
+          <span class="k">bullish trigger</span>
+          <select name="entry.market_open_buy_level" class="inline">
+            {% for lvl in ['BUY','BUY_WA'] %}
+              <option value="{{ lvl }}" {% if cfg.entry.market_open_buy_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="picker-grp">
+          <span class="k">bearish trigger</span>
+          <select name="entry.market_open_sell_level" class="inline">
+            {% for lvl in ['SELL','SELL_WA'] %}
+              <option value="{{ lvl }}" {% if cfg.entry.market_open_sell_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+    </div>
   </div>
+
   <div class="row">
     <div class="lbl">Path B — Live Crossing
-      <div class="hint">Spot crosses BUY upward → buy CE. Spot crosses SELL downward → buy PE.</div>
+      <div class="hint">Spot crosses the BUY pick upward → bullish entry. Spot crosses the SELL pick downward → bearish entry.</div>
     </div>
-    <label class="toggle">
-      <input type="checkbox" name="entry.crossing_path" {% if cfg.entry.crossing_path %}checked{% endif %}>
-      <span>Enabled</span>
-    </label>
+    <div>
+      <label class="toggle">
+        <input type="checkbox" name="entry.crossing_path" {% if cfg.entry.crossing_path %}checked{% endif %}>
+        <span>Enabled</span>
+      </label>
+      <div class="pickers">
+        <div class="picker-grp">
+          <span class="k">bullish trigger</span>
+          <select name="entry.crossing_buy_level" class="inline">
+            {% for lvl in ['BUY','BUY_WA'] %}
+              <option value="{{ lvl }}" {% if cfg.entry.crossing_buy_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="picker-grp">
+          <span class="k">bearish trigger</span>
+          <select name="entry.crossing_sell_level" class="inline">
+            {% for lvl in ['SELL','SELL_WA'] %}
+              <option value="{{ lvl }}" {% if cfg.entry.crossing_sell_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
-<!-- 3. Stoploss -->
+<!-- 3. Stoploss with per-variant level pickers -->
 <div class="card">
   <h2>3. Stoploss</h2>
-  <div class="sub">Three variants exist in the strategy. Pick ONE — the others stay dormant.</div>
+  <div class="sub">Three variants exist in the strategy. Pick ONE — the others stay dormant.
+    Each variant carries its own BUY / SELL pick (active only for variant C; cosmetic for A and B).</div>
   <div class="opt">
+
     <label>
       <input type="radio" name="stoploss.active" value="A" {% if cfg.stoploss.active=='A' %}checked{% endif %}>
-      <span>
-        <span class="name">Variant A — Fixed premium drop</span>
-        <span class="desc">Exit when option premium falls
-          <input type="number" name="stoploss.variant_a_premium_drop_rs" min="0" step="0.5" style="width:70px"
-                 value="{{ cfg.stoploss.variant_a_premium_drop_rs }}"> ₹ below entry price.</span>
+      <span style="flex:1">
+        <span class="name">Variant A — Fixed ₹X drop</span>
+        <span class="desc">Exit when LTP (option premium / future LTP) moves
+          <input type="number" name="stoploss.variant_a_drop_rs" min="0" step="0.5" style="width:70px"
+                 value="{{ cfg.stoploss.variant_a_drop_rs }}"> ₹ against entry.</span>
+        <div class="pickers">
+          <div class="picker-grp">
+            <span class="k">bullish trigger</span>
+            <select name="stoploss.variant_a_buy_level" class="inline">
+              {% for lvl in ['BUY','BUY_WA'] %}
+                <option value="{{ lvl }}" {% if cfg.stoploss.variant_a_buy_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="picker-grp">
+            <span class="k">bearish trigger</span>
+            <select name="stoploss.variant_a_sell_level" class="inline">
+              {% for lvl in ['SELL','SELL_WA'] %}
+                <option value="{{ lvl }}" {% if cfg.stoploss.variant_a_sell_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
       </span>
     </label>
+
     <label>
       <input type="radio" name="stoploss.active" value="B" {% if cfg.stoploss.active=='B' %}checked{% endif %}>
-      <span>
-        <span class="name">Variant B — Percentage premium drop</span>
-        <span class="desc">Exit when option premium drops
-          <input type="number" name="stoploss.variant_b_premium_drop_pct" min="0" max="100" step="1" style="width:70px"
-                 value="{{ cfg.stoploss.variant_b_premium_drop_pct }}">% from entry price.</span>
+      <span style="flex:1">
+        <span class="name">Variant B — Percentage drop</span>
+        <span class="desc">Exit when LTP moves
+          <input type="number" name="stoploss.variant_b_drop_pct" min="0" max="100" step="1" style="width:70px"
+                 value="{{ cfg.stoploss.variant_b_drop_pct }}">% against entry.</span>
+        <div class="pickers">
+          <div class="picker-grp">
+            <span class="k">bullish trigger</span>
+            <select name="stoploss.variant_b_buy_level" class="inline">
+              {% for lvl in ['BUY','BUY_WA'] %}
+                <option value="{{ lvl }}" {% if cfg.stoploss.variant_b_buy_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="picker-grp">
+            <span class="k">bearish trigger</span>
+            <select name="stoploss.variant_b_sell_level" class="inline">
+              {% for lvl in ['SELL','SELL_WA'] %}
+                <option value="{{ lvl }}" {% if cfg.stoploss.variant_b_sell_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
       </span>
     </label>
+
     <label>
       <input type="radio" name="stoploss.active" value="C" {% if cfg.stoploss.active=='C' %}checked{% endif %}>
-      <span>
+      <span style="flex:1">
         <span class="name">Variant C — Opposite Gann level</span>
-        <span class="desc">CE: exit if spot drops below SELL level. PE: exit if spot rises above BUY level. (No params.)</span>
+        <span class="desc">CE/long: exit if spot drops below the SELL pick.
+          PE/short: exit if spot rises above the BUY pick.</span>
+        <div class="pickers">
+          <div class="picker-grp">
+            <span class="k">PE/short exit above</span>
+            <select name="stoploss.variant_c_buy_level" class="inline">
+              {% for lvl in ['BUY','BUY_WA'] %}
+                <option value="{{ lvl }}" {% if cfg.stoploss.variant_c_buy_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="picker-grp">
+            <span class="k">CE/long exit below</span>
+            <select name="stoploss.variant_c_sell_level" class="inline">
+              {% for lvl in ['SELL','SELL_WA'] %}
+                <option value="{{ lvl }}" {% if cfg.stoploss.variant_c_sell_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
       </span>
     </label>
+
   </div>
 </div>
 
 <!-- 4. Profit target -->
 <div class="card">
   <h2>4. Profit Target</h2>
-  <div class="sub">Which Gann level closes a winning trade. Set independently per side.</div>
+  <div class="sub">Which Gann level closes a winning trade. CE/long uses the BUY-side level;
+    PE/short uses the SELL-side level. Same picks drive both options and futures targets.</div>
   <div class="row">
-    <div class="lbl">CE target level
+    <div class="lbl">CE / long target
       <div class="hint">Above-open levels. Default T1.</div>
     </div>
     <select name="target.ce_level">
@@ -176,7 +322,7 @@
     </select>
   </div>
   <div class="row">
-    <div class="lbl">PE target level
+    <div class="lbl">PE / short target
       <div class="hint">Below-open levels. Default S1.</div>
     </div>
     <select name="target.pe_level">
@@ -190,14 +336,15 @@
 <!-- 5. Lot multipliers -->
 <div class="card">
   <h2>5. Lot Multipliers</h2>
-  <div class="sub">Final qty = broker lot size × this number. Per index.</div>
+  <div class="sub">Final qty = broker lot size × this number. Per index. Same multiplier applies
+    to both options and futures (same notional risk per trade).</div>
   <div class="grid3">
     {% for idx, lot in [('NIFTY',75),('BANKNIFTY',35),('SENSEX',20)] %}
       <div class="idx">
         <h4>{{ idx }}</h4>
-        <div class="hint">Broker lot: {{ lot }}</div>
+        <div class="hint">Broker option lot: {{ lot }}</div>
         <input type="number" name="lots.{{ idx }}" min="1" step="1" value="{{ cfg.lots[idx] }}" style="width:100%">
-        <div class="hint">×{{ cfg.lots[idx] }} = {{ lot * cfg.lots[idx] }} qty per trade</div>
+        <div class="hint">×{{ cfg.lots[idx] }} = {{ lot * cfg.lots[idx] }} qty per option trade</div>
       </div>
     {% endfor %}
   </div>
@@ -206,7 +353,8 @@
 <!-- 6. Per-day cap -->
 <div class="card">
   <h2>6. Per-Day Trade Cap</h2>
-  <div class="sub">Max entries per index per day. Leave blank = unlimited.</div>
+  <div class="sub">Max entries per index per day. Counted SEPARATELY for options and futures.
+    Leave blank = unlimited.</div>
   <div class="grid3">
     {% for idx in ['NIFTY','BANKNIFTY','SENSEX'] %}
       <div class="idx">
@@ -219,128 +367,17 @@
   </div>
 </div>
 
-<!-- 7. Futures (parallel strategy) -->
+<!-- 7. Futures rounding step (futures-only knob) -->
 <div class="card">
-  <h2>7. Futures Strategy</h2>
-  <div class="sub">Trades nearest-expiry index futures (FUT) directly — long on bullish signal, short on bearish.
-    Runs ALONGSIDE options (separate trades, separate ledger rows).
-    <strong style="color:#f59e0b">Margin warning:</strong> futures need ~12-15% notional margin per lot
-    (~₹2L per NIFTY/BANKNIFTY lot). Enable one index at a time.</div>
-
-  <h4 style="color:#fafafa;margin:18px 0 8px 0">Per-index enable</h4>
+  <h2>7. Futures Limit-Price Round Step</h2>
+  <div class="sub">Futures-specific. BUY rounds DOWN to this step (try to fill cheaper),
+    SELL rounds UP (try to fill higher). Typically matches the option strike step.</div>
   <div class="grid3">
     {% for idx in ['NIFTY','BANKNIFTY','SENSEX'] %}
       <div class="idx">
         <h4>{{ idx }}</h4>
-        <label class="toggle">
-          <input type="checkbox" name="futures.enabled.{{ idx }}" {% if cfg.futures.enabled[idx] %}checked{% endif %}>
-          <span>Enabled</span>
-        </label>
-      </div>
-    {% endfor %}
-  </div>
-
-  <h4 style="color:#fafafa;margin:18px 0 8px 0">Entry paths</h4>
-  <div class="row">
-    <div class="lbl">Path A — Market-Open
-      <div class="hint">First tick: spot already past BUY → long; past SELL → short.</div>
-    </div>
-    <label class="toggle">
-      <input type="checkbox" name="futures.entry.market_open_path" {% if cfg.futures.entry.market_open_path %}checked{% endif %}>
-      <span>Enabled</span>
-    </label>
-  </div>
-  <div class="row">
-    <div class="lbl">Path B — Live Crossing
-      <div class="hint">Spot crosses BUY upward → long; SELL downward → short.</div>
-    </div>
-    <label class="toggle">
-      <input type="checkbox" name="futures.entry.crossing_path" {% if cfg.futures.entry.crossing_path %}checked{% endif %}>
-      <span>Enabled</span>
-    </label>
-  </div>
-
-  <h4 style="color:#fafafa;margin:18px 0 8px 0">Stoploss (futures)</h4>
-  <div class="opt">
-    <label>
-      <input type="radio" name="futures.stoploss.active" value="A" {% if cfg.futures.stoploss.active=='A' %}checked{% endif %}>
-      <span>
-        <span class="name">Variant A — Fixed ₹X drop</span>
-        <span class="desc">Exit when futures LTP moves
-          <input type="number" name="futures.stoploss.variant_a_drop_rs" min="0" step="1" style="width:70px"
-                 value="{{ cfg.futures.stoploss.variant_a_drop_rs }}"> ₹ against entry. (Long: ltp ≤ entry−X. Short: ltp ≥ entry+X.)</span>
-      </span>
-    </label>
-    <label>
-      <input type="radio" name="futures.stoploss.active" value="B" {% if cfg.futures.stoploss.active=='B' %}checked{% endif %}>
-      <span>
-        <span class="name">Variant B — Percentage drop</span>
-        <span class="desc">Exit when futures LTP moves
-          <input type="number" name="futures.stoploss.variant_b_drop_pct" min="0" step="0.1" style="width:70px"
-                 value="{{ cfg.futures.stoploss.variant_b_drop_pct }}">% against entry.</span>
-      </span>
-    </label>
-    <label>
-      <input type="radio" name="futures.stoploss.active" value="C" {% if cfg.futures.stoploss.active=='C' %}checked{% endif %}>
-      <span>
-        <span class="name">Variant C — Opposite Gann level</span>
-        <span class="desc">Long: exit if spot drops below SELL. Short: exit if spot rises above BUY. (No params.)</span>
-      </span>
-    </label>
-  </div>
-
-  <h4 style="color:#fafafa;margin:18px 0 8px 0">Profit target</h4>
-  <div class="row">
-    <div class="lbl">Long target level
-      <div class="hint">Spot ≥ this level closes the long.</div>
-    </div>
-    <select name="futures.target.long_level">
-      {% for lvl in ['T1','T2','T3','BUY_WA'] %}
-        <option value="{{ lvl }}" {% if cfg.futures.target.long_level==lvl %}selected{% endif %}>{{ lvl }}</option>
-      {% endfor %}
-    </select>
-  </div>
-  <div class="row">
-    <div class="lbl">Short target level
-      <div class="hint">Spot ≤ this level closes the short.</div>
-    </div>
-    <select name="futures.target.short_level">
-      {% for lvl in ['S1','S2','S3','SELL_WA'] %}
-        <option value="{{ lvl }}" {% if cfg.futures.target.short_level==lvl %}selected{% endif %}>{{ lvl }}</option>
-      {% endfor %}
-    </select>
-  </div>
-
-  <h4 style="color:#fafafa;margin:18px 0 8px 0">Lot multipliers (futures)</h4>
-  <div class="grid3">
-    {% for idx in ['NIFTY','BANKNIFTY','SENSEX'] %}
-      <div class="idx">
-        <h4>{{ idx }}</h4>
-        <input type="number" name="futures.lots.{{ idx }}" min="1" step="1" value="{{ cfg.futures.lots[idx] }}" style="width:100%">
-        <div class="hint">× broker lot (fetched live from SDK)</div>
-      </div>
-    {% endfor %}
-  </div>
-
-  <h4 style="color:#fafafa;margin:18px 0 8px 0">Per-day cap (futures)</h4>
-  <div class="grid3">
-    {% for idx in ['NIFTY','BANKNIFTY','SENSEX'] %}
-      <div class="idx">
-        <h4>{{ idx }}</h4>
-        <input type="number" name="futures.per_day_cap.{{ idx }}" min="1" step="1"
-               value="{% if cfg.futures.per_day_cap[idx] is not none %}{{ cfg.futures.per_day_cap[idx] }}{% endif %}"
-               placeholder="unlimited" style="width:100%">
-      </div>
-    {% endfor %}
-  </div>
-
-  <h4 style="color:#fafafa;margin:18px 0 8px 0">Limit-price round step</h4>
-  <div class="sub">BUY rounds DOWN to this step, SELL rounds UP. Matches the option strike step.</div>
-  <div class="grid3">
-    {% for idx in ['NIFTY','BANKNIFTY','SENSEX'] %}
-      <div class="idx">
-        <h4>{{ idx }}</h4>
-        <input type="number" name="futures.round_step.{{ idx }}" min="1" step="1" value="{{ cfg.futures.round_step[idx] }}" style="width:100%">
+        <input type="number" name="futures_round_step.{{ idx }}" min="1" step="1"
+               value="{{ cfg.futures_round_step[idx] }}" style="width:100%">
       </div>
     {% endfor %}
   </div>
@@ -386,6 +423,14 @@ function setNested(obj, dotted, val) {
   }
   cur[parts[parts.length - 1]] = val;
 }
+
+// Apply-to card visual feedback — recolor on radio change.
+document.querySelectorAll('.apply-opt input[type=radio]').forEach(r => {
+  r.addEventListener('change', () => {
+    document.querySelectorAll('.apply-opt label').forEach(l => l.classList.remove('sel'));
+    if (r.checked) r.closest('label').classList.add('sel');
+  });
+});
 
 document.getElementById('cfgForm').addEventListener('submit', async (e) => {
   e.preventDefault();

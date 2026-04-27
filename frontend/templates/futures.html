@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Futures - Kotak Neo</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif;
+         background: #f5f6f8; color: #1f2937; margin: 0; padding: 16px; }
+  header { display: flex; justify-content: space-between; align-items: center;
+           background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+           padding: 12px 16px; margin-bottom: 12px; }
+  .title { font-weight: 700; font-size: 18px; }
+  .live { color: #16a34a; font-size: 12px; margin-left: 8px; }
+  .stale { color: #dc2626; font-size: 12px; margin-left: 8px; }
+  .clock { font-family: monospace; background: #f3f4f6; padding: 6px 10px;
+           border-radius: 6px; font-size: 14px; }
+  .ucc { background: #f3f4f6; padding: 6px 10px; border-radius: 6px;
+         font-size: 13px; color: #374151; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tabs a { padding: 6px 12px; background: #fff; color: #6b7280;
+            text-decoration: none; border-radius: 6px; font-size: 13px;
+            border: 1px solid #e5e7eb; }
+  .tabs a.active { background: #2563eb; color: white; border-color: #2563eb; }
+  .banner { background: #fef3c7; color: #78350f; padding: 8px 12px;
+            border-radius: 6px; font-size: 13px; margin-bottom: 10px;
+            display: none; }
+  .banner.show { display: block; }
+  .err { background: #fee2e2; color: #991b1b; padding: 8px 12px;
+         border-radius: 6px; font-size: 12px; margin-bottom: 10px;
+         display: none; }
+  .err.show { display: block; }
+  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+          overflow-x: auto; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table th { text-align: center; padding: 10px 8px; background: #f9fafb;
+       color: #6b7280; font-weight: 600; font-size: 11px;
+       text-transform: uppercase; border-bottom: 1px solid #e5e7eb; }
+  table td { padding: 10px 8px; border-bottom: 1px solid #f3f4f6;
+       color: #1f2937; text-align: center;
+       font-variant-numeric: tabular-nums; }
+  td.idx { font-weight: 700; background: #1f2937; color: #fff;
+           font-family: monospace; }
+  td.ltp, td.spot { font-weight: 700; font-size: 14px; font-family: monospace; }
+  td.buy { background: #d1fae5; color: #065f46; font-family: monospace; }
+  td.sell { background: #fee2e2; color: #991b1b; font-family: monospace; }
+  .sig { display: inline-block; padding: 3px 10px; border-radius: 12px;
+         font-weight: 700; font-size: 11px; }
+  .sig-long  { background: #16a34a; color: #fff; }
+  .sig-short { background: #dc2626; color: #fff; }
+  .sig-mid   { background: #6b7280; color: #fff; }
+  .chg-pos { color: #16a34a; font-weight: 600; }
+  .chg-neg { color: #dc2626; font-weight: 600; }
+  h3 { margin: 0 0 8px 0; font-size: 15px; }
+  .hint { color: #6b7280; font-size: 11px; padding: 8px 16px; }
+  .loading { padding: 60px; text-align: center; color: #6b7280; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <span class="title">Futures Dashboard</span>
+    <span id="live" class="live">● live</span>
+  </div>
+  <div style="display:flex;gap:10px;align-items:center;">
+    {% include "_safety_header.html" %}
+    <span class="clock" id="clock">00:00:00 IST</span>
+    {% if ucc %}<span class="ucc">UCC: {{ ucc }}</span>{% endif %}
+  </div>
+</header>
+
+<div class="tabs">
+  {% for t in tabs %}
+    <a href="{{ t.url }}" class="{{ 'active' if t.key == active else '' }}">{{ t.label }}</a>
+  {% endfor %}
+</div>
+
+<div class="banner" id="banner"></div>
+<div class="err" id="err"></div>
+
+<h3>Live signal preview</h3>
+<div class="card">
+  <table id="futTable">
+    <thead>
+      <tr>
+        <th>Index</th>
+        <th>Contract</th>
+        <th>Expiry</th>
+        <th>Lot &times; Mult = Qty</th>
+        <th>Spot</th>
+        <th>BUY level</th>
+        <th>SELL level</th>
+        <th>Future LTP</th>
+        <th>Signal</th>
+        <th>Step</th>
+        <th>Limit (BUY &darr;)</th>
+        <th>Limit (SELL &uarr;)</th>
+      </tr>
+    </thead>
+    <tbody id="futBody">
+      <tr><td colspan="12" class="loading">Loading futures&hellip;</td></tr>
+    </tbody>
+  </table>
+</div>
+<div class="hint">
+  Signal is the same logic the strategy uses on every tick: spot above BUY
+  pick &rarr; LONG; spot below SELL pick &rarr; SHORT; otherwise IN-CHANNEL.
+  Limit prices are the actual rounded prices the bot would send (BUY rounds
+  DOWN, SELL rounds UP). Auto-refreshes every 3s.
+</div>
+
+<h3 style="margin-top:24px;">Auto Future Trades — today</h3>
+<div class="card">
+  <table>
+    <thead>
+      <tr style="text-align:left;">
+        <th style="text-align:left;">Time</th>
+        <th style="text-align:left;">Side</th>
+        <th style="text-align:left;">Underlying</th>
+        <th style="text-align:left;">Contract</th>
+        <th style="text-align:left;">Trigger</th>
+        <th style="text-align:right;">Qty</th>
+        <th style="text-align:right;">Entry</th>
+        <th style="text-align:right;">Current / Exit</th>
+        <th style="text-align:right;">P&amp;L pts</th>
+        <th style="text-align:left;">Status</th>
+      </tr>
+    </thead>
+    <tbody id="tradesBody">
+      <tr><td colspan="10" style="padding:12px; text-align:center; color:#888;">Watching for futures signals&hellip;</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script>
+function fmt(n, dp) {
+  if (n === null || n === undefined || isNaN(n)) return '-';
+  return Number(n).toFixed(dp === undefined ? 2 : dp);
+}
+
+function sigClass(s) {
+  if (s === 'LONG')  return 'sig sig-long';
+  if (s === 'SHORT') return 'sig sig-short';
+  return 'sig sig-mid';
+}
+
+function render(d) {
+  // apply_to banner: warn when futures strategy is disabled by config.
+  const banner = document.getElementById('banner');
+  if (d.futures_enabled) {
+    banner.classList.remove('show');
+  } else {
+    banner.textContent = 'Futures strategy disabled by config (apply_to = ' +
+                         (d.apply_to || '?') + '). Live LTP shown for ' +
+                         'reference only — no orders will fire.';
+    banner.classList.add('show');
+  }
+
+  if (d.error) {
+    document.getElementById('err').textContent = d.error;
+    document.getElementById('err').classList.add('show');
+  } else {
+    document.getElementById('err').classList.remove('show');
+  }
+
+  const body = document.getElementById('futBody');
+  const rows = d.rows || [];
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="12" class="loading">Resolving futures contracts&hellip;</td></tr>';
+  } else {
+    body.innerHTML = rows.map(r => `<tr>
+      <td class="idx">${r.idx}</td>
+      <td style="font-family:monospace;">${r.trading_symbol || '-'}</td>
+      <td>${r.expiry || '-'}</td>
+      <td>${r.lot_size || '-'} &times; ${r.lots_mult} = <b>${r.qty || '-'}</b></td>
+      <td class="spot">${fmt(r.spot)}</td>
+      <td class="buy">${fmt(r.buy_lvl)}</td>
+      <td class="sell">${fmt(r.sell_lvl)}</td>
+      <td class="ltp">${fmt(r.ltp)}</td>
+      <td><span class="${sigClass(r.signal)}">${r.signal}</span></td>
+      <td>${r.round_step}</td>
+      <td class="buy">${fmt(r.buy_limit)}</td>
+      <td class="sell">${fmt(r.sell_limit)}</td>
+    </tr>`).join('');
+  }
+
+  renderTrades(d.future_trades || []);
+}
+
+function renderTrades(trades) {
+  const tb = document.getElementById('tradesBody');
+  if (!trades.length) {
+    tb.innerHTML = '<tr><td colspan="10" style="padding:12px; text-align:center; color:#888;">Watching for futures signals&hellip;</td></tr>';
+    return;
+  }
+  tb.innerHTML = trades.map(t => {
+    const isOpen = t.status === 'OPEN';
+    const cur = isOpen ? (t.live_ltp ?? '-') : (t.exit_price ?? '-');
+    const pnl = isOpen ? (t.live_pnl_points ?? 0) : (t.pnl_points ?? 0);
+    const pnlCls = pnl > 0 ? 'chg-pos' : (pnl < 0 ? 'chg-neg' : '');
+    const reason = isOpen ? '\u2014' : (t.exit_reason || '');
+    const sideHtml = t.order_type === 'BUY'
+      ? '<span style="color:#16a34a;font-weight:700;">LONG</span>'
+      : '<span style="color:#dc2626;font-weight:700;">SHORT</span>';
+    const statusHtml = isOpen
+      ? '<span style="color:#1976d2;font-weight:600;">OPEN</span>'
+      : `<span style="color:#666;">CLOSED</span> <span style="font-size:11px;color:#888;">(${reason})</span>`;
+    return `<tr>
+      <td style="text-align:left;">${t.entry_time}${!isOpen && t.exit_time ? ' \u2192 ' + t.exit_time : ''}</td>
+      <td style="text-align:left;">${sideHtml}</td>
+      <td style="text-align:left;">${t.underlying}</td>
+      <td style="text-align:left;font-family:monospace;font-size:11px;">${t.trading_symbol || ''}</td>
+      <td style="text-align:left;font-size:11px;color:#666;">${t.trigger_level || ''} @ ${fmt(t.trigger_spot)}</td>
+      <td style="text-align:right;">${t.qty}</td>
+      <td style="text-align:right;">${fmt(t.entry_price)}</td>
+      <td style="text-align:right;">${fmt(cur)}</td>
+      <td style="text-align:right;" class="${pnlCls}">${fmt(pnl)}</td>
+      <td style="text-align:left;">${statusHtml}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function refresh() {
+  const live = document.getElementById('live');
+  try {
+    const r = await fetch('/api/future-prices');
+    const d = await r.json();
+    if (d.error) { live.textContent = '\u25CF stale'; live.className = 'stale'; }
+    else         { live.textContent = '\u25CF live';  live.className = 'live';  }
+    render(d);
+  } catch(e) {
+    live.textContent = '\u25CF stale'; live.className = 'stale';
+  }
+}
+
+function tickClock() {
+  const now = new Date();
+  const ist = new Date(now.getTime() + (now.getTimezoneOffset() + 330) * 60000);
+  document.getElementById('clock').textContent =
+    ist.toTimeString().slice(0, 8) + ' IST';
+}
+setInterval(tickClock, 1000); tickClock();
+setInterval(refresh, 3000); refresh();
+</script>
+{% include "_blocker_toaster.html" %}
+</body>
+</html>

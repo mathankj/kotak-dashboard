@@ -5,25 +5,29 @@ nearest-expiry FUT contract directly. Long + short:
   - bullish Gann signal -> BUY future  (long)
   - bearish Gann signal -> SELL future (short)
 
-Per-index enable flag in config.yaml -> futures.enabled.{NIFTY|BANKNIFTY|SENSEX}.
-Defaults all OFF — Ganesh enables one index at a time after confirming margin.
+Master switch in config.yaml -> apply_to (options | futures | both).
+When apply_to is "options", future_auto_strategy_tick short-circuits.
+All other knobs (entry paths, SL variant, target levels, lots, per-day cap)
+are SHARED with options.py — one config drives both strategies.
 
 LIMIT-PRICE ROUNDING (Ganesh's spec):
-  Round futures LTP to the same step as the option strike (50 / 100 / 100).
+  Round futures LTP to the per-index step (config.yaml -> futures_round_step).
   BUY rounds DOWN (try to fill cheaper). SELL rounds UP (try to fill higher).
   Same rounding rule applies to exits — closing-side derived from
   open trade direction:
     - closing a LONG  = SELL -> round UP
     - closing a SHORT = BUY  -> round DOWN
 
-EXITS (3 variants, exactly one active per `futures.stoploss.active`):
+EXITS (3 variants, exactly one active per `stoploss.active`):
   A) Fixed ₹X drop in futures LTP  (long: ltp <= entry-X; short: ltp >= entry+X)
   B) Percentage drop in futures LTP (long: ltp <= entry*(1-p%); short: ltp >= entry*(1+p%))
-  C) Spot reverses through opposite Gann level (long: spot < SELL; short: spot > BUY)
+  C) Spot reverses through opposite Gann level
+     (long exits when spot < variant_c_sell_level pick;
+      short exits when spot > variant_c_buy_level pick)
 
 PROFIT TARGET — spot reaches configured Gann level:
-  long  -> spot >= futures.target.long_level  (T1/T2/T3/BUY_WA on CE side)
-  short -> spot <= futures.target.short_level (S1/S2/S3/SELL_WA on PE side)
+  long  -> spot >= target.ce_level (T1/T2/T3/BUY_WA on CE side)
+  short -> spot <= target.pe_level (S1/S2/S3/SELL_WA on PE side)
 
 Reuses the same place_order_safe wrapper, kill-switch gate, ledger format,
 and position-verification step as options. Trade rows carry
@@ -104,7 +108,7 @@ def _check_futures_exit_reason(open_t, fut_ltp, spot,
     side = open_t.get("order_type")  # "BUY" (long) or "SELL" (short)
 
     cfg = config_loader.get()
-    fsl = cfg["futures"]["stoploss"]
+    fsl = cfg["stoploss"]    # unified — same SL config as options
     active = fsl["active"]   # validated A|B|C
 
     is_long = (side == "BUY")
@@ -136,19 +140,22 @@ def _check_futures_exit_reason(open_t, fut_ltp, spot,
             return "SL_BUY_LVL"
 
     # ---------- (2) PROFIT TARGET ----------
-    ftgt = cfg["futures"]["target"]
+    # Unified target config — futures long uses ce_level (BUY-side Gann),
+    # futures short uses pe_level (SELL-side Gann). Same picks as options.
+    ftgt = cfg["target"]
     if is_long:
         if long_target_lvl is not None and spot >= long_target_lvl:
-            return f"TARGET_{ftgt['long_level']}"
+            return f"TARGET_{ftgt['ce_level']}"
     else:
         if short_target_lvl is not None and spot <= short_target_lvl:
-            return f"TARGET_{ftgt['short_level']}"
+            return f"TARGET_{ftgt['pe_level']}"
 
     return None
 
 
 def _can_open_more(idx_name, counts):
-    cap = config_loader.futures_per_day_cap(idx_name)
+    # Unified per_day_cap — same caps as options strategy.
+    cap = config_loader.per_day_cap(idx_name)
     if cap is None:
         return True
     return counts.get(idx_name, 0) < cap
@@ -186,8 +193,9 @@ def future_auto_strategy_tick(future_data, gann_quotes, client=None):
     """
     if not AUTO_FUTURE_STRATEGY_ENABLED or not future_data:
         return
-    # Hot path: if no index has futures enabled, skip the whole tick.
-    if not config_loader.futures_any_enabled():
+    # apply_to gate — config switch decides whether futures strategy runs.
+    # When apply_to is "options", this short-circuits the whole tick.
+    if not config_loader.futures_enabled():
         return
 
     now = now_ist()
@@ -225,12 +233,11 @@ def future_auto_strategy_tick(future_data, gann_quotes, client=None):
         }
 
         cfg = config_loader.get()
-        entry_cfg = cfg["futures"]["entry"]
-        target_cfg = cfg["futures"]["target"]
+        entry_cfg  = cfg["entry"]
+        sl_cfg_idx = cfg["stoploss"]
+        target_cfg = cfg["target"]
 
         for idx_name, fut in future_data.items():
-            if not config_loader.futures_enabled(idx_name):
-                continue
             spot_q_key = INDEX_OPTIONS_CONFIG[idx_name]["spot_symbol_key"]
             gq = gann_quotes.get(spot_q_key) or {}
             spot = gq.get("ltp")
@@ -238,10 +245,18 @@ def future_auto_strategy_tick(future_data, gann_quotes, client=None):
                 continue
             spot = float(spot)
             levels = gq.get("levels") or {}
-            buy_lvl  = (levels.get("buy")  or {}).get("BUY")
-            sell_lvl = (levels.get("sell") or {}).get("SELL")
-            long_target_lvl  = (levels.get("buy")  or {}).get(target_cfg["long_level"])
-            short_target_lvl = (levels.get("sell") or {}).get(target_cfg["short_level"])
+            # Per-row level resolution (same picks as options — unified config):
+            # entry uses market_open_* / crossing_* dropdowns,
+            # variant C exit uses variant_c_* dropdowns (long exits below
+            # sell pick; short exits above buy pick).
+            mo_buy_lvl   = config_loader.resolve_buy_level (levels, entry_cfg["market_open_buy_level"])
+            mo_sell_lvl  = config_loader.resolve_sell_level(levels, entry_cfg["market_open_sell_level"])
+            cr_buy_lvl   = config_loader.resolve_buy_level (levels, entry_cfg["crossing_buy_level"])
+            cr_sell_lvl  = config_loader.resolve_sell_level(levels, entry_cfg["crossing_sell_level"])
+            slc_buy_lvl  = config_loader.resolve_buy_level (levels, sl_cfg_idx["variant_c_buy_level"])
+            slc_sell_lvl = config_loader.resolve_sell_level(levels, sl_cfg_idx["variant_c_sell_level"])
+            long_target_lvl  = (levels.get("buy")  or {}).get(target_cfg["ce_level"])
+            short_target_lvl = (levels.get("sell") or {}).get(target_cfg["pe_level"])
             prev_spot = _future_auto_state["last_spot"].get(idx_name)
             fut_ltp = fut.get("ltp")
 
@@ -250,7 +265,7 @@ def future_auto_strategy_tick(future_data, gann_quotes, client=None):
             if open_t:
                 reason = _check_futures_exit_reason(
                     open_t, fut_ltp, spot,
-                    buy_lvl, sell_lvl,
+                    slc_buy_lvl, slc_sell_lvl,
                     long_target_lvl, short_target_lvl,
                 )
                 if reason and fut_ltp is not None:
@@ -269,18 +284,18 @@ def future_auto_strategy_tick(future_data, gann_quotes, client=None):
                 )
                 if not already_evaluated_open:
                     if entry_cfg["market_open_path"]:
-                        if buy_lvl is not None and spot > buy_lvl:
+                        if mo_buy_lvl is not None and spot > mo_buy_lvl:
                             side = "BUY"
-                        elif sell_lvl is not None and spot < sell_lvl:
+                        elif mo_sell_lvl is not None and spot < mo_sell_lvl:
                             side = "SELL"
                         if side is None:
                             _future_auto_state["open_evaluated"][idx_name] = today
                     else:
                         _future_auto_state["open_evaluated"][idx_name] = today
                 elif prev_spot is not None and entry_cfg["crossing_path"]:
-                    if buy_lvl is not None and prev_spot <= buy_lvl < spot:
+                    if cr_buy_lvl is not None and prev_spot <= cr_buy_lvl < spot:
                         side = "BUY"
-                    elif sell_lvl is not None and prev_spot >= sell_lvl > spot:
+                    elif cr_sell_lvl is not None and prev_spot >= cr_sell_lvl > spot:
                         side = "SELL"
 
                 if side and fut_ltp is not None:
@@ -328,7 +343,8 @@ def _execute_futures_entry(idx_name, side, fut, fut_ltp, spot, client):
     else:
         limit_price = _round_for_sell(fut_ltp, step)
 
-    qty = int(sdk_lot_size) * config_loader.futures_lot_multiplier(idx_name)
+    # Unified lot multiplier — same lots config as options strategy.
+    qty = int(sdk_lot_size) * config_loader.lot_multiplier(idx_name)
 
     scrip = {
         "symbol": f"{idx_name} FUT",

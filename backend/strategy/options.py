@@ -106,12 +106,12 @@ def _check_exit_reason(open_t, opt_ltp, spot,
        code so Ganesh can flip between them from the /config page.
 
        Variant A — Fixed premium drop (₹X below entry).
-                   Param:  stoploss.variant_a_premium_drop_rs
+                   Param:  stoploss.variant_a_drop_rs
        Variant B — Percentage premium drop (X% from entry).
-                   Param:  stoploss.variant_b_premium_drop_pct
-       Variant C — Spot reverses through OPPOSITE Gann level.
-                   CE: spot < SELL  |  PE: spot > BUY
-                   No params.
+                   Param:  stoploss.variant_b_drop_pct
+       Variant C — Spot reverses through chosen Gann level.
+                   CE: spot < variant_c_sell_level pick (SELL or SELL_WA)
+                   PE: spot > variant_c_buy_level  pick (BUY  or BUY_WA)
 
     2) PROFIT TARGET — spot reaches the configured Gann level.
        config.yaml -> target.ce_level / target.pe_level. The level value
@@ -131,14 +131,14 @@ def _check_exit_reason(open_t, opt_ltp, spot,
     # ---------- (1) STOP LOSS — exactly ONE variant runs ----------
     if active_sl == "A":
         # Fixed ₹X premium drop below entry.
-        drop_rs = sl_cfg["variant_a_premium_drop_rs"]
+        drop_rs = sl_cfg["variant_a_drop_rs"]
         if opt_ltp is not None and entry_price is not None:
             if opt_ltp <= entry_price - drop_rs:
                 return "SL_PREMIUM_FIXED"
 
     elif active_sl == "B":
         # Percentage premium drop from entry. 30 -> exit when premium <= 70% of entry.
-        drop_pct = sl_cfg["variant_b_premium_drop_pct"]
+        drop_pct = sl_cfg["variant_b_drop_pct"]
         if opt_ltp is not None and entry_price is not None:
             if opt_ltp <= entry_price * (1 - drop_pct / 100.0):
                 return "SL_PREMIUM_PCT"
@@ -234,6 +234,9 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
     """
     if not AUTO_OPTION_STRATEGY_ENABLED or not option_index_meta:
         return
+    # apply_to gate — config switch decides whether options strategy runs.
+    if not config_loader.options_enabled():
+        return
     now = now_ist()
 
     with _option_auto_state["lock"]:
@@ -275,12 +278,23 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
             gann_sym = INDEX_OPTIONS_CONFIG[idx_name]["spot_symbol_key"]
             gq = gann_quotes.get(gann_sym) or {}
             levels  = gq.get("levels") or {}
-            buy_lvl  = (levels.get("buy")  or {}).get("BUY")
-            sell_lvl = (levels.get("sell") or {}).get("SELL")
+            cfg_full   = config_loader.get()
+            entry_cfg  = cfg_full["entry"]
+            sl_cfg_idx = cfg_full["stoploss"]
+            cfg_target = cfg_full["target"]
+            # Per-row level resolution (Ganesh's BUY/BUY_WA + SELL/SELL_WA dropdowns):
+            # entry uses market_open_* / crossing_* picks.
+            # variant C exit uses variant_c_* picks (CE exit if spot < sell pick;
+            # PE exit if spot > buy pick).
+            mo_buy_lvl   = config_loader.resolve_buy_level (levels, entry_cfg["market_open_buy_level"])
+            mo_sell_lvl  = config_loader.resolve_sell_level(levels, entry_cfg["market_open_sell_level"])
+            cr_buy_lvl   = config_loader.resolve_buy_level (levels, entry_cfg["crossing_buy_level"])
+            cr_sell_lvl  = config_loader.resolve_sell_level(levels, entry_cfg["crossing_sell_level"])
+            slc_buy_lvl  = config_loader.resolve_buy_level (levels, sl_cfg_idx["variant_c_buy_level"])
+            slc_sell_lvl = config_loader.resolve_sell_level(levels, sl_cfg_idx["variant_c_sell_level"])
             # Profit-target levels per config: CE side reads from `buy`
             # group (BUY/BUY_WA/T1/T2/T3); PE side reads from `sell` group
             # (SELL/SELL_WA/S1/S2/S3).
-            cfg_target = config_loader.get()["target"]
             ce_target_lvl = (levels.get("buy")  or {}).get(cfg_target["ce_level"])
             pe_target_lvl = (levels.get("sell") or {}).get(cfg_target["pe_level"])
             prev_spot = _option_auto_state["last_spot"].get(idx_name)
@@ -292,7 +306,8 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                 opt_ltp = (opt_q or {}).get("ltp")
                 reason = _check_exit_reason(
                     open_t, opt_ltp, spot,
-                    buy_lvl, sell_lvl, ce_target_lvl, pe_target_lvl,
+                    slc_buy_lvl, slc_sell_lvl,
+                    ce_target_lvl, pe_target_lvl,
                 )
                 if reason and opt_ltp is not None:
                     _execute_exit(open_t, float(opt_ltp), reason,
@@ -314,7 +329,6 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                     and _can_open_more(idx_name, counts)):
                 option_type = None
                 today_str = today  # already computed above
-                entry_cfg = config_loader.get()["entry"]
                 already_evaluated_open = (
                     _option_auto_state["open_evaluated"].get(idx_name)
                         == today_str
@@ -324,10 +338,12 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                     # (a) MARKET-OPEN evaluation — runs only if enabled.
                     # If disabled we still mark "evaluated" so subsequent
                     # ticks fall straight through to the crossing branch.
+                    # Uses market_open_buy_level / market_open_sell_level
+                    # picks (BUY/BUY_WA, SELL/SELL_WA) from config.
                     if entry_cfg["market_open_path"]:
-                        if buy_lvl is not None and spot > buy_lvl:
+                        if mo_buy_lvl is not None and spot > mo_buy_lvl:
                             option_type = "CE"
-                        elif sell_lvl is not None and spot < sell_lvl:
+                        elif mo_sell_lvl is not None and spot < mo_sell_lvl:
                             option_type = "PE"
                         if option_type is None:
                             # Spot is in the channel — no signal at open. Mark
@@ -344,10 +360,11 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                         # by stamping evaluated immediately.
                         _option_auto_state["open_evaluated"][idx_name] = today_str
                 elif prev_spot is not None and entry_cfg["crossing_path"]:
-                    # (b) CROSSING — runs only if enabled.
-                    if buy_lvl is not None and prev_spot <= buy_lvl < spot:
+                    # (b) CROSSING — runs only if enabled. Uses
+                    # crossing_buy_level / crossing_sell_level picks.
+                    if cr_buy_lvl is not None and prev_spot <= cr_buy_lvl < spot:
                         option_type = "CE"
-                    elif sell_lvl is not None and prev_spot >= sell_lvl > spot:
+                    elif cr_sell_lvl is not None and prev_spot >= cr_sell_lvl > spot:
                         option_type = "PE"
 
                 if option_type:

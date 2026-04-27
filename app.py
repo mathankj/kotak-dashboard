@@ -99,6 +99,7 @@ def fmt_duration(seconds):
 TABS = [
     {"key": "gann", "url": "/gann", "label": "Gann Trader"},
     {"key": "options", "url": "/options", "label": "Options"},
+    {"key": "futures", "url": "/futures", "label": "Futures"},
     {"key": "holdings", "url": "/", "label": "Holdings"},
     {"key": "positions", "url": "/positions", "label": "Positions"},
     {"key": "trades", "url": "/trades", "label": "Trade Log"},
@@ -461,6 +462,113 @@ def option_prices_api():
         "chains": chains,
         "error": err,
         "option_trades": option_trades,
+        "ts": now_ist().strftime("%H:%M:%S IST"),
+    })
+
+
+# ---------- Futures routes ----------
+@app.route("/futures")
+def futures_view():
+    """Futures dashboard — live LTP, signal, limit-price preview per index,
+    plus today's auto futures trades. Read-only; entries fire from the
+    autonomous strategy ticker (every 3s)."""
+    return render_template(
+        "futures.html",
+        tabs=TABS,
+        active="futures",
+        indices=[{"key": k, "label": v["label"]}
+                 for k, v in INDEX_OPTIONS_CONFIG.items()],
+        ucc=os.getenv("KOTAK_UCC", ""),
+    )
+
+
+@app.route("/api/future-prices")
+def future_prices_api():
+    """Returns live futures contracts + spot/level/signal per index, plus
+    today's auto futures trades. Read-only — does NOT tick the strategy
+    (the autonomous ticker already does, every 3s). Polled by the JS."""
+    import math
+    fut_data, err = fetch_future_quotes()
+    gann_quotes, _ = fetch_quotes()
+    today = now_ist().strftime("%Y-%m-%d")
+
+    # Per-row level resolution mirrors strategy/futures.py so the preview
+    # matches what would actually fire.
+    cfg        = config_loader.get()
+    entry_cfg  = cfg["entry"]
+    apply_to   = cfg.get("apply_to", "both")
+
+    rows = []
+    for idx_name, fut in fut_data.items():
+        spot_q_key = INDEX_OPTIONS_CONFIG[idx_name]["spot_symbol_key"]
+        gq = gann_quotes.get(spot_q_key) or {}
+        spot = gq.get("ltp")
+        levels = gq.get("levels") or {}
+        # Signal preview uses crossing_* picks (the steady-state path —
+        # market_open_* only fires once per day).
+        cr_buy_lvl  = config_loader.resolve_buy_level (levels, entry_cfg["crossing_buy_level"])
+        cr_sell_lvl = config_loader.resolve_sell_level(levels, entry_cfg["crossing_sell_level"])
+        signal = "—"
+        if spot is not None:
+            if cr_buy_lvl is not None and float(spot) > cr_buy_lvl:
+                signal = "LONG"
+            elif cr_sell_lvl is not None and float(spot) < cr_sell_lvl:
+                signal = "SHORT"
+            else:
+                signal = "IN-CHANNEL"
+        # Limit price preview — same rounding as the strategy. BUY floors,
+        # SELL ceils. Lets Ganesh see exactly what would be sent.
+        step = config_loader.futures_round_step(idx_name)
+        ltp = fut.get("ltp")
+        buy_limit = sell_limit = None
+        if ltp is not None and step > 0:
+            buy_limit  = math.floor(float(ltp) / step) * step
+            sell_limit = math.ceil (float(ltp) / step) * step
+        lots_mult = config_loader.lot_multiplier(idx_name)
+        lot_size = fut.get("lot_size")
+        rows.append({
+            "idx": idx_name,
+            "label": INDEX_OPTIONS_CONFIG[idx_name]["label"],
+            "trading_symbol": fut.get("trading_symbol"),
+            "expiry": str(fut.get("expiry") or ""),
+            "lot_size": lot_size,
+            "lots_mult": lots_mult,
+            "qty": (lot_size or 0) * lots_mult,
+            "ltp": ltp,
+            "spot": spot,
+            "buy_lvl":  cr_buy_lvl,
+            "sell_lvl": cr_sell_lvl,
+            "signal": signal,
+            "round_step": step,
+            "buy_limit":  buy_limit,
+            "sell_limit": sell_limit,
+        })
+
+    all_trades = read_trade_ledger()
+    future_trades = [
+        t for t in all_trades
+        if t.get("asset_type") == "future"
+        and (t.get("status") == "OPEN" or t.get("date") == today)
+    ]
+    # Live LTP overlay for open futures positions.
+    for t in future_trades:
+        if t.get("status") == "OPEN":
+            fut = fut_data.get(t.get("underlying")) or {}
+            if fut.get("ltp") is not None:
+                t["live_ltp"] = fut["ltp"]
+                entry = float(t.get("entry_price") or 0)
+                ltp_v = float(fut["ltp"])
+                # Long(BUY): pnl = ltp - entry. Short(SELL): pnl = entry - ltp.
+                pnl = (ltp_v - entry) if t.get("order_type") == "BUY" \
+                      else (entry - ltp_v)
+                t["live_pnl_points"] = round(pnl, 2)
+
+    return jsonify({
+        "rows": rows,
+        "future_trades": future_trades,
+        "apply_to": apply_to,
+        "futures_enabled": apply_to in ("futures", "both"),
+        "error": err,
         "ts": now_ist().strftime("%H:%M:%S IST"),
     })
 
@@ -909,10 +1017,10 @@ def _strategy_ticker_loop():
                             client=client_for_strategy,
                         )
                         # Futures runs alongside options. Independent ledger
-                        # rows (asset_type=future), per-index enable flags
-                        # in config.yaml -> futures.enabled.{IDX}. Skips the
-                        # fetch entirely if no index is enabled.
-                        if config_loader.futures_any_enabled():
+                        # rows (asset_type=future). Single shared switch:
+                        # apply_to in {options,futures,both} — when "options"
+                        # we skip the futures fetch entirely.
+                        if config_loader.futures_enabled():
                             try:
                                 fut_data, _fut_err = fetch_future_quotes()
                                 if fut_data:
