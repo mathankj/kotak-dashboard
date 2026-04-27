@@ -303,6 +303,16 @@
       </span>
     </label>
 
+    <label>
+      <input type="radio" name="stoploss.active" value="D" {% if cfg.stoploss.active=='D' %}checked{% endif %}>
+      <span style="flex:1">
+        <span class="name">Variant D — Trailing along Gann ladder</span>
+        <span class="desc">SL trails one rung BEHIND the spot's current rung.
+          Initial SL = entry price (breakeven). Triggers on spot crossing
+          trail SL; close fills at instrument LTP.</span>
+      </span>
+    </label>
+
   </div>
 </div>
 
