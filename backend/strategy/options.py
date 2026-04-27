@@ -320,7 +320,16 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                         option_type = "CE"
                     elif sell_lvl is not None and spot < sell_lvl:
                         option_type = "PE"
-                    _option_auto_state["open_evaluated"][idx_name] = today_str
+                    if option_type is None:
+                        # Spot is in the channel — no signal at open. Mark
+                        # evaluated so we don't keep re-checking; subsequent
+                        # ticks fall into the crossing branch as intended.
+                        _option_auto_state["open_evaluated"][idx_name] = today_str
+                    # If option_type IS set, we leave open_evaluated UNSET
+                    # here. It gets stamped down below right before the
+                    # _execute_entry call — so a missing opt_ltp at this
+                    # exact tick won't burn the open-evaluation slot for
+                    # the day. Retries on the next tick when LTP lands.
                 elif prev_spot is not None:
                     # (b) CROSSING
                     if buy_lvl is not None and prev_spot <= buy_lvl < spot:
@@ -333,6 +342,11 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                     opt_q = option_data.get(opt_key)
                     opt_ltp = (opt_q or {}).get("ltp")
                     if opt_ltp is not None:
+                        # Stamp open_evaluated NOW (whether the order
+                        # ultimately succeeds, blocks on margin, or hits a
+                        # Kotak error). Either way we tried — don't burn the
+                        # slot earlier when LTP might still be missing.
+                        _option_auto_state["open_evaluated"][idx_name] = today_str
                         placed = _execute_entry(
                             idx_name, atm, option_type, opt_key,
                             float(opt_ltp), float(spot),
