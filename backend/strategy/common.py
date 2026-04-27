@@ -1,4 +1,4 @@
-"""Shared helpers used by every paper-trading strategy.
+"""Shared helpers used by the trading strategy.
 
 These four utilities are not specific to stocks or options — they're the
 plumbing that any strategy needs:
@@ -9,11 +9,9 @@ plumbing that any strategy needs:
   _auto_close(trade, ltp, now, reason)
                                       mark a trade CLOSED, fill exit fields, compute P&L
   update_open_trades_mfe(quotes)      track max favourable price + farthest Gann level
-                                      reached on every OPEN trade in paper_trades.json
-
-No real broker call is ever made from this module.
+                                      reached on every OPEN trade in the ledger
 """
-from backend.storage.trades import read_paper_trades, write_paper_trades
+from backend.storage.trades import read_trade_ledger, write_trade_ledger
 from backend.strategy.gann import compute_target_level_reached
 
 
@@ -60,7 +58,7 @@ def _auto_close(trade, ltp, now, reason):
 def update_open_trades_mfe(quotes_by_symbol):
     """For every OPEN trade, update max_min_target_price and target_level_reached
     based on the current LTP. Called once per quote refresh."""
-    trades = read_paper_trades()
+    trades = read_trade_ledger()
     changed = False
     for t in trades:
         if t.get("status") != "OPEN":
@@ -86,4 +84,4 @@ def update_open_trades_mfe(quotes_by_symbol):
             t["target_level_reached"] = reached
             changed = True
     if changed:
-        write_paper_trades(trades)
+        write_trade_ledger(trades)

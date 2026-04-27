@@ -86,7 +86,7 @@ def test_import_quotes_module():
 def test_import_storage_modules():
     """All backend.storage modules must import cleanly."""
     from backend.storage.trades import (  # noqa: F401
-        PAPER_FILE, read_paper_trades, write_paper_trades, next_paper_id,
+        LEDGER_FILE, read_trade_ledger, write_trade_ledger, next_trade_id,
     )
     from backend.storage.orders import (  # noqa: F401
         ORDERS_FILE, append_order, read_orders,
@@ -151,13 +151,13 @@ def test_compute_target_level_reached_buy():
     assert compute_target_level_reached("B", 100.0, beyond, lv) == "Beyond T3"
 
 
-def test_next_paper_id_empty_and_increment():
-    """next_paper_id starts at '1' and increments past max."""
-    from backend.storage.trades import next_paper_id
-    assert next_paper_id([]) == "1"
-    assert next_paper_id([{"id": "5"}, {"id": "3"}]) == "6"
+def test_next_trade_id_empty_and_increment():
+    """next_trade_id starts at '1' and increments past max."""
+    from backend.storage.trades import next_trade_id
+    assert next_trade_id([]) == "1"
+    assert next_trade_id([{"id": "5"}, {"id": "3"}]) == "6"
     # Garbled IDs are skipped
-    assert next_paper_id([{"id": "abc"}, {"id": "2"}]) == "3"
+    assert next_trade_id([{"id": "abc"}, {"id": "2"}]) == "3"
 
 
 def test_login_free_pages_render():

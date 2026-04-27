@@ -54,8 +54,9 @@ def place_order_safe(*, client, scrip, side, qty, price,
       available_cash: float or None. If None, margin check is skipped (caller
                       didn't fetch limits). If provided, wrapper compares
                       against price*qty*lot_size and refuses if short.
-      lot_size      : int — for options, the lot size (75 for NIFTY weekly etc).
-                      For cash, leave as 1.
+      lot_size      : int — informational only. `qty` is already total shares
+                      (e.g. 75 for 1 lot of NIFTY). Recorded in audit log so we
+                      can post-process "how many lots" later if needed.
       source        : free-text label ("manual_ticket" / "auto_options" / ...).
                       Lands in the audit log so we can trace WHO triggered.
 
@@ -94,9 +95,12 @@ def place_order_safe(*, client, scrip, side, qty, price,
                 "raw": None}
 
     # ---------------- (4) MARGIN PRE-CHECK ----------------
+    # Note: qty is total shares (e.g. 75 for 1 NIFTY lot at premium ₹120 ->
+    # need = 9,000). lot_size is informational only — multiplying by it here
+    # would double-count and falsely block trades on funded accounts.
     if available_cash is not None:
         try:
-            need = float(price) * float(qty) * float(lot_size)
+            need = float(price) * float(qty)
         except (TypeError, ValueError):
             need = None
         if need is not None and need > float(available_cash):

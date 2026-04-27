@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Blockers - Kotak Neo Dashboard</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif;
+         background: #0f1419; color: #d4d4d8; margin: 0; padding: 20px; }
+  header { display: flex; justify-content: space-between; align-items: center;
+           border-bottom: 2px solid #27272a; padding-bottom: 12px; margin-bottom: 20px; }
+  h1 { margin: 0; color: #fafafa; font-size: 24px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tabs a { padding: 8px 16px; background: #18181b; color: #a1a1aa;
+            text-decoration: none; border-radius: 6px; font-size: 14px;
+            border: 1px solid #27272a; }
+  .tabs a.active { background: #2563eb; color: white; border-color: #2563eb; }
+  .tabs a:hover:not(.active) { background: #27272a; color: #fafafa; }
+  .card { background: #18181b; border: 1px solid #27272a;
+          border-radius: 8px; padding: 20px; overflow-x: auto; }
+  .card-head { display: flex; justify-content: space-between; align-items: center;
+               margin-bottom: 16px; }
+  h2 { margin: 0; color: #fafafa; font-size: 18px; }
+  .lead { color: #a1a1aa; font-size: 13px; margin-bottom: 16px;
+          background: #1c1917; border-left: 3px solid #f59e0b;
+          padding: 10px 14px; border-radius: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 10px 12px; background: #27272a;
+       color: #a1a1aa; font-weight: 600; font-size: 11px;
+       text-transform: uppercase; letter-spacing: 0.5px; }
+  td { padding: 10px 12px; border-bottom: 1px solid #27272a; color: #d4d4d8;
+       white-space: nowrap; vertical-align: top; }
+  td.msg { white-space: normal; max-width: 480px; color: #fbbf24; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pill { padding: 2px 8px; border-radius: 4px; font-size: 10px;
+          font-weight: 700; letter-spacing: 0.5px; display: inline-block; }
+  .pill-blocked { background: #7c2d12; color: #fed7aa; }
+  .pill-side-B { background: #166534; color: #d1fae5; }
+  .pill-side-S { background: #7f1d1d; color: #fecaca; }
+  .pill-source { background: #1e3a8a; color: #bfdbfe; font-size: 10px; }
+  .pill-kind { background: #3f3f46; color: #d4d4d8; font-size: 10px; }
+  .empty { color: #71717a; font-style: italic; padding: 20px 0; }
+  .refresh { padding: 8px 16px; background: #16a34a; color: white; border: none;
+             border-radius: 6px; cursor: pointer; font-size: 14px; }
+  .reason { font-family: ui-monospace, monospace; font-size: 11px;
+            color: #fb923c; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Kotak Neo Dashboard</h1>
+  <div style="display:flex;align-items:center;gap:0">
+    {% include "_safety_header.html" %}
+    <form method="post" action="/refresh" style="margin:0">
+      <button class="refresh" type="submit">Refresh Login</button>
+    </form>
+  </div>
+</header>
+<div class="tabs">
+  {% for t in tabs %}
+    <a href="{{ t.url }}" class="{% if t.key == active %}active{% endif %}">{{ t.label }}</a>
+  {% endfor %}
+</div>
+
+<div class="card">
+  <div class="card-head">
+    <h2>Blocked Order Attempts ({{ blocks|length }})</h2>
+  </div>
+  <div class="lead">
+    Every order the safety wrapper refused to send to Kotak. Use this to see
+    exactly what the auto-strategy <em>would have</em> traded and why it
+    couldn't &mdash; e.g. zero balance, kill switch engaged, broker error,
+    or no matching position to exit.
+  </div>
+  {% if blocks %}
+    <table>
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th></th>
+          <th>Kind</th>
+          <th>Scrip</th>
+          <th>Side</th>
+          <th class="num">Qty</th>
+          <th class="num">Price</th>
+          <th>Reason</th>
+          <th>Message</th>
+          <th>Source</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for b in blocks %}
+          <tr>
+            <td>{{ b.get('ts', '')[11:19] }}<br><span style="color:#71717a;font-size:11px">{{ b.get('ts', '')[:10] }}</span></td>
+            <td><span class="pill pill-blocked">BLOCKED</span></td>
+            <td><span class="pill pill-kind">{{ b.get('kind', '-') }}</span></td>
+            <td>{{ b.get('scrip', '') }}</td>
+            <td>
+              {% if b.get('side') %}
+                <span class="pill pill-side-{{ b.get('side') }}">{{ 'BUY' if b.get('side') == 'B' else 'SELL' }}</span>
+              {% else %}-{% endif %}
+            </td>
+            <td class="num">{{ b.get('qty', '') or '-' }}</td>
+            <td class="num">{% if b.get('price') is not none %}{{ '%.2f'|format(b.get('price')) }}{% else %}-{% endif %}</td>
+            <td><span class="reason">{{ b.get('result', '') }}</span></td>
+            <td class="msg">{{ b.get('message', '') }}</td>
+            <td><span class="pill pill-source">{{ b.get('source', '-') }}</span></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="empty">No blocked attempts yet. (When the auto-strategy tries to place an order that gets refused &mdash; e.g. insufficient margin &mdash; you'll see it here.)</div>
+  {% endif %}
+</div>
+
+{% include "_blocker_toaster.html" %}
+</body>
+</html>

@@ -36,8 +36,9 @@ from backend.safety.orders import (
     RESULT_BLOCKED_MARGIN, RESULT_KOTAK_ERROR,
 )
 from backend.safety.positions import verify_open_position
+from backend.storage.blocked import append_blocked
 from backend.storage.trades import (
-    read_paper_trades, write_paper_trades, next_paper_id,
+    read_trade_ledger, write_trade_ledger, next_trade_id,
 )
 from backend.strategy.common import (
     _auto_at_or_after_squareoff, _auto_in_hours,
@@ -224,7 +225,7 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
     now = now_ist()
 
     with _option_auto_state["lock"]:
-        trades = read_paper_trades()
+        trades = read_trade_ledger()
 
         # 1. SQUARE OFF at/after 15:15 — close everything OPEN
         if _auto_at_or_after_squareoff(now):
@@ -321,11 +322,27 @@ def _execute_entry(idx_name, atm, option_type, opt_key,
     lot_size = cfg.get("lot_size")
     if not lot_size:
         audit("ORDER_REFUSED_NO_LOT_SIZE", scrip=opt_key, idx=idx_name)
+        append_blocked(
+            kind="ENTRY", scrip=opt_key, side="B", qty=0, price=opt_ltp,
+            result="NO_LOT_SIZE",
+            message=f"No lot size configured for {idx_name}",
+            underlying=idx_name, strike=atm, option_type=option_type,
+            trigger_spot=spot,
+            trigger_level="BUY" if option_type == "CE" else "SELL",
+        )
         return False
     trading_symbol = _option_trading_symbol(idx_name, atm, option_type, expiry)
     if not trading_symbol:
         audit("ORDER_REFUSED_NO_TRADING_SYMBOL",
               scrip=opt_key, idx=idx_name, expiry=str(expiry))
+        append_blocked(
+            kind="ENTRY", scrip=opt_key, side="B", qty=lot_size, price=opt_ltp,
+            result="NO_TRADING_SYMBOL",
+            message=f"Could not build trading symbol for expiry={expiry}",
+            underlying=idx_name, strike=atm, option_type=option_type,
+            trigger_spot=spot,
+            trigger_level="BUY" if option_type == "CE" else "SELL",
+        )
         return False
 
     scrip = {
@@ -344,16 +361,25 @@ def _execute_entry(idx_name, atm, option_type, opt_key,
     )
 
     if res["result"] not in (RESULT_OK, RESULT_PAPER):
-        # HALTED / MARGIN / KOTAK_ERROR — wrapper already audited the failure.
+        # HALTED / MARGIN / KOTAK_ERROR — wrapper already audited it.
+        # Record a Blockers row so Ganesh sees the refused attempt with full
+        # context (scrip, side, qty, price, reason) without parsing audit.log.
+        append_blocked(
+            kind="ENTRY", scrip=opt_key, side="B", qty=lot_size,
+            price=opt_ltp, result=res["result"], message=res["message"],
+            underlying=idx_name, strike=atm, option_type=option_type,
+            trading_symbol=trading_symbol, trigger_spot=spot,
+            trigger_level="BUY" if option_type == "CE" else "SELL",
+        )
         return False
 
     # Build and persist the trade row.
     mode = "LIVE" if res["result"] == RESULT_OK else "PAPER"
     kotak_order_id = res.get("order_id") if mode == "LIVE" else None
     now = now_ist()
-    trades = read_paper_trades()
+    trades = read_trade_ledger()
     row = {
-        "id": next_paper_id(trades),
+        "id": next_trade_id(trades),
         "date": now.strftime("%Y-%m-%d"),
         "scrip": opt_key,
         "option_key": opt_key,
@@ -382,7 +408,7 @@ def _execute_entry(idx_name, atm, option_type, opt_key,
         "kotak_exit_order_id": None,
     }
     trades.insert(0, row)
-    write_paper_trades(trades)
+    write_trade_ledger(trades)
     audit("AUTO_ENTRY_PLACED", scrip=opt_key, mode=mode,
           kotak_order_id=kotak_order_id, qty=lot_size, price=opt_ltp)
     return True
@@ -407,18 +433,42 @@ def _execute_exit(open_trade, opt_ltp, reason, option_index_meta, client):
                       ))
     if not trading_symbol:
         audit("EXIT_REFUSED_NO_TRADING_SYMBOL", scrip=opt_key)
+        append_blocked(
+            kind="EXIT", scrip=opt_key, side="S", qty=int(lot_size),
+            price=opt_ltp, result="NO_TRADING_SYMBOL",
+            message="Could not build trading symbol for exit",
+            underlying=idx_name, strike=open_trade.get("strike"),
+            option_type=open_trade.get("option_type"),
+        )
         return False
 
     # LIVE only: verify Kotak shows the position open before exit.
     if LIVE_MODE:
         if client is None:
             audit("EXIT_REFUSED_NO_CLIENT", scrip=opt_key, reason=reason)
+            append_blocked(
+                kind="EXIT", scrip=opt_key, side="S", qty=int(lot_size),
+                price=opt_ltp, result="NO_CLIENT",
+                message="Kotak client not initialised — cannot verify position",
+                underlying=idx_name, strike=open_trade.get("strike"),
+                option_type=open_trade.get("option_type"),
+                trading_symbol=trading_symbol,
+            )
             return False
         ok, info = verify_open_position(client, trading_symbol, side="BUY")
         if not ok:
             audit("EXIT_REFUSED_NO_KOTAK_POSITION",
                   scrip=opt_key, trading_symbol=trading_symbol,
                   kotak_info=info)
+            append_blocked(
+                kind="EXIT", scrip=opt_key, side="S", qty=int(lot_size),
+                price=opt_ltp, result="NO_KOTAK_POSITION",
+                message=("Kotak shows no matching open position — refusing "
+                         "to send SELL (would open a fresh short)."),
+                underlying=idx_name, strike=open_trade.get("strike"),
+                option_type=open_trade.get("option_type"),
+                trading_symbol=trading_symbol,
+            )
             return False
 
     qty = int(open_trade.get("qty") or lot_size)
@@ -438,6 +488,13 @@ def _execute_exit(open_trade, opt_ltp, reason, option_index_meta, client):
     )
 
     if res["result"] not in (RESULT_OK, RESULT_PAPER):
+        append_blocked(
+            kind="EXIT", scrip=opt_key, side="S", qty=qty,
+            price=opt_ltp, result=res["result"], message=res["message"],
+            underlying=idx_name, strike=open_trade.get("strike"),
+            option_type=open_trade.get("option_type"),
+            trading_symbol=trading_symbol,
+        )
         return False
 
     mode = "LIVE" if res["result"] == RESULT_OK else "PAPER"
@@ -449,7 +506,7 @@ def _execute_exit(open_trade, opt_ltp, reason, option_index_meta, client):
           else (entry_price - exit_price)
     # Update the ledger row in place. Re-read to avoid clobbering concurrent
     # writes from other paths (manual ticket, etc.).
-    trades = read_paper_trades()
+    trades = read_trade_ledger()
     for t in trades:
         if t.get("id") == open_trade.get("id") and t.get("status") == "OPEN":
             t["exit_time"] = now.strftime("%H:%M:%S")
@@ -465,7 +522,7 @@ def _execute_exit(open_trade, opt_ltp, reason, option_index_meta, client):
             t["mode"] = mode
             t["kotak_exit_order_id"] = kotak_order_id
             break
-    write_paper_trades(trades)
+    write_trade_ledger(trades)
     audit("AUTO_EXIT_PLACED", scrip=opt_key, mode=mode, reason=reason,
           kotak_order_id=kotak_order_id, qty=qty, price=opt_ltp)
     return True

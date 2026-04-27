@@ -153,9 +153,6 @@
       <span>Closed: <b class="c-closed" id="statClosed">0</b></span>
       <span>P&amp;L: <b id="statPnl">+0.00</b></span>
     </span>
-    <span class="paper-toggle" title="Paper Trading mode (no real Kotak orders)">
-      <span class="dot-on"></span> Paper Trading
-    </span>
     <span class="clock" id="clock">--:--:--</span>
     <span class="ucc">UCC: {{ ucc }}</span>
     {% include "_safety_header.html" %}
@@ -396,41 +393,15 @@ function closeTicket() {
 }
 
 async function submitTicket() {
-  const qty  = document.getElementById('mQty').value;
+  // Manual cash-equity ticket has been retired now that the dashboard runs
+  // in LIVE mode. Auto-strategy on the Options tab is the only thing that
+  // places orders. Show a clear message instead of silently failing.
   const conf = document.getElementById('mConfirm');
   const msg  = document.getElementById('mMsg');
+  msg.className = 'modal-msg err';
+  msg.textContent = 'Manual cash-equity orders are disabled. The Options auto-strategy is the live order path; check the Trade Log + Blockers tabs for activity.';
   conf.disabled = true;
-  conf.textContent = 'Placing...';
-  msg.className = 'modal-msg';
-  msg.textContent = '';
-  try {
-    const r = await fetch('/api/paper-open', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({
-        symbol: _ticketSymbol, side: _ticketSide, qty: qty,
-      })
-    });
-    const d = await r.json();
-    if (r.ok && d.ok) {
-      msg.className = 'modal-msg ok';
-      msg.textContent = '✓ Paper ' + (_ticketSide === 'B' ? 'BUY' : 'SELL')
-                     + ' opened @ ₹' + d.trade.entry_price;
-      conf.textContent = 'Done';
-      refresh();
-      setTimeout(closeTicket, 1500);
-    } else {
-      msg.className = 'modal-msg err';
-      msg.textContent = '✗ ' + (d.error || 'Failed');
-      conf.disabled = false;
-      conf.textContent = _ticketSide === 'B' ? 'Confirm BUY' : 'Confirm SELL';
-    }
-  } catch(e) {
-    msg.className = 'modal-msg err';
-    msg.textContent = '✗ Network error: ' + e.message;
-    conf.disabled = false;
-    conf.textContent = _ticketSide === 'B' ? 'Confirm BUY' : 'Confirm SELL';
-  }
+  conf.textContent = 'Disabled';
 }
 
 document.addEventListener('input', (e) => {
@@ -440,64 +411,18 @@ document.getElementById('modalBg').addEventListener('click', (e) => {
   if (e.target.id === 'modalBg') closeTicket();
 });
 
-// ---- Open positions ----
-async function refreshOpenPositions(quotes) {
-  let tradesResp;
-  try {
-    tradesResp = await (await fetch('/api/paper-trades')).json();
-  } catch(e) { return; }
-  const open = (tradesResp.trades || []).filter(t => t.status === 'OPEN');
+// Open-positions bar (powered by /api/paper-trades) and the closeTrade
+// helper have been removed along with paper-mode. Open auto-strategy
+// trades are visible on the Trade Log tab; the Blockers tab shows refused
+// orders. We keep this stub so existing callers in updateRows() don't 500.
+async function refreshOpenPositions(_quotes) {
   const bar = document.getElementById('openPosBar');
-  const rows = document.getElementById('openPosRows');
-  if (open.length === 0) { bar.style.display = 'none'; rows.innerHTML = ''; return; }
-  bar.style.display = '';
-  const ltpBySym = {};
-  for (const s of (quotes && quotes.scrips) || []) ltpBySym[s.symbol] = s.ltp;
-  const out = [];
-  out.push('<div class="open-pos-row" style="font-weight:600;color:#6b7280;">'
-         + '<div>Scrip</div><div>Side</div><div>Qty</div>'
-         + '<div>Entry</div><div>LTP</div><div>Live P&L</div>'
-         + '<div>Reached</div><div></div></div>');
-  for (const t of open) {
-    const ltp = ltpBySym[t.scrip];
-    let pnl = null;
-    if (ltp !== null && ltp !== undefined) {
-      pnl = t.order_type === 'BUY'
-        ? (ltp - t.entry_price) * t.qty
-        : (t.entry_price - ltp) * t.qty;
-    }
-    const pnlClass = pnl === null ? '' : (pnl >= 0 ? 'pnl-pos' : 'pnl-neg');
-    const pnlStr = pnl === null ? '-' : (pnl >= 0 ? '+' : '') + pnl.toFixed(2);
-    out.push('<div class="open-pos-row">'
-           + '<div class="scr">' + t.scrip + '</div>'
-           + '<div><span class="pill-sm ' + t.order_type + '">' + t.order_type + '</span></div>'
-           + '<div>' + t.qty + '</div>'
-           + '<div>₹' + t.entry_price.toFixed(2) + '</div>'
-           + '<div>' + (ltp !== null && ltp !== undefined ? '₹' + ltp.toFixed(2) : '-') + '</div>'
-           + '<div class="' + pnlClass + '">' + pnlStr + '</div>'
-           + '<div>' + (t.target_level_reached || '-') + '</div>'
-           + '<div><button class="btn-close" onclick="closeTrade(\\'' + t.id + '\\')">Close</button></div>'
-           + '</div>');
-  }
-  rows.innerHTML = out.join('');
-}
-
-async function closeTrade(id) {
-  if (!confirm('Close this paper trade at current LTP?')) return;
-  try {
-    const r = await fetch('/api/paper-close', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({id: id, reason: 'MANUAL'})
-    });
-    const d = await r.json();
-    if (!(r.ok && d.ok)) alert('Failed: ' + (d.error || 'unknown'));
-    refresh();
-  } catch(e) { alert('Error: ' + e.message); }
+  if (bar) bar.style.display = 'none';
 }
 
 setInterval(tickClock, 1000); tickClock();
 setInterval(refresh, 2500); refresh();
 </script>
+{% include "_blocker_toaster.html" %}
 </body>
 </html>

@@ -28,9 +28,12 @@ from backend.quotes import (
     build_all_option_tokens, _feed,
 )
 from backend.storage.trades import (
-    PAPER_FILE, read_paper_trades, write_paper_trades, next_paper_id,
+    LEDGER_FILE, read_trade_ledger, write_trade_ledger, next_trade_id,
 )
 from backend.storage.orders import ORDERS_FILE, append_order, read_orders
+from backend.storage.blocked import (
+    append_blocked, read_recent_blocked, read_blocked_since,
+)
 from backend.strategy.gann import (
     GANN_STEP, SELL_LEVELS, BUY_LEVELS, LEVEL_COLORS,
     BUY_LEVEL_ORDER, SELL_LEVEL_ORDER,
@@ -55,8 +58,12 @@ app = Flask(__name__,
 
 
 def compute_stats(trades):
-    active = sum(1 for t in trades if t.get("status") == "OPEN")
-    closed = sum(1 for t in trades if t.get("status") == "CLOSED")
+    open_n   = sum(1 for t in trades if t.get("status") == "OPEN")
+    closed_n = sum(1 for t in trades if t.get("status") == "CLOSED")
+    wins   = sum(1 for t in trades if t.get("status") == "CLOSED"
+                 and (t.get("pnl_points") or 0) > 0)
+    losses = sum(1 for t in trades if t.get("status") == "CLOSED"
+                 and (t.get("pnl_points") or 0) < 0)
     total_pnl = 0.0
     for t in trades:
         if t.get("status") == "CLOSED" and t.get("pnl_points") is not None:
@@ -64,7 +71,13 @@ def compute_stats(trades):
                 total_pnl += float(t["pnl_points"]) * int(t.get("qty", 1))
             except (TypeError, ValueError):
                 pass
-    return {"active": active, "closed": closed, "pnl": round(total_pnl, 2)}
+    return {
+        "total": len(trades), "open": open_n, "closed": closed_n,
+        "wins": wins, "losses": losses,
+        "total_pnl_points": round(total_pnl, 2),
+        # Legacy keys still referenced by older code paths:
+        "active": open_n, "pnl": round(total_pnl, 2),
+    }
 
 
 def fmt_duration(seconds):
@@ -82,7 +95,8 @@ TABS = [
     {"key": "options", "url": "/options", "label": "Options"},
     {"key": "holdings", "url": "/", "label": "Holdings"},
     {"key": "positions", "url": "/positions", "label": "Positions"},
-    {"key": "paper", "url": "/paper-trades", "label": "Trade Log"},
+    {"key": "trades", "url": "/trades", "label": "Trade Log"},
+    {"key": "blockers", "url": "/blockers", "label": "Blockers"},
     {"key": "audit", "url": "/audit", "label": "Audit"},
     {"key": "history", "url": "/history", "label": "Login History"},
 ]
@@ -155,14 +169,16 @@ def orders_view():
         return render("orders", "Order Book", None, traceback.format_exc())
 
 
-@app.route("/trades")
-def trades_view():
+@app.route("/trade-book")
+def trade_book_view():
+    """Kotak's broker-side executed trade list. Distinct from our internal
+    trade ledger (/trades) which records every signal we acted on."""
     try:
         client = ensure_client()
         data, err = safe_call(client.trade_report)
-        return render("trades", "Trade Book", data, err)
+        return render("trade-book", "Trade Book", data, err)
     except Exception as e:
-        return render("trades", "Trade Book", None, traceback.format_exc())
+        return render("trade-book", "Trade Book", None, traceback.format_exc())
 
 
 @app.route("/limits")
@@ -244,7 +260,7 @@ def gann_prices_api():
         nl, _ = nearest_gann_level(row)
         row["nearest_level"] = nl
         ordered.append(row)
-    stats = compute_stats(read_paper_trades())
+    stats = compute_stats(read_trade_ledger())
     return jsonify({"scrips": ordered, "error": err,
                     "ts": now_ist().strftime("%H:%M:%S IST"),
                     "stats": stats})
@@ -340,7 +356,7 @@ def option_prices_api():
             })
     # Attach live option trades (open + today's closed) so Options UI can show them
     today = now_ist().strftime("%Y-%m-%d")
-    all_trades = read_paper_trades()
+    all_trades = read_trade_ledger()
     option_trades = [
         t for t in all_trades
         if t.get("asset_type") == "option"
@@ -362,123 +378,18 @@ def option_prices_api():
     })
 
 
-# ---------- Paper trading routes ----------
-@app.route("/api/paper-open", methods=["POST"])
-def paper_open_api():
-    """Open a new paper trade at the current LTP. No Kotak involvement."""
-    payload = request.get_json(force=True, silent=True) or {}
-    symbol = (payload.get("symbol") or "").strip()
-    side   = (payload.get("side") or "").strip().upper()   # B or S
-    try:
-        qty = int(payload.get("qty") or 1)
-    except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "Qty must be integer"}), 400
-    if qty <= 0:
-        return jsonify({"ok": False, "error": "Qty must be positive"}), 400
-    if side not in ("B", "S"):
-        return jsonify({"ok": False, "error": "Side must be B or S"}), 400
-    scrip = find_scrip(symbol)
-    if not scrip:
-        return jsonify({"ok": False, "error": "Unknown symbol"}), 400
-    # Indices aren't tradable cash even in paper (no real lot mapping) — allow
-    # but we keep the tradeable gate consistent with live mode:
-    if not scrip.get("tradeable"):
-        return jsonify({"ok": False, "error": "Index symbols can't be paper-traded"}), 400
-
-    quotes, _ = fetch_quotes()
-    q = quotes.get(symbol)
-    if not q or q.get("ltp") is None:
-        return jsonify({"ok": False, "error": "No LTP available yet"}), 400
-    entry_price = float(q["ltp"])
-    now = now_ist()
-    trades = read_paper_trades()
-    trade = {
-        "id": next_paper_id(trades),
-        "date": now.strftime("%Y-%m-%d"),
-        "scrip": symbol,
-        "order_type": "BUY" if side == "B" else "SELL",
-        "entry_time": now.strftime("%H:%M:%S"),
-        "entry_ts": now.timestamp(),
-        "entry_price": round(entry_price, 2),
-        "qty": qty,
-        "max_min_target_price": round(entry_price, 2),
-        "target_level_reached": None,
-        "exit_time": None,
-        "exit_ts": None,
-        "exit_price": None,
-        "exit_reason": None,
-        "pnl_points": None,
-        "pnl_pct": None,
-        "duration_seconds": None,
-        "status": "OPEN",
-    }
-    trades.insert(0, trade)
-    write_paper_trades(trades)
-    return jsonify({"ok": True, "trade": trade})
-
-
-@app.route("/api/paper-close", methods=["POST"])
-def paper_close_api():
-    """Close an open paper trade at current LTP."""
-    payload = request.get_json(force=True, silent=True) or {}
-    tid = str(payload.get("id") or "").strip()
-    reason = (payload.get("reason") or "MANUAL").strip().upper()
-    if not tid:
-        return jsonify({"ok": False, "error": "id required"}), 400
-    trades = read_paper_trades()
-    target = None
-    for t in trades:
-        if str(t.get("id")) == tid:
-            target = t
-            break
-    if not target:
-        return jsonify({"ok": False, "error": "trade not found"}), 404
-    if target.get("status") == "CLOSED":
-        return jsonify({"ok": False, "error": "already closed"}), 400
-
-    quotes, _ = fetch_quotes()
-    q = quotes.get(target["scrip"])
-    if not q or q.get("ltp") is None:
-        return jsonify({"ok": False, "error": "No LTP available"}), 400
-    exit_price = float(q["ltp"])
-    now = now_ist()
-    entry_price = float(target["entry_price"])
-    qty = int(target.get("qty") or 1)
-    if target["order_type"] == "BUY":
-        pnl_points = round(exit_price - entry_price, 2)
-    else:
-        pnl_points = round(entry_price - exit_price, 2)
-    pnl_pct = round((pnl_points / entry_price) * 100.0, 2) if entry_price else 0
-    duration = now.timestamp() - float(target.get("entry_ts") or now.timestamp())
-
-    target["exit_time"] = now.strftime("%H:%M:%S")
-    target["exit_ts"] = now.timestamp()
-    target["exit_price"] = round(exit_price, 2)
-    target["exit_reason"] = reason
-    target["pnl_points"] = pnl_points
-    target["pnl_pct"] = pnl_pct
-    target["duration_seconds"] = round(duration, 0)
-    target["status"] = "CLOSED"
-    # Finalise max-min-target and target_level_reached if not set yet
-    side = "B" if target["order_type"] == "BUY" else "S"
-    best = target.get("max_min_target_price") or exit_price
-    reached = compute_target_level_reached(side, entry_price, best, q.get("levels"))
-    if reached:
-        target["target_level_reached"] = reached
-    write_paper_trades(trades)
-    return jsonify({"ok": True, "trade": target})
-
-
-@app.route("/api/paper-trades")
-def paper_trades_api():
-    trades = read_paper_trades()
+# ---------- Trade ledger routes ----------
+@app.route("/api/trades")
+def trades_api():
+    trades = read_trade_ledger()
     return jsonify({"trades": trades, "stats": compute_stats(trades)})
 
 
-@app.route("/paper-trades")
-def paper_trades_view():
-    """Page that shows all paper trades + a 'Download as Excel' button."""
-    trades = read_paper_trades()
+@app.route("/trades")
+def trades_view():
+    """Trade Log page: every signal acted on, with a 'Download as Excel' button.
+    Includes both LIVE rows (real Kotak orders) and any legacy paper rows."""
+    trades = read_trade_ledger()
     # Newest first; attach a human-readable duration for the template.
     trades_sorted = sorted(
         trades,
@@ -488,22 +399,22 @@ def paper_trades_view():
     for t in trades_sorted:
         t["duration_str"] = fmt_duration(t.get("duration_seconds"))
     return render_template(
-        "paper_trades.html",
+        "trade_ledger.html",
         tabs=TABS,
-        active="paper",
+        active="trades",
         trades=trades_sorted,
         stats=compute_stats(trades),
     )
 
 
-@app.route("/paper-trades.xlsx")
-def paper_trades_xlsx():
-    """Export all paper trades as a formatted Excel file."""
+@app.route("/trades.xlsx")
+def trades_xlsx():
+    """Export the trade ledger as a formatted Excel file."""
     from openpyxl import Workbook
     from openpyxl.styles import PatternFill, Font, Alignment
     wb = Workbook()
     ws = wb.active
-    ws.title = "Paper Trades"
+    ws.title = "Trade Ledger"
     headers = ["Date", "Scrip", "Order Type", "Entry Time (IST)", "Entry Price",
                "Target Level Reached", "Max/Min Target Price", "Exit Time (IST)",
                "Exit Price", "Exit Reason", "P&L Points", "P&L %", "Duration"]
@@ -519,7 +430,7 @@ def paper_trades_xlsx():
     buy_fill  = PatternFill("solid", fgColor="C6EFCE")
     pos_font  = Font(color="006100")
     neg_font  = Font(color="9C0006")
-    for t in read_paper_trades():
+    for t in read_trade_ledger():
         ws.append([
             t.get("date", ""),
             t.get("scrip", ""),
@@ -558,15 +469,41 @@ def paper_trades_xlsx():
     # Write the xlsx to data/ (kept out of source listing) then stream it back.
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     os.makedirs(data_dir, exist_ok=True)
-    out = os.path.join(data_dir, "_paper_export.xlsx")
+    out = os.path.join(data_dir, "_trade_ledger_export.xlsx")
     wb.save(out)
     with open(out, "rb") as f:
         data = f.read()
     return Response(
         data,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=paper_trades.xlsx"},
+        headers={"Content-Disposition": "attachment; filename=trade_ledger.xlsx"},
     )
+
+
+# ---------- Blockers (refused order attempts) ----------
+@app.route("/blockers")
+def blockers_view():
+    """Page showing every order the safety wrapper refused. Lets Ganesh
+    see exactly what the auto-strategy *would have* traded and why it
+    couldn't (e.g. zero balance, kill switch engaged, broker error)."""
+    return render_template(
+        "blockers.html",
+        tabs=TABS,
+        active="blockers",
+        blocks=read_recent_blocked(500),
+    )
+
+
+@app.route("/api/recent-blocks")
+def recent_blocks_api():
+    """Toaster poll endpoint. Returns blocked-attempt records strictly newer
+    than `since` (ISO timestamp). Browsers tail this every few seconds and
+    pop a red toast for each new record."""
+    since_ts = (request.args.get("since") or "").strip()
+    return jsonify({
+        "blocks": read_blocked_since(since_ts),
+        "ts": now_ist().isoformat(),
+    })
 
 
 @app.route("/api/margin-summary")

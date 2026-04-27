@@ -1,6 +1,6 @@
 """Tests for backend/storage atomic-write + locking primitives.
 
-Uses tmp_path so we don't touch the real paper_trades.json / orders_log.json.
+Uses tmp_path so we don't touch the real trade_ledger.json / orders_log.json.
 """
 import json
 import threading

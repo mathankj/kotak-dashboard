@@ -1,0 +1,89 @@
+<!--
+  Real-time toaster for blocked-order events.
+  Polls /api/recent-blocks?since=<last-seen-ts> every 3s and pops a red
+  toast for each new BLOCKED record. Auto-dismisses after 8s. Click jumps
+  to /blockers for details. Self-contained — drop this include into any page.
+-->
+<style>
+  #blkToastWrap {
+    position: fixed; top: 16px; right: 16px; z-index: 9999;
+    display: flex; flex-direction: column; gap: 8px;
+    max-width: 380px; pointer-events: none;
+  }
+  .blk-toast {
+    pointer-events: auto;
+    background: #450a0a; border: 1px solid #b91c1c; color: #fecaca;
+    padding: 12px 14px; border-radius: 8px;
+    font-family: -apple-system, 'Segoe UI', sans-serif; font-size: 13px;
+    cursor: pointer; box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    animation: blkSlide 0.25s ease-out;
+    line-height: 1.4;
+  }
+  .blk-toast:hover { background: #5a0e0e; }
+  .blk-toast .blk-title {
+    font-weight: 700; color: #fca5a5; margin-bottom: 4px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .blk-toast .blk-pill {
+    background: #7c2d12; color: #fed7aa; padding: 2px 6px;
+    border-radius: 3px; font-size: 10px; letter-spacing: 0.5px;
+  }
+  .blk-toast .blk-msg { color: #fde68a; font-size: 12px; }
+  .blk-toast .blk-meta { color: #a1a1aa; font-size: 11px; margin-top: 4px; }
+  @keyframes blkSlide {
+    from { transform: translateX(20px); opacity: 0; }
+    to   { transform: translateX(0);    opacity: 1; }
+  }
+</style>
+<div id="blkToastWrap"></div>
+<script>
+(function() {
+  // Initial cursor: now (ISO). Skip historical records so the user only
+  // sees blocks that happen FROM THIS PAGE LOAD ONWARD. Pre-existing rows
+  // still appear on /blockers — the toaster is just for live alerting.
+  let _blkSince = new Date().toISOString();
+  const wrap = document.getElementById('blkToastWrap');
+
+  function showToast(b) {
+    const el = document.createElement('div');
+    el.className = 'blk-toast';
+    const side = b.side === 'B' ? 'BUY' : (b.side === 'S' ? 'SELL' : '');
+    const px = (b.price !== null && b.price !== undefined)
+      ? ' @ ₹' + Number(b.price).toFixed(2) : '';
+    const qty = b.qty ? (' x ' + b.qty) : '';
+    const ts = (b.ts || '').slice(11, 19);
+    el.innerHTML =
+      '<div class="blk-title">'
+      + '<span class="blk-pill">BLOCKED</span> '
+      + (b.kind || '') + ' &middot; ' + (side || '-') + ' '
+      + (b.scrip || '-') + qty + px
+      + '</div>'
+      + '<div class="blk-msg">' + (b.message || b.result || 'Order refused') + '</div>'
+      + '<div class="blk-meta">' + ts + ' &middot; ' + (b.source || '') + ' &middot; click for details</div>';
+    el.addEventListener('click', function() { window.location.href = '/blockers'; });
+    wrap.appendChild(el);
+    setTimeout(function() {
+      el.style.transition = 'opacity 0.4s';
+      el.style.opacity = '0';
+      setTimeout(function() { el.remove(); }, 400);
+    }, 8000);
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch('/api/recent-blocks?since=' + encodeURIComponent(_blkSince));
+      if (!r.ok) return;
+      const d = await r.json();
+      const blocks = (d.blocks || []);
+      // API returns newest-first; show oldest-first so the newest ends up on top.
+      for (let i = blocks.length - 1; i >= 0; i--) {
+        showToast(blocks[i]);
+        if (blocks[i].ts && blocks[i].ts > _blkSince) {
+          _blkSince = blocks[i].ts;
+        }
+      }
+    } catch (e) { /* swallow — keep polling */ }
+  }
+  setInterval(poll, 3000);
+})();
+</script>
