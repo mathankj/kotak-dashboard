@@ -114,7 +114,7 @@ DEFAULTS = {
 }
 
 VALID_APPLY_TO = {"options", "futures", "both"}
-VALID_STOPLOSS = {"A", "B", "C"}
+VALID_STOPLOSS = {"A", "B", "C", "D"}
 VALID_BUY_LEVELS  = {"BUY", "BUY_WA"}
 VALID_SELL_LEVELS = {"SELL", "SELL_WA"}
 VALID_CE_TARGETS = {"T1", "T2", "T3", "T4", "T5", "BUY_WA"}

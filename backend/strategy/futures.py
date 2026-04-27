@@ -18,12 +18,15 @@ LIMIT-PRICE ROUNDING (Ganesh's spec):
     - closing a LONG  = SELL -> round UP
     - closing a SHORT = BUY  -> round DOWN
 
-EXITS (3 variants, exactly one active per `stoploss.active`):
+EXITS (4 variants, exactly one active per `stoploss.active`):
   A) Fixed ₹X drop in futures LTP  (long: ltp <= entry-X; short: ltp >= entry+X)
   B) Percentage drop in futures LTP (long: ltp <= entry*(1-p%); short: ltp >= entry*(1+p%))
   C) Spot reverses through opposite Gann level
      (long exits when spot < variant_c_sell_level pick;
       short exits when spot > variant_c_buy_level pick)
+  D) Trailing along the Gann ladder — SL trails one rung behind the
+     spot's current rung. Initial SL = entry price. Triggers on spot
+     crossing trail_sl_price; close fills at fut_ltp.
 
 PROFIT TARGET — spot reaches configured Gann level:
   long  -> spot >= target.ce_level (T1/T2/T3/BUY_WA on CE side)
@@ -109,7 +112,7 @@ def _check_futures_exit_reason(open_t, fut_ltp, spot,
 
     cfg = config_loader.get()
     fsl = cfg["stoploss"]    # unified — same SL config as options
-    active = fsl["active"]   # validated A|B|C
+    active = fsl["active"]   # validated A|B|C|D
 
     is_long = (side == "BUY")
 
@@ -132,12 +135,24 @@ def _check_futures_exit_reason(open_t, fut_ltp, spot,
             if (not is_long) and fut_ltp >= entry_price * (1 + drop_pct / 100.0):
                 return "SL_FUT_PCT"
 
-    else:  # "C"
+    elif active == "C":
         # Spot reverses through opposite Gann level.
         if is_long and sell_lvl is not None and spot < sell_lvl:
             return "SL_SELL_LVL"
         if (not is_long) and buy_lvl is not None and spot > buy_lvl:
             return "SL_BUY_LVL"
+
+    elif active == "D":
+        # Trailing along Gann ladder. trail_sl_price is set by
+        # update_open_trades_mfe on each in-hours snapshot refresh
+        # (~2s cadence). Until the first refresh after entry it may
+        # be None — guard explicitly.
+        trail = open_t.get("trail_sl_price")
+        if trail is not None and spot is not None:
+            if is_long and spot <= trail:
+                return "SL_TRAIL"
+            if (not is_long) and spot >= trail:
+                return "SL_TRAIL"
 
     # ---------- (2) PROFIT TARGET ----------
     # Unified target config — futures long uses ce_level (BUY-side Gann),

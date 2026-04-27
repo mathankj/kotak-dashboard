@@ -101,8 +101,8 @@ def _check_exit_reason(open_t, opt_ltp, spot,
     EXIT CONDITIONS — checked in order, first hit wins.
     =======================================================================
 
-    1) STOP LOSS — three variants. The ACTIVE one is selected by
-       config.yaml -> stoploss.active (A | B | C). All three remain in
+    1) STOP LOSS — four variants. The ACTIVE one is selected by
+       config.yaml -> stoploss.active (A | B | C | D). All four remain in
        code so Ganesh can flip between them from the /config page.
 
        Variant A — Fixed premium drop (₹X below entry).
@@ -112,6 +112,10 @@ def _check_exit_reason(open_t, opt_ltp, spot,
        Variant C — Spot reverses through chosen Gann level.
                    CE: spot < variant_c_sell_level pick (SELL or SELL_WA)
                    PE: spot > variant_c_buy_level  pick (BUY  or BUY_WA)
+       Variant D — Trailing along the Gann ladder. SL trails one rung
+                   behind spot's current rung. Initial SL = entry price.
+                   Triggers on spot crossing trail_sl_price; close fills
+                   at instrument LTP.
 
     2) PROFIT TARGET — spot reaches the configured Gann level.
        config.yaml -> target.ce_level / target.pe_level. The level value
@@ -126,7 +130,7 @@ def _check_exit_reason(open_t, opt_ltp, spot,
 
     cfg = config_loader.get()
     sl_cfg = cfg["stoploss"]
-    active_sl = sl_cfg["active"]   # validated to A|B|C by loader
+    active_sl = sl_cfg["active"]   # validated to A|B|C|D by loader
 
     # ---------- (1) STOP LOSS — exactly ONE variant runs ----------
     if active_sl == "A":
@@ -143,7 +147,7 @@ def _check_exit_reason(open_t, opt_ltp, spot,
             if opt_ltp <= entry_price * (1 - drop_pct / 100.0):
                 return "SL_PREMIUM_PCT"
 
-    else:  # "C"
+    elif active_sl == "C":
         # Spot reverses through opposite Gann level.
         if side == "CE":
             if sell_lvl is not None and spot < sell_lvl:
@@ -151,6 +155,23 @@ def _check_exit_reason(open_t, opt_ltp, spot,
         else:  # PE
             if buy_lvl is not None and spot > buy_lvl:
                 return "SL_BUY_LVL"
+
+    elif active_sl == "D":
+        # Trailing along Gann ladder. trail_sl_price is set by
+        # update_open_trades_mfe on each in-hours snapshot refresh
+        # (~2s cadence). Until the first refresh after entry it may
+        # be None — guard explicitly.
+        # Direction: CE = bullish-bet (long premium), exit when spot
+        # reverses DOWN through trail. PE = bearish-bet (long
+        # premium on a put), exit when spot reverses UP through
+        # trail. Both branches are "long the option premium" but
+        # walk opposite spot ladders.
+        trail = open_t.get("trail_sl_price")
+        if trail is not None and spot is not None:
+            if side == "CE" and spot <= trail:
+                return "SL_TRAIL"
+            if side == "PE" and spot >= trail:
+                return "SL_TRAIL"
 
     # ---------- (2) PROFIT TARGET ----------
     # ce_target_lvl / pe_target_lvl are the resolved numeric Gann level
