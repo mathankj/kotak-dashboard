@@ -225,6 +225,10 @@ def gann_view():
 @app.route("/api/feed-status")
 def feed_status_api():
     """WebSocket QuoteFeed diagnostics."""
+    # _feed_started and WS_FRESH_SECONDS now live in backend.quotes after
+    # the quote pipeline was extracted from app.py. Import lazily so we
+    # don't pollute the top-level import block.
+    from backend.quotes import _feed_started, WS_FRESH_SECONDS
     return jsonify({
         "started": _feed_started["flag"],
         **_feed.status(),
@@ -249,113 +253,32 @@ def health_api():
 
 @app.route("/api/gann-prices")
 def gann_prices_api():
-    data, err = fetch_quotes()
-    # Stock auto-buy is disabled — only update MFE / farthest-level on any
-    # open trades (used by the dashboard). Option auto-strategy runs from
-    # /api/option-prices, not here.
-    try:
-        update_open_trades_mfe(data)
-    except Exception:
-        pass
-    # Preserve scrip order; attach nearest_level so the UI can color the LTP cell
-    ordered = []
-    for s in SCRIPS:
-        row = data.get(s["symbol"], {
-            "symbol": s["symbol"], "ltp": None, "open": None,
-            "low": None, "high": None, "levels": {"sell": {}, "buy": {}},
-        })
-        # Shallow copy to avoid mutating cache
-        row = dict(row)
-        nl, _ = nearest_gann_level(row)
-        row["nearest_level"] = nl
-        ordered.append(row)
-    stats = compute_stats(read_trade_ledger())
-    return jsonify({"scrips": ordered, "error": err,
-                    "ts": now_ist().strftime("%H:%M:%S IST"),
-                    "stats": stats})
+    """O(1) read from SnapshotStore. The producer thread refreshes the
+    payload every 2s by calling the same fetch_quotes() pipeline; this
+    handler does no I/O of its own."""
+    blob, built_at, build_ms = _snapshot.gann_payload()
+    age_ms = (time.time() - built_at) * 1000.0 if built_at else -1.0
+    resp = Response(blob, mimetype="application/json")
+    resp.headers["X-Snapshot-Age-Ms"] = f"{age_ms:.0f}"
+    resp.headers["X-Snapshot-Build-Ms"] = f"{build_ms:.0f}"
+    return resp
 
 
 # ---------- Options routes ----------
-def _build_option_chain_payload():
-    """Build the same dict /api/option-prices returns, for server-side render.
-
-    Returns None when the F&O universe cache isn't warm yet (first hit of
-    the day) so the template falls back to the "Loading…" placeholder and
-    the JS poller takes over.
-
-    Why a separate helper: we want the /options page to come down with all
-    three index chains already in the HTML so reload + tab-switch are
-    instant — no flash of "Loading option chain…" while the JS does its
-    first fetch. We deliberately do NOT call option_auto_strategy_tick()
-    here; the autonomous background ticker (in __main__) already runs the
-    strategy every 3s, so calling it from the page render would be a
-    duplicate tick and could double-stamp open_evaluated.
-    """
-    today = now_ist().strftime("%Y-%m-%d")
-    universe_ready = (
-        _option_universe["date"] == today
-        and all(i in _option_universe["by_index"] for i in INDEX_OPTIONS_CONFIG)
-    )
-    if not universe_ready:
-        return None
-    data, meta, err = fetch_option_quotes()
-    chains = {}
-    for idx_name, m in meta.items():
-        chains[idx_name] = {
-            "label": INDEX_OPTIONS_CONFIG[idx_name]["label"],
-            "spot": m.get("spot"),
-            "atm": m.get("atm"),
-            "expiry": m.get("expiry"),
-            "error": m.get("error"),
-            "rows": [],
-        }
-    by_idx_strike = {}
-    for q in data.values():
-        idx = q["index"]; s = q["strike"]
-        by_idx_strike.setdefault(idx, {}).setdefault(s, {})[q["option_type"]] = q
-    for idx_name, per_strike in by_idx_strike.items():
-        cfg = INDEX_OPTIONS_CONFIG[idx_name]
-        atm = chains[idx_name]["atm"]
-        step = cfg["strike_step"]
-        win = cfg["atm_window"]
-        strikes = [atm + i * step for i in range(-win, win + 1)] if atm else sorted(per_strike.keys())
-        for s in strikes:
-            legs = per_strike.get(s, {})
-            chains[idx_name]["rows"].append({
-                "strike": s,
-                "is_atm": atm is not None and s == atm,
-                "ce": legs.get("CE"),
-                "pe": legs.get("PE"),
-            })
-    all_trades = read_trade_ledger()
-    option_trades = [
-        t for t in all_trades
-        if t.get("asset_type") == "option"
-        and (t.get("status") == "OPEN" or t.get("date") == today)
-    ]
-    for t in option_trades:
-        if t.get("status") == "OPEN":
-            q = data.get(t.get("option_key"))
-            if q and q.get("ltp") is not None:
-                t["live_ltp"] = q["ltp"]
-                t["live_pnl_points"] = round(float(q["ltp"]) - float(t["entry_price"]), 2)
-    return {
-        "chains": chains,
-        "error": err,
-        "option_trades": option_trades,
-        "ts": now_ist().strftime("%H:%M:%S IST"),
-    }
-
-
 @app.route("/options")
 def options_view():
-    # Server-side render the initial chain so reload/tab-switch is instant.
-    # If the universe isn't warm yet, initial_data is None and the page
-    # falls back to the "Loading…" placeholder + JS poller (unchanged path).
+    """Server-side render uses the SnapshotStore so the page comes down with
+    the chain already populated and reload/tab-switch is instant. If the
+    snapshot hasn't been built yet (first request after boot, before the
+    F&O universe is warm) the producer's empty placeholder bubbles up as
+    `loading: true` and the template falls back to "Loading…" + JS poller."""
     try:
-        initial_data = _build_option_chain_payload()
+        blob, _, _ = _snapshot.options_payload()
+        initial_data = json.loads(blob)
+        if initial_data.get("loading"):
+            initial_data = None
     except Exception as e:
-        print(f"[options_view] initial render failed: {type(e).__name__}: {e}")
+        print(f"[options_view] snapshot read failed: {type(e).__name__}: {e}")
         initial_data = None
     return render_template(
         "options.html",
@@ -369,115 +292,25 @@ def options_view():
 
 @app.route("/api/option-prices")
 def option_prices_api():
-    """Returns option chains for all configured indices.
-    Non-blocking: if the per-day F&O universe cache isn't warm yet, return a
-    quick 'loading' payload so the worker isn't held for 60-90s (which would
-    trip Render's ~30s proxy timeout and return 502)."""
-    today = now_ist().strftime("%Y-%m-%d")
-    universe_ready = (
-        _option_universe["date"] == today
-        and all(i in _option_universe["by_index"] for i in INDEX_OPTIONS_CONFIG)
-    )
-    if not universe_ready:
-        # Kick the preload in background (idempotent — daily cache guards it)
-        # and return immediately so the frontend keeps polling.
-        if not _option_universe.get("loading"):
-            _option_universe["loading"] = True
-            def _warm():
-                try:
-                    _preload_option_universe()
-                finally:
-                    _option_universe["loading"] = False
-            threading.Thread(target=_warm, daemon=True).start()
-        return jsonify({
-            "chains": {},
-            "error": None,
-            "loading": True,
-            "preload_status": _option_universe.get("preload_status") or {},
-            "loaded_indices": list(_option_universe.get("by_index", {}).keys()),
-            "ts": now_ist().strftime("%H:%M:%S IST"),
-        })
-    data, meta, err = fetch_option_quotes()
-    # Run option auto-strategy on each tick. Pass gann_quotes so the strategy
-    # module doesn't need to import fetch_quotes (would be a circular import).
-    # Pass `client` so the strategy can verify positions with Kotak before
-    # proposing exits when LIVE_MODE is True. In paper mode the client arg
-    # is unused.
-    try:
-        gann_quotes, _ = fetch_quotes()
-        try:
-            client_for_strategy = ensure_client()
-        except Exception:
-            client_for_strategy = None  # Strategy will refuse live exits without it
-        option_auto_strategy_tick(data, meta, gann_quotes,
-                                  client=client_for_strategy)
-    except Exception as e:
-        print(f"[option_auto] tick failed: {type(e).__name__}: {e}")
-    # Group by index: chains[index] = {spot, atm, expiry, rows:[{strike, ce:{...}, pe:{...}, is_atm}]}
-    chains = {}
-    for idx_name, m in meta.items():
-        chains[idx_name] = {
-            "label": INDEX_OPTIONS_CONFIG[idx_name]["label"],
-            "spot": m.get("spot"),
-            "atm": m.get("atm"),
-            "expiry": m.get("expiry"),
-            "error": m.get("error"),
-            "rows": [],
-        }
-    # Group quote rows into per-index per-strike
-    by_idx_strike = {}
-    for q in data.values():
-        idx = q["index"]; s = q["strike"]
-        by_idx_strike.setdefault(idx, {}).setdefault(s, {})[q["option_type"]] = q
-    for idx_name, per_strike in by_idx_strike.items():
-        cfg = INDEX_OPTIONS_CONFIG[idx_name]
-        atm = chains[idx_name]["atm"]
-        step = cfg["strike_step"]
-        win = cfg["atm_window"]
-        strikes = [atm + i * step for i in range(-win, win + 1)] if atm else sorted(per_strike.keys())
-        for s in strikes:
-            legs = per_strike.get(s, {})
-            chains[idx_name]["rows"].append({
-                "strike": s,
-                "is_atm": atm is not None and s == atm,
-                "ce": legs.get("CE"),
-                "pe": legs.get("PE"),
-            })
-    # Attach live option trades (open + today's closed) so Options UI can show them
-    today = now_ist().strftime("%Y-%m-%d")
-    all_trades = read_trade_ledger()
-    option_trades = [
-        t for t in all_trades
-        if t.get("asset_type") == "option"
-        and (t.get("status") == "OPEN" or t.get("date") == today)
-    ]
-    # Live MFE for open positions
-    for t in option_trades:
-        if t.get("status") == "OPEN":
-            q = data.get(t.get("option_key"))
-            if q and q.get("ltp") is not None:
-                t["live_ltp"] = q["ltp"]
-                t["live_pnl_points"] = round(float(q["ltp"]) - float(t["entry_price"]), 2)
+    """O(1) read from SnapshotStore. The producer thread does the heavy
+    REST work every 2s; this handler reads the pre-built bytes.
 
-    return jsonify({
-        "chains": chains,
-        "error": err,
-        "option_trades": option_trades,
-        "ts": now_ist().strftime("%H:%M:%S IST"),
-    })
-
-
-@app.route("/api/option-prices-v2")
-def option_prices_v2_api():
-    """Hot-cache version of /api/option-prices.
-
-    Pattern (Zerodha "Scaling with common sense"): the SnapshotStore producer
-    thread refreshes the payload every 2s and json.dumps it once. This route
-    just returns the pre-built bytes — no I/O, no compute on the request
-    thread. Target: <20 ms p50 vs ~10 s for the v1 route.
-
-    Includes x-snapshot-* headers for benchmarking visibility.
-    """
+    The auto-strategy tick is owned by the autonomous _strategy_ticker_loop
+    daemon — it does NOT run from this request anymore, so refreshing the
+    page no longer drives strategy decisions."""
+    # On first hit of the day the F&O universe may not yet be warm. Kick
+    # off the preload in background so the snapshot fills in on the next
+    # producer iteration. Idempotent.
+    if not _option_universe.get("loading") and not all(
+            i in _option_universe.get("by_index", {})
+            for i in INDEX_OPTIONS_CONFIG):
+        _option_universe["loading"] = True
+        def _warm():
+            try:
+                _preload_option_universe()
+            finally:
+                _option_universe["loading"] = False
+        threading.Thread(target=_warm, daemon=True).start()
     blob, built_at, build_ms = _snapshot.options_payload()
     age_ms = (time.time() - built_at) * 1000.0 if built_at else -1.0
     resp = Response(blob, mimetype="application/json")
@@ -510,93 +343,15 @@ def futures_view():
 
 @app.route("/api/future-prices")
 def future_prices_api():
-    """Returns live futures contracts + spot/level/signal per index, plus
-    today's auto futures trades. Read-only — does NOT tick the strategy
-    (the autonomous ticker already does, every 3s). Polled by the JS."""
-    import math
-    fut_data, err = fetch_future_quotes()
-    gann_quotes, _ = fetch_quotes()
-    today = now_ist().strftime("%Y-%m-%d")
-
-    # Per-row level resolution mirrors strategy/futures.py so the preview
-    # matches what would actually fire.
-    cfg        = config_loader.get()
-    entry_cfg  = cfg["entry"]
-    apply_to   = cfg.get("apply_to", "both")
-
-    rows = []
-    for idx_name, fut in fut_data.items():
-        spot_q_key = INDEX_OPTIONS_CONFIG[idx_name]["spot_symbol_key"]
-        gq = gann_quotes.get(spot_q_key) or {}
-        spot = gq.get("ltp")
-        levels = gq.get("levels") or {}
-        # Signal preview uses crossing_* picks (the steady-state path —
-        # market_open_* only fires once per day).
-        cr_buy_lvl  = config_loader.resolve_buy_level (levels, entry_cfg["crossing_buy_level"])
-        cr_sell_lvl = config_loader.resolve_sell_level(levels, entry_cfg["crossing_sell_level"])
-        signal = "—"
-        if spot is not None:
-            if cr_buy_lvl is not None and float(spot) > cr_buy_lvl:
-                signal = "LONG"
-            elif cr_sell_lvl is not None and float(spot) < cr_sell_lvl:
-                signal = "SHORT"
-            else:
-                signal = "IN-CHANNEL"
-        # Limit price preview — same rounding as the strategy. BUY floors,
-        # SELL ceils. Lets Ganesh see exactly what would be sent.
-        step = config_loader.futures_round_step(idx_name)
-        ltp = fut.get("ltp")
-        buy_limit = sell_limit = None
-        if ltp is not None and step > 0:
-            buy_limit  = math.floor(float(ltp) / step) * step
-            sell_limit = math.ceil (float(ltp) / step) * step
-        lots_mult = config_loader.lot_multiplier(idx_name)
-        lot_size = fut.get("lot_size")
-        rows.append({
-            "idx": idx_name,
-            "label": INDEX_OPTIONS_CONFIG[idx_name]["label"],
-            "trading_symbol": fut.get("trading_symbol"),
-            "expiry": str(fut.get("expiry") or ""),
-            "lot_size": lot_size,
-            "lots_mult": lots_mult,
-            "qty": (lot_size or 0) * lots_mult,
-            "ltp": ltp,
-            "spot": spot,
-            "buy_lvl":  cr_buy_lvl,
-            "sell_lvl": cr_sell_lvl,
-            "signal": signal,
-            "round_step": step,
-            "buy_limit":  buy_limit,
-            "sell_limit": sell_limit,
-        })
-
-    all_trades = read_trade_ledger()
-    future_trades = [
-        t for t in all_trades
-        if t.get("asset_type") == "future"
-        and (t.get("status") == "OPEN" or t.get("date") == today)
-    ]
-    # Live LTP overlay for open futures positions.
-    for t in future_trades:
-        if t.get("status") == "OPEN":
-            fut = fut_data.get(t.get("underlying")) or {}
-            if fut.get("ltp") is not None:
-                t["live_ltp"] = fut["ltp"]
-                entry = float(t.get("entry_price") or 0)
-                ltp_v = float(fut["ltp"])
-                # Long(BUY): pnl = ltp - entry. Short(SELL): pnl = entry - ltp.
-                pnl = (ltp_v - entry) if t.get("order_type") == "BUY" \
-                      else (entry - ltp_v)
-                t["live_pnl_points"] = round(pnl, 2)
-
-    return jsonify({
-        "rows": rows,
-        "future_trades": future_trades,
-        "apply_to": apply_to,
-        "futures_enabled": apply_to in ("futures", "both"),
-        "error": err,
-        "ts": now_ist().strftime("%H:%M:%S IST"),
-    })
+    """O(1) read from SnapshotStore. Same hot-cache pattern as the gann +
+    options endpoints — the producer thread maintains the futures payload
+    on a 2s tick."""
+    blob, built_at, build_ms = _snapshot.futures_payload()
+    age_ms = (time.time() - built_at) * 1000.0 if built_at else -1.0
+    resp = Response(blob, mimetype="application/json")
+    resp.headers["X-Snapshot-Age-Ms"] = f"{age_ms:.0f}"
+    resp.headers["X-Snapshot-Build-Ms"] = f"{build_ms:.0f}"
+    return resp
 
 
 # ---------- Trade ledger routes ----------
