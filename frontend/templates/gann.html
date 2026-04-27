@@ -43,6 +43,8 @@
      (sell-side: LTP <= level price; buy-side: LTP >= level price). */
   td.ltp { font-weight: 700; background: #f9fafb; font-size: 13px; }
   td[data-col].lvl-on, td.ltp[class*="lvl-"] { transition: background 0.3s, color 0.3s; }
+  td.lvl-S5      { background: #7F0000; color: #fff; }
+  td.lvl-S4      { background: #8E1818; color: #fff; }
   td.lvl-S3      { background: #B71C1C; color: #fff; }
   td.lvl-S2      { background: #C62828; color: #fff; }
   td.lvl-S1      { background: #D32F2F; color: #fff; }
@@ -53,12 +55,16 @@
   td.lvl-T1      { background: #81C784; color: #fff; }
   td.lvl-T2      { background: #66BB6A; color: #fff; }
   td.lvl-T3      { background: #388E3C; color: #fff; }
+  td.lvl-T4      { background: #2E7D32; color: #fff; }
+  td.lvl-T5      { background: #1B5E20; color: #fff; }
   /* Level cells turn semi-bold once they're "crossed" so the heatmap
      reads at a glance even on dense rows. */
+  td[data-col].lvl-S5,  td[data-col].lvl-S4,
   td[data-col].lvl-S3,  td[data-col].lvl-S2,  td[data-col].lvl-S1,
   td[data-col].lvl-SELL_WA, td[data-col].lvl-SELL,
   td[data-col].lvl-BUY, td[data-col].lvl-BUY_WA,
-  td[data-col].lvl-T1, td[data-col].lvl-T2, td[data-col].lvl-T3 {
+  td[data-col].lvl-T1, td[data-col].lvl-T2, td[data-col].lvl-T3,
+  td[data-col].lvl-T4, td[data-col].lvl-T5 {
     font-weight: 600;
   }
   /* Header counter + toggle */
@@ -198,13 +204,13 @@
       <th rowspan="2">OPEN</th>
       <th rowspan="2">LOW</th>
       <th rowspan="2">HIGH</th>
-      <th colspan="5" class="group-sell">SELL LEVELS</th>
+      <th colspan="7" class="group-sell">SELL LEVELS</th>
       <th rowspan="2" class="group-ltp">LTP</th>
-      <th colspan="5" class="group-buy">BUY LEVELS</th>
+      <th colspan="7" class="group-buy">BUY LEVELS</th>
     </tr>
     <tr>
-      <th>S3</th><th>S2</th><th>S1</th><th>WA</th><th>SELL</th>
-      <th>BUY</th><th>WA</th><th>T1</th><th>T2</th><th>T3</th>
+      <th>S5</th><th>S4</th><th>S3</th><th>S2</th><th>S1</th><th>WA</th><th>SELL</th>
+      <th>BUY</th><th>WA</th><th>T1</th><th>T2</th><th>T3</th><th>T4</th><th>T5</th>
     </tr>
   </thead>
   <tbody id="rows">
@@ -217,6 +223,8 @@
       <td data-col="open">-</td>
       <td data-col="low">-</td>
       <td data-col="high">-</td>
+      <td data-col="S5">-</td>
+      <td data-col="S4">-</td>
       <td data-col="S3">-</td>
       <td data-col="S2">-</td>
       <td data-col="S1">-</td>
@@ -228,6 +236,8 @@
       <td data-col="T1">-</td>
       <td data-col="T2">-</td>
       <td data-col="T3">-</td>
+      <td data-col="T4">-</td>
+      <td data-col="T5">-</td>
     </tr>
     {% endfor %}
   </tbody>
@@ -264,8 +274,8 @@
 
 <script>
 const LEVEL_COLORS = {{ level_colors|tojson }};
-const SELL_LVLS = ["S3","S2","S1","SELL_WA","SELL"];
-const BUY_LVLS  = ["BUY","BUY_WA","T1","T2","T3"];
+const SELL_LVLS = ["S5","S4","S3","S2","S1","SELL_WA","SELL"];
+const BUY_LVLS  = ["BUY","BUY_WA","T1","T2","T3","T4","T5"];
 
 function fmt(v) {
   if (v === null || v === undefined || v === "") return "-";
@@ -275,8 +285,8 @@ function fmt(v) {
 }
 
 const LTP_LEVEL_CLASSES = [
-  "lvl-S3","lvl-S2","lvl-S1","lvl-SELL_WA","lvl-SELL",
-  "lvl-BUY","lvl-BUY_WA","lvl-T1","lvl-T2","lvl-T3",
+  "lvl-S5","lvl-S4","lvl-S3","lvl-S2","lvl-S1","lvl-SELL_WA","lvl-SELL",
+  "lvl-BUY","lvl-BUY_WA","lvl-T1","lvl-T2","lvl-T3","lvl-T4","lvl-T5",
 ];
 
 // "Crossed" heatmap: a level cell lights up once LTP has reached or moved
