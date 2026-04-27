@@ -51,6 +51,9 @@ from backend.strategy.futures import (
     AUTO_FUTURE_STRATEGY_ENABLED,
     _future_auto_state, future_auto_strategy_tick,
 )
+from backend.strategy.paper_book import (
+    paper_options_tick, paper_futures_tick,
+)
 from backend.safety.kill_switch import is_halted, halt, halt_info
 from backend.safety.orders import (
     place_order_safe,
@@ -797,6 +800,14 @@ def _strategy_ticker_loop():
                             data, meta, gann_quotes,
                             client=client_for_strategy,
                         )
+                        # Paper book — runs the same strategy logic
+                        # against an independent ledger. Never sends
+                        # real orders; not gated by the kill switch.
+                        try:
+                            paper_options_tick(data, meta, gann_quotes)
+                        except Exception as e:
+                            print(f"[ticker] paper options tick failed: "
+                                  f"{type(e).__name__}: {e}")
                         # Futures runs alongside options. Independent ledger
                         # rows (asset_type=future). Single shared switch:
                         # apply_to in {options,futures,both} — when "options"
@@ -809,6 +820,13 @@ def _strategy_ticker_loop():
                                         fut_data, gann_quotes,
                                         client=client_for_strategy,
                                     )
+                                    try:
+                                        paper_futures_tick(
+                                            fut_data, gann_quotes)
+                                    except Exception as e:
+                                        print(f"[ticker] paper futures tick"
+                                              f" failed: "
+                                              f"{type(e).__name__}: {e}")
                             except Exception as e:
                                 print(f"[ticker] futures tick failed: "
                                       f"{type(e).__name__}: {e}")
