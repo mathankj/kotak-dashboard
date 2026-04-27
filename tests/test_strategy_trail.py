@@ -208,5 +208,73 @@ def test_trail_gated_by_in_hours(isolated_trade_ledger):
 
 def test_abc_variants_unchanged():
     """Variants A, B, C must produce identical exit decisions to the
-    pre-Phase-3 build on a fixed fixture."""
-    pytest.skip("regression — implement once D ships")
+    pre-Phase-3 build on a fixed fixture. Manually trace each variant
+    to derive expected reasons.
+    """
+    from backend.strategy.options import _check_exit_reason
+
+    # ---- Variant A: fixed ₹ premium drop ----
+    cfg_a = {"stoploss": {"active": "A", "variant_a_drop_rs": 30.0},
+             "target":   {"ce_level": "T1", "pe_level": "S1"}}
+    open_ce = {"option_type": "CE", "entry_price": 100.0,
+               "trail_sl_price": None}
+    with patch("backend.strategy.options.config_loader.get",
+               return_value=cfg_a):
+        # opt_ltp 70 == entry-30 → fires SL_PREMIUM_FIXED.
+        assert _check_exit_reason(open_ce, opt_ltp=70.0, spot=25000.0,
+                                  buy_lvl=None, sell_lvl=None,
+                                  ce_target_lvl=None,
+                                  pe_target_lvl=None) == "SL_PREMIUM_FIXED"
+        # opt_ltp 80 > entry-30 → no SL, no target → None.
+        assert _check_exit_reason(open_ce, opt_ltp=80.0, spot=25000.0,
+                                  buy_lvl=None, sell_lvl=None,
+                                  ce_target_lvl=None,
+                                  pe_target_lvl=None) is None
+
+    # ---- Variant B: percentage premium drop ----
+    cfg_b = {"stoploss": {"active": "B", "variant_b_drop_pct": 30.0},
+             "target":   {"ce_level": "T1", "pe_level": "S1"}}
+    with patch("backend.strategy.options.config_loader.get",
+               return_value=cfg_b):
+        # opt_ltp 70 == entry*0.7 → fires SL_PREMIUM_PCT.
+        assert _check_exit_reason(open_ce, opt_ltp=70.0, spot=25000.0,
+                                  buy_lvl=None, sell_lvl=None,
+                                  ce_target_lvl=None,
+                                  pe_target_lvl=None) == "SL_PREMIUM_PCT"
+        # opt_ltp 80 > 70 → no fire.
+        assert _check_exit_reason(open_ce, opt_ltp=80.0, spot=25000.0,
+                                  buy_lvl=None, sell_lvl=None,
+                                  ce_target_lvl=None,
+                                  pe_target_lvl=None) is None
+
+    # ---- Variant C: spot reverses through opposite Gann level ----
+    cfg_c = {"stoploss": {"active": "C"},
+             "target":   {"ce_level": "T1", "pe_level": "S1"}}
+    open_pe = {"option_type": "PE", "entry_price": 100.0,
+               "trail_sl_price": None}
+    with patch("backend.strategy.options.config_loader.get",
+               return_value=cfg_c):
+        # CE: spot 24940 < sell_lvl 24950 → SL_SELL_LVL.
+        assert _check_exit_reason(open_ce, opt_ltp=80.0, spot=24940.0,
+                                  buy_lvl=25050.0, sell_lvl=24950.0,
+                                  ce_target_lvl=None,
+                                  pe_target_lvl=None) == "SL_SELL_LVL"
+        # PE: spot 25060 > buy_lvl 25050 → SL_BUY_LVL.
+        assert _check_exit_reason(open_pe, opt_ltp=80.0, spot=25060.0,
+                                  buy_lvl=25050.0, sell_lvl=24950.0,
+                                  ce_target_lvl=None,
+                                  pe_target_lvl=None) == "SL_BUY_LVL"
+        # CE: spot 25000 between levels — no SL, no target → None.
+        assert _check_exit_reason(open_ce, opt_ltp=80.0, spot=25000.0,
+                                  buy_lvl=25050.0, sell_lvl=24950.0,
+                                  ce_target_lvl=None,
+                                  pe_target_lvl=None) is None
+
+    # ---- Profit target still resolves under variant A (regression) ----
+    with patch("backend.strategy.options.config_loader.get",
+               return_value=cfg_a):
+        # opt_ltp 90 above SL but spot reaches ce_target_lvl → TARGET_T1.
+        assert _check_exit_reason(open_ce, opt_ltp=90.0, spot=25100.0,
+                                  buy_lvl=None, sell_lvl=None,
+                                  ce_target_lvl=25100.0,
+                                  pe_target_lvl=None) == "TARGET_T1"
