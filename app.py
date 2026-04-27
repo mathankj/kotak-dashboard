@@ -107,6 +107,7 @@ TABS = [
     {"key": "holdings", "url": "/", "label": "Holdings"},
     {"key": "positions", "url": "/positions", "label": "Positions"},
     {"key": "trades", "url": "/trades", "label": "Trade Log"},
+    {"key": "paper_trades", "url": "/paper-trades", "label": "Paper Log"},
     {"key": "blockers", "url": "/blockers", "label": "Blockers"},
     {"key": "config", "url": "/config", "label": "Config"},
     {"key": "audit", "url": "/audit", "label": "Audit"},
@@ -383,6 +384,98 @@ def trades_view():
         active="trades",
         trades=trades_sorted,
         stats=compute_stats(trades),
+    )
+
+
+@app.route("/paper-trades")
+def paper_trades_view():
+    """Paper Book page — independent ledger of virtual paper trades."""
+    from backend.storage.paper_ledger import read_paper_ledger
+    rows = read_paper_ledger()
+    rows_sorted = sorted(
+        rows,
+        key=lambda t: (t.get("date") or "", t.get("entry_time") or ""),
+        reverse=True,
+    )
+    for t in rows_sorted:
+        t["duration_str"] = fmt_duration(t.get("duration_seconds"))
+    return render_template(
+        "paper_trades.html",
+        tabs=TABS,
+        active="paper_trades",
+        trades=rows_sorted,
+        stats=compute_stats(rows),
+    )
+
+
+@app.route("/paper-trades.xlsx")
+def paper_trades_xlsx():
+    """Export the paper ledger as a formatted Excel file."""
+    from backend.storage.paper_ledger import read_paper_ledger
+    from openpyxl import Workbook
+    from openpyxl.styles import PatternFill, Font, Alignment
+    from openpyxl.utils import get_column_letter
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Paper Ledger"
+    headers = ["Date", "Scrip", "Order Type", "Entry Time (IST)", "Entry Price",
+               "Target Level Reached", "Max/Min Target Price", "Exit Time (IST)",
+               "Exit Price", "Exit Reason", "P&L Points", "P&L %", "Duration"]
+    ws.append(headers)
+    hdr_fill = PatternFill("solid", fgColor="FFEB3B")
+    for c, _ in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=c)
+        cell.font = Font(bold=True)
+        cell.fill = hdr_fill
+        cell.alignment = Alignment(horizontal="center")
+    sell_fill = PatternFill("solid", fgColor="F8CBAD")
+    buy_fill  = PatternFill("solid", fgColor="C6EFCE")
+    pos_font  = Font(color="006100")
+    neg_font  = Font(color="9C0006")
+    for t in read_paper_ledger():
+        ws.append([
+            t.get("date", ""),
+            t.get("scrip", ""),
+            t.get("order_type", ""),
+            t.get("entry_time", ""),
+            t.get("entry_price", ""),
+            t.get("target_level_reached", "") or "",
+            t.get("max_min_target_price", "") or "",
+            t.get("exit_time", "") or "",
+            t.get("exit_price", "") or "",
+            t.get("exit_reason", "") or "",
+            t.get("pnl_points", "") if t.get("pnl_points") is not None else "",
+            t.get("pnl_pct", "") if t.get("pnl_pct") is not None else "",
+            fmt_duration(t.get("duration_seconds")),
+        ])
+        r = ws.max_row
+        otype_cell = ws.cell(row=r, column=3)
+        if t.get("order_type") == "SELL":
+            otype_cell.fill = sell_fill
+        else:
+            otype_cell.fill = buy_fill
+        otype_cell.alignment = Alignment(horizontal="center")
+        try:
+            pl = float(t.get("pnl_points") or 0)
+            ws.cell(row=r, column=11).font = pos_font if pl >= 0 else neg_font
+            ws.cell(row=r, column=12).font = pos_font if pl >= 0 else neg_font
+        except (TypeError, ValueError):
+            pass
+    widths = [12, 12, 12, 18, 14, 20, 20, 18, 12, 14, 12, 10, 12]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    os.makedirs(data_dir, exist_ok=True)
+    out = os.path.join(data_dir, "_paper_ledger_export.xlsx")
+    wb.save(out)
+    with open(out, "rb") as f:
+        data = f.read()
+    today = now_ist().strftime("%Y%m%d")
+    return Response(
+        data,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition":
+                 f"attachment; filename=paper_ledger_{today}.xlsx"},
     )
 
 

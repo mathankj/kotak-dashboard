@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Paper Book - Kotak Neo Dashboard</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, 'Segoe UI', sans-serif;
+         background: #0f1419; color: #d4d4d8; margin: 0; padding: 20px; }
+  header { display: flex; justify-content: space-between; align-items: center;
+           border-bottom: 2px solid #27272a; padding-bottom: 12px; margin-bottom: 20px; }
+  h1 { margin: 0; color: #fafafa; font-size: 24px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tabs a { padding: 8px 16px; background: #18181b; color: #a1a1aa;
+            text-decoration: none; border-radius: 6px; font-size: 14px;
+            border: 1px solid #27272a; }
+  .tabs a.active { background: #2563eb; color: white; border-color: #2563eb; }
+  .tabs a:hover:not(.active) { background: #27272a; color: #fafafa; }
+  .card { background: #18181b; border: 1px solid #27272a;
+          border-radius: 8px; padding: 20px; overflow-x: auto; }
+  .card-head { display: flex; justify-content: space-between; align-items: center;
+               margin-bottom: 16px; }
+  h2 { margin: 0; color: #fafafa; font-size: 18px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 10px 12px; background: #27272a;
+       color: #a1a1aa; font-weight: 600; font-size: 11px;
+       text-transform: uppercase; letter-spacing: 0.5px; }
+  td { padding: 10px 12px; border-bottom: 1px solid #27272a; color: #d4d4d8;
+       white-space: nowrap; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pos { color: #4ade80; font-weight: 600; }
+  .neg { color: #f87171; font-weight: 600; }
+  .buy  { color: #4ade80; font-weight: 600; }
+  .sell { color: #f87171; font-weight: 600; }
+  .empty { color: #71717a; font-style: italic; padding: 20px 0; }
+  .refresh { padding: 8px 16px; background: #16a34a; color: white; border: none;
+             border-radius: 6px; cursor: pointer; font-size: 14px; }
+  .download { padding: 8px 16px; background: #2563eb; color: white;
+              text-decoration: none; border-radius: 6px; font-size: 14px;
+              font-weight: 600; }
+  .download:hover { background: #1d4ed8; }
+  .stats { display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
+  .stat { background: #18181b; border: 1px solid #27272a; border-radius: 8px;
+          padding: 12px 18px; min-width: 130px; }
+  .stat .lbl { font-size: 11px; color: #71717a; text-transform: uppercase;
+               letter-spacing: 0.5px; }
+  .stat .val { font-size: 18px; color: #fafafa; font-weight: 600; margin-top: 4px; }
+  .mode-pill { padding: 2px 8px; border-radius: 4px; font-size: 10px;
+               font-weight: 700; letter-spacing: 0.5px; }
+  .mode-LIVE       { background: #166534; color: #d1fae5; }
+  .mode-PAPER      { background: #475569; color: #f1f5f9; }
+  .mode-PAPER_BOOK { background: #6d28d9; color: #ede9fe; }
+  .banner-paper { background: #4c1d95; color: #ede9fe; padding: 12px 16px;
+                  border-radius: 8px; margin-bottom: 16px; font-size: 14px;
+                  border: 1px solid #6d28d9; font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Kotak Neo Dashboard</h1>
+  <div style="display:flex;align-items:center;gap:0">
+    {% include "_safety_header.html" %}
+    <form method="post" action="/refresh" style="margin:0">
+      <button class="refresh" type="submit">Refresh Login</button>
+    </form>
+  </div>
+</header>
+<div class="tabs">
+  {% for t in tabs %}
+    <a href="{{ t.url }}" class="{% if t.key == active %}active{% endif %}">{{ t.label }}</a>
+  {% endfor %}
+</div>
+
+<div class="banner-paper">
+  PAPER BOOK — These trades are virtual. The kill switch does NOT freeze the paper book.
+</div>
+
+{% if stats %}
+<div class="stats">
+  <div class="stat"><div class="lbl">Total Trades</div><div class="val">{{ stats.get('total', 0) }}</div></div>
+  <div class="stat"><div class="lbl">Open</div><div class="val">{{ stats.get('open', 0) }}</div></div>
+  <div class="stat"><div class="lbl">Closed</div><div class="val">{{ stats.get('closed', 0) }}</div></div>
+  <div class="stat"><div class="lbl">Wins</div><div class="val pos">{{ stats.get('wins', 0) }}</div></div>
+  <div class="stat"><div class="lbl">Losses</div><div class="val neg">{{ stats.get('losses', 0) }}</div></div>
+  <div class="stat"><div class="lbl">Net P&amp;L (pts)</div>
+    <div class="val {% if stats.get('total_pnl_points', 0) >= 0 %}pos{% else %}neg{% endif %}">
+      {{ '%+.2f'|format(stats.get('total_pnl_points', 0) or 0) }}
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="card-head">
+    <h2>Paper Book ({{ trades|length }})</h2>
+    <a class="download" href="/paper-trades.xlsx">Download as Excel</a>
+  </div>
+  {% if trades %}
+    <table>
+      <thead>
+        <tr>
+          <th>Mode</th>
+          <th>Date</th><th>Scrip</th><th>Side</th>
+          <th>Entry Time</th><th class="num">Entry</th>
+          <th>Exit Time</th><th class="num">Exit</th>
+          <th>Exit Reason</th>
+          <th class="num">P&amp;L pts</th><th class="num">P&amp;L %</th>
+          <th>Duration</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in trades %}
+          {% set mode = t.get('mode') or 'PAPER_BOOK' %}
+          <tr>
+            <td><span class="mode-pill mode-{{ mode }}">{{ mode }}</span></td>
+            <td>{{ t.get('date', '') }}</td>
+            <td>{{ t.get('scrip', '') }}</td>
+            <td class="{% if t.get('order_type') == 'BUY' %}buy{% else %}sell{% endif %}">
+              {{ t.get('order_type', '') }}
+            </td>
+            <td>{{ t.get('entry_time', '') }}</td>
+            <td class="num">{{ t.get('entry_price', '') }}</td>
+            <td>{{ t.get('exit_time', '') or '—' }}</td>
+            <td class="num">{{ t.get('exit_price', '') or '—' }}</td>
+            <td>{{ t.get('exit_reason', '') or '—' }}</td>
+            {% set pl = t.get('pnl_points') %}
+            <td class="num {% if pl is not none and pl >= 0 %}pos{% elif pl is not none %}neg{% endif %}">
+              {% if pl is not none %}{{ '%+.2f'|format(pl) }}{% else %}—{% endif %}
+            </td>
+            {% set plp = t.get('pnl_pct') %}
+            <td class="num {% if plp is not none and plp >= 0 %}pos{% elif plp is not none %}neg{% endif %}">
+              {% if plp is not none %}{{ '%+.2f'|format(plp) }}%{% else %}—{% endif %}
+            </td>
+            <td>{{ t.get('duration_str', '') or '—' }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="empty">No paper trades yet. Once the strategy ticker fires, paper rows will appear here in parallel with live trades.</div>
+  {% endif %}
+</div>
+{% include "_blocker_toaster.html" %}
+</body>
+</html>
