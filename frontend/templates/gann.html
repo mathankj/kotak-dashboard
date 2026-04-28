@@ -451,8 +451,28 @@ async function refreshOpenPositions(_quotes) {
   if (bar) bar.style.display = 'none';
 }
 
+// Fast LTP loop — hits /api/gann-live which reads the WS cache
+// directly (no SnapshotStore, no REST). This makes the LTP cell move
+// at WebSocket cadence (sub-second) like Kotak's native app, while
+// the slower refresh() above keeps the levels/stats fresh.
+async function liveTick() {
+  try {
+    const r = await fetch("/api/gann-live");
+    const data = await r.json();
+    for (const s of (data.scrips || [])) {
+      const tr = document.querySelector('tr[data-symbol="' + s.symbol + '"]');
+      if (!tr) continue;
+      const ltpCell = tr.querySelector('[data-col=ltp]');
+      if (!ltpCell) continue;
+      ltpCell.textContent = fmt(s.ltp);
+      paintLtpCell(ltpCell, s.nearest_level);
+    }
+  } catch (e) { /* swallow — refresh() will surface errors */ }
+}
+
 setInterval(tickClock, 1000); tickClock();
 setInterval(refresh, 2500); refresh();
+setInterval(liveTick, 500); liveTick();
 </script>
 {% include "_blocker_toaster.html" %}
 </body>

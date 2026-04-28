@@ -268,6 +268,46 @@ def gann_prices_api():
     return resp
 
 
+@app.route("/api/gann-live")
+def gann_live_api():
+    """Sub-second LTP for the Gann page. Reads directly from the WS
+    QuoteFeed cache — no REST, no SnapshotStore. Designed to be polled
+    every ~500ms so cells update at the same cadence as Kotak's app.
+
+    The slower /api/gann-prices keeps providing levels + stats. This
+    endpoint only sends `ltp` + recomputed `nearest_level` so the JS
+    can repaint LTP cells without touching the rest of the row.
+    """
+    from backend.quotes import _quote_cache
+    cached = _quote_cache.get("data") or {}
+    out = []
+    now = time.time()
+    for s in SCRIPS:
+        sym = s["symbol"]
+        tick = _feed.get(s["exchange"], s["token"]) or {}
+        ltp = tick.get("ltp")
+        ws_age = round(now - tick.get("ts", 0), 2) if tick.get("ts") else None
+        # Fall back to last cached LTP if WS hasn't ticked yet (e.g. just-
+        # subscribed scrip or off-hours) — better than blanking the cell.
+        if ltp is None:
+            cached_row = cached.get(sym) or {}
+            ltp = cached_row.get("ltp")
+        # Use cached levels (rebuilt on REST refresh) to compute nearest.
+        cached_row = cached.get(sym) or {}
+        levels = cached_row.get("levels") or {"sell": {}, "buy": {}}
+        nl, _ = nearest_gann_level({"ltp": ltp, "levels": levels})
+        out.append({
+            "symbol": sym,
+            "ltp": ltp,
+            "nearest_level": nl,
+            "ws_age": ws_age,
+        })
+    return jsonify({
+        "scrips": out,
+        "ts": now_ist().strftime("%H:%M:%S IST"),
+    })
+
+
 # ---------- Options routes ----------
 @app.route("/options")
 def options_view():
