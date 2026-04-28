@@ -107,6 +107,14 @@ def fetch_quotes(force=False):
     """Fetch quotes for all SCRIPS via Kotak. Returns (dict, error_str)."""
     now = time.time()
     if not force and (now - _quote_cache["ts"]) < QUOTE_TTL and _quote_cache["data"]:
+        # Cache hit: overlay fresh WS LTPs onto the cached dict so callers
+        # see sub-second prices between REST refreshes (every QUOTE_TTL).
+        try:
+            _ws_overlay(_quote_cache["data"],
+                        {s["symbol"]: (s["exchange"], s["token"]) for s in SCRIPS})
+        except Exception as e:
+            print(f"[quote_feed] overlay (stocks, cached) failed: "
+                  f"{type(e).__name__}: {e}")
         return _quote_cache["data"], _quote_cache["error"]
 
     try:
@@ -300,6 +308,18 @@ def fetch_option_quotes(force=False):
     if (not force
             and (now - _option_quote_cache["ts"]) < QUOTE_TTL
             and _option_quote_cache["data"]):
+        # Cache hit: overlay fresh WS LTPs onto the cached dict so callers
+        # see sub-second option prices between REST refreshes. Each cached
+        # record already carries its own (exchange, token) so we can rebuild
+        # the mapping without re-resolving the chain.
+        try:
+            mapping = {k: (rec["exchange"], rec["token"])
+                       for k, rec in _option_quote_cache["data"].items()
+                       if rec.get("exchange") and rec.get("token")}
+            _ws_overlay(_option_quote_cache["data"], mapping)
+        except Exception as e:
+            print(f"[quote_feed] overlay (options, cached) failed: "
+                  f"{type(e).__name__}: {e}")
         return (_option_quote_cache["data"],
                 _option_quote_cache["meta"],
                 _option_quote_cache["error"])
@@ -421,6 +441,17 @@ def fetch_future_quotes(force=False):
     if (not force
             and (now - _future_quote_cache["ts"]) < QUOTE_TTL
             and _future_quote_cache["data"]):
+        # Cache hit: overlay fresh WS LTPs so callers see sub-second futures
+        # prices between REST refreshes. Each cached record carries its own
+        # (exchange, token).
+        try:
+            mapping = {n: (rec["exchange"], rec["token"])
+                       for n, rec in _future_quote_cache["data"].items()
+                       if rec.get("exchange") and rec.get("token")}
+            _ws_overlay(_future_quote_cache["data"], mapping)
+        except Exception as e:
+            print(f"[quote_feed] overlay (futures, cached) failed: "
+                  f"{type(e).__name__}: {e}")
         return _future_quote_cache["data"], _future_quote_cache["error"]
 
     by_idx = {}
