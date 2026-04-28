@@ -10,7 +10,19 @@ Two entry points:
 
 Schema (UNIFIED — one config drives BOTH options + futures strategies):
 
-  apply_to: options | futures | both     # which strategy(s) to run
+  engines.paper.enabled    bool                       # paper book on/off
+         .paper.apply_to   options | futures | both   # what paper trades
+         .real.enabled     bool                       # real engine on/off
+         .real.apply_to    options | futures | both   # what real trades
+
+  indices.NIFTY.paper      bool   # paper engine fires on NIFTY
+         .NIFTY.real       bool   # real engine fires on NIFTY
+         .BANKNIFTY.paper / .real
+         .SENSEX.paper / .real
+
+  Legacy: top-level `apply_to` (pre-engines schema) is migrated on load —
+  paper.enabled=real.enabled=true, both apply_to set to the legacy value,
+  all three indices default to {paper: true, real: true}.
 
   timings.market_start / square_off
 
@@ -43,6 +55,7 @@ Everything is intentionally defensive: a missing file, an unparseable
 file, or a malformed key falls back to the documented DEFAULTS rather
 than crashing the strategy.
 """
+import copy
 import os
 import threading
 
@@ -54,9 +67,19 @@ CONFIG_FILE = os.path.join(_REPO_ROOT, "config.yaml")
 
 
 # Defaults mirror the original hardcoded constants. Any missing/invalid
-# key falls back here. Note: "both" by default = both strategies trade.
+# key falls back here. Default is fully on: both engines run, both
+# strategies, all three indices ticked for paper AND real.
 DEFAULTS = {
-    "apply_to": "both",                        # options | futures | both
+    "engines": {
+        "paper": {"enabled": True, "apply_to": "both"},
+        "real":  {"enabled": True, "apply_to": "both"},
+    },
+
+    "indices": {
+        "NIFTY":     {"paper": True, "real": True},
+        "BANKNIFTY": {"paper": True, "real": True},
+        "SENSEX":    {"paper": True, "real": True},
+    },
 
     "timings": {
         "market_start": "09:15",
@@ -114,6 +137,7 @@ DEFAULTS = {
 }
 
 VALID_APPLY_TO = {"options", "futures", "both"}
+ENGINE_NAMES = ("paper", "real")
 VALID_STOPLOSS = {"A", "B", "C", "D"}
 VALID_BUY_LEVELS  = {"BUY", "BUY_WA"}
 VALID_SELL_LEVELS = {"SELL", "SELL_WA"}
@@ -130,9 +154,14 @@ _cache = {
 
 
 def _deep_merge(defaults, overrides):
-    """Return defaults overlaid with overrides (recursive for dicts)."""
+    """Return defaults overlaid with overrides (recursive for dicts).
+
+    Deep-copies values pulled from `defaults` so that callers mutating
+    the returned dict can never reach back and corrupt the global
+    DEFAULTS object — a footgun that bit us when tests mutated the
+    coerced result expecting it to be private."""
     if not isinstance(overrides, dict):
-        return defaults
+        return copy.deepcopy(defaults)
     out = {}
     for k, v in defaults.items():
         if k in overrides:
@@ -140,9 +169,9 @@ def _deep_merge(defaults, overrides):
             if isinstance(v, dict) and isinstance(ov, dict):
                 out[k] = _deep_merge(v, ov)
             else:
-                out[k] = ov
+                out[k] = copy.deepcopy(ov)
         else:
-            out[k] = v
+            out[k] = copy.deepcopy(v)
     return out
 
 
@@ -175,12 +204,41 @@ def _coerce(raw):
         # Drop legacy block — its other keys are now shared.
         raw.pop("futures", None)
 
+        # Migrate legacy top-level `apply_to` (pre-engines schema) ->
+        # both engines on, both apply_to set to the legacy value.
+        # Only fire when no engines block is present so an explicit
+        # engines block always wins.
+        if "apply_to" in raw and "engines" not in raw:
+            legacy_at = str(raw.get("apply_to", "both")).lower()
+            if legacy_at not in VALID_APPLY_TO:
+                legacy_at = "both"
+            raw["engines"] = {
+                "paper": {"enabled": True, "apply_to": legacy_at},
+                "real":  {"enabled": True, "apply_to": legacy_at},
+            }
+        raw.pop("apply_to", None)
+
     merged = _deep_merge(DEFAULTS, raw or {})
 
-    # apply_to
-    merged["apply_to"] = str(merged.get("apply_to", "both")).lower()
-    if merged["apply_to"] not in VALID_APPLY_TO:
-        merged["apply_to"] = "both"
+    # engines — per-engine enable + apply_to
+    eng = merged["engines"]
+    for name in ENGINE_NAMES:
+        cur = eng.get(name) or {}
+        cur["enabled"] = bool(cur.get("enabled", True))
+        ap = str(cur.get("apply_to", "both")).lower()
+        cur["apply_to"] = ap if ap in VALID_APPLY_TO else "both"
+        eng[name] = cur
+
+    # indices — per-index per-engine bool. Coerce loose forms (true/false,
+    # "yes"/"no", missing key -> True default) into clean bools.
+    idxs = merged["indices"]
+    for idx in INDEX_NAMES:
+        cur = idxs.get(idx) or {}
+        for engname in ENGINE_NAMES:
+            v = cur.get(engname, True)
+            cur[engname] = bool(v) if not isinstance(v, str) \
+                else v.strip().lower() in ("1", "true", "yes", "on")
+        idxs[idx] = cur
 
     # entry — booleans + level dropdowns
     e = merged["entry"]
@@ -293,8 +351,44 @@ def validate(new):
     if not isinstance(new, dict):
         return ["Config must be a dict."]
 
-    if str(new.get("apply_to", "both")).lower() not in VALID_APPLY_TO:
-        errs.append(f"apply_to must be one of {sorted(VALID_APPLY_TO)}.")
+    # engines: each name has enabled (bool) + apply_to (one of VALID).
+    eng = new.get("engines") or {}
+    if not isinstance(eng, dict):
+        errs.append("engines must be a dict.")
+        eng = {}
+    for name in ENGINE_NAMES:
+        sub = eng.get(name) or {}
+        if not isinstance(sub, dict):
+            errs.append(f"engines.{name} must be a dict.")
+            continue
+        if not isinstance(sub.get("enabled", True), bool):
+            errs.append(f"engines.{name}.enabled must be true or false.")
+        ap = str(sub.get("apply_to", "both")).lower()
+        if ap not in VALID_APPLY_TO:
+            errs.append(f"engines.{name}.apply_to must be one of "
+                        f"{sorted(VALID_APPLY_TO)}.")
+
+    # indices: per-index per-engine bool. Reject "all-off" when at least
+    # one engine is enabled — otherwise nothing would ever fire.
+    idxs = new.get("indices") or {}
+    any_engine_on = any(
+        bool((eng.get(n) or {}).get("enabled", True)) for n in ENGINE_NAMES
+    )
+    any_idx_on = False
+    for idx in INDEX_NAMES:
+        cur = idxs.get(idx) or {}
+        if not isinstance(cur, dict):
+            errs.append(f"indices.{idx} must be a dict with paper/real bools.")
+            continue
+        for engname in ENGINE_NAMES:
+            v = cur.get(engname, True)
+            if not isinstance(v, bool):
+                errs.append(f"indices.{idx}.{engname} must be true or false.")
+        if cur.get("paper") or cur.get("real"):
+            any_idx_on = True
+    if any_engine_on and not any_idx_on:
+        errs.append("At least one index must be enabled for at least one "
+                    "engine — otherwise nothing will trade.")
 
     sl = (new.get("stoploss") or {})
     if str(sl.get("active", "")).upper() not in VALID_STOPLOSS:
@@ -403,19 +497,44 @@ def per_day_cap(idx_name):
     return get()["per_day_cap"].get(idx_name)
 
 
-def apply_to():
-    """Return current apply_to setting: 'options' | 'futures' | 'both'."""
-    return get().get("apply_to", "both")
+def _engine(name):
+    return (get().get("engines") or {}).get(name) or {}
 
 
-def options_enabled():
-    """True if options strategy should run."""
-    return apply_to() in ("options", "both")
+def paper_options_enabled():
+    """True if the paper book engine should run option ticks."""
+    e = _engine("paper")
+    return bool(e.get("enabled", True)) and \
+           e.get("apply_to", "both") in ("options", "both")
 
 
-def futures_enabled():
-    """True if futures strategy should run."""
-    return apply_to() in ("futures", "both")
+def paper_futures_enabled():
+    """True if the paper book engine should run futures ticks."""
+    e = _engine("paper")
+    return bool(e.get("enabled", True)) and \
+           e.get("apply_to", "both") in ("futures", "both")
+
+
+def real_options_enabled():
+    """True if the real-trade engine should run option ticks."""
+    e = _engine("real")
+    return bool(e.get("enabled", True)) and \
+           e.get("apply_to", "both") in ("options", "both")
+
+
+def real_futures_enabled():
+    """True if the real-trade engine should run futures ticks."""
+    e = _engine("real")
+    return bool(e.get("enabled", True)) and \
+           e.get("apply_to", "both") in ("futures", "both")
+
+
+def index_enabled_for(engine, idx_name):
+    """True if `engine` ('paper'|'real') should fire on `idx_name`.
+    Missing index entries default to True (fail-open: matches old
+    behaviour where every index always traded)."""
+    cur = (get().get("indices") or {}).get(idx_name) or {}
+    return bool(cur.get(engine, True))
 
 
 def futures_round_step(idx_name):

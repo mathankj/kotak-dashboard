@@ -81,6 +81,44 @@
   .apply-opt .nm { font-weight: 700; color: #fafafa; font-size: 15px;
                    text-transform: uppercase; letter-spacing: 0.5px; }
   .apply-opt .ds { color: #a1a1aa; font-size: 12px; }
+
+  /* Engines block — one row per engine with toggle + apply-to pills. */
+  .engine-row { padding: 14px 0; border-top: 1px solid #1f1f23; }
+  .engine-row:first-of-type { border-top: none; }
+  .engine-row .engine-title { font-weight: 700; color: #fafafa; font-size: 15px;
+                              text-transform: uppercase; letter-spacing: 0.5px; }
+  .engine-row .engine-desc { color: #d4d4d8; font-size: 13px;
+                             margin-top: 4px; margin-left: 28px; }
+  .engine-row .engine-tech { color: #71717a; font-size: 11px;
+                             margin-top: 2px; margin-left: 28px; font-style: italic; }
+  .engine-row .engine-applyto { display: flex; align-items: center; gap: 8px;
+                                margin-top: 10px; margin-left: 28px; flex-wrap: wrap; }
+  .engine-row .applyto-lbl { color: #a1a1aa; font-size: 12px;
+                              text-transform: uppercase; letter-spacing: 0.5px;
+                              margin-right: 4px; }
+  .engine-row .applyto-pill { padding: 6px 12px; background: #1c1f24;
+                              border: 1px solid #27272a; border-radius: 6px;
+                              cursor: pointer; font-size: 13px; color: #d4d4d8;
+                              display: flex; align-items: center; gap: 6px; }
+  .engine-row .applyto-pill input[type=radio] { accent-color: #2563eb; }
+  .engine-row .applyto-pill.sel { background: #1e293b; border-color: #2563eb;
+                                   color: #fafafa; font-weight: 600; }
+  .engine-row .applyto-pill:hover:not(.sel) { background: #1f2329; border-color: #3f3f46; }
+
+  /* Indices grid — index name + paper checkbox + real checkbox. */
+  .idx-grid { width: auto; border-collapse: collapse; margin-top: 4px; }
+  .idx-grid th { text-align: center; padding: 8px 24px; font-size: 11px;
+                 color: #71717a; text-transform: uppercase;
+                 letter-spacing: 0.5px; font-weight: 600;
+                 border-bottom: 1px solid #27272a; }
+  .idx-grid th:first-child { text-align: left; }
+  .idx-grid td { padding: 10px 24px; border-bottom: 1px solid #1f1f23; }
+  .idx-grid tr:last-child td { border-bottom: none; }
+  .idx-grid .idx-name { color: #fafafa; font-weight: 600; font-size: 14px;
+                         letter-spacing: 0.3px; }
+  .idx-grid .idx-cell { display: flex; justify-content: center; cursor: pointer; }
+  .idx-grid .idx-cell input[type=checkbox] {
+      width: 20px; height: 20px; accent-color: #2563eb; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -107,24 +145,81 @@
 
 <form id="cfgForm">
 
-<!-- 0. Apply to (master switch) -->
+<!-- 0a. Engines (paper + real, each with its own apply_to) -->
 <div class="card apply-card">
-  <h2>Apply To</h2>
-  <div class="sub">Single switch deciding which strategy(s) trade. The same Entry / Stoploss / Target
-    rules below apply to whichever sides are selected.</div>
-  <div class="apply-opt">
-    {% for v, nm, ds in [
-      ('options',  'Options Only',  'Trade ATM CE/PE only. Futures strategy stays idle.'),
-      ('futures',  'Futures Only',  'Trade nearest-expiry FUT (long+short). Options stays idle.'),
-      ('both',     'Both',          'Run both strategies in parallel. Independent ledger rows.'),
-    ] %}
-      <label class="{% if cfg.apply_to == v %}sel{% endif %}">
-        <input type="radio" name="apply_to" value="{{ v }}"
-               {% if cfg.apply_to == v %}checked{% endif %}>
-        <span class="nm">{{ nm }}</span>
-        <span class="ds">{{ ds }}</span>
+  <h2>Engines — what to run</h2>
+  <div class="sub">Two independent engines. Tick one or both. The Apply-to row decides
+    whether that engine handles options, futures, or both.</div>
+
+  {% for ekey, ename, edesc, etech in [
+    ('paper', 'Paper Book Engine',
+     'Practice mode. Virtual trades only — no real money. Kill switch does NOT freeze it.',
+     'Writes to data/paper_ledger.json. Independent of LIVE_MODE.'),
+    ('real',  'Real Trade Engine',
+     'Sends real orders to Kotak when live mode is on. Watch this one carefully.',
+     'Writes to the live trade ledger. LIVE_MODE env var decides real-vs-dry placement.'),
+  ] %}
+    <div class="engine-row">
+      <label class="toggle">
+        <input type="checkbox" name="engines.{{ ekey }}.enabled"
+               {% if cfg.engines[ekey].enabled %}checked{% endif %}>
+        <span class="engine-title">{{ ename }}</span>
       </label>
-    {% endfor %}
+      <div class="engine-desc">{{ edesc }}</div>
+      <div class="engine-tech">{{ etech }}</div>
+      <div class="engine-applyto">
+        <span class="applyto-lbl">Apply to:</span>
+        {% for v, nm in [('options', 'Options only'),
+                          ('futures', 'Futures only'),
+                          ('both',    'Both')] %}
+          <label class="applyto-pill {% if cfg.engines[ekey].apply_to == v %}sel{% endif %}">
+            <input type="radio" name="engines.{{ ekey }}.apply_to" value="{{ v }}"
+                   {% if cfg.engines[ekey].apply_to == v %}checked{% endif %}>
+            <span>{{ nm }}</span>
+          </label>
+        {% endfor %}
+      </div>
+    </div>
+  {% endfor %}
+</div>
+
+<!-- 0b. Indices — per-engine per-index toggles -->
+<div class="card">
+  <h2>Indices — which markets to trade</h2>
+  <div class="sub">Tick which index each engine should handle. Useful for testing a new
+    index on paper before flipping it on for real. Empty box = ignore.</div>
+
+  <table class="idx-grid">
+    <thead>
+      <tr>
+        <th></th>
+        <th>Paper Book</th>
+        <th>Real Trade</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for idx in ['NIFTY', 'BANKNIFTY', 'SENSEX'] %}
+        <tr>
+          <td class="idx-name">{{ idx }}</td>
+          <td>
+            <label class="idx-cell">
+              <input type="checkbox" name="indices.{{ idx }}.paper"
+                     {% if cfg.indices[idx].paper %}checked{% endif %}>
+            </label>
+          </td>
+          <td>
+            <label class="idx-cell">
+              <input type="checkbox" name="indices.{{ idx }}.real"
+                     {% if cfg.indices[idx].real %}checked{% endif %}>
+            </label>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div class="hint" style="margin-top:8px">
+    Engines only fire on indices ticked here. At least one box must stay
+    ticked (otherwise nothing would ever trade and Save will refuse).
   </div>
 </div>
 
@@ -434,11 +529,16 @@ function setNested(obj, dotted, val) {
   cur[parts[parts.length - 1]] = val;
 }
 
-// Apply-to card visual feedback — recolor on radio change.
-document.querySelectorAll('.apply-opt input[type=radio]').forEach(r => {
+// Engine apply-to pills — recolor selected pill on radio change.
+// Each engine has its own group (radios share a name like
+// engines.paper.apply_to) so we recolor only siblings within the same
+// group, never both engines at once.
+document.querySelectorAll('.engine-applyto input[type=radio]').forEach(r => {
   r.addEventListener('change', () => {
-    document.querySelectorAll('.apply-opt label').forEach(l => l.classList.remove('sel'));
-    if (r.checked) r.closest('label').classList.add('sel');
+    if (!r.checked) return;
+    const grp = r.closest('.engine-applyto');
+    grp.querySelectorAll('.applyto-pill').forEach(p => p.classList.remove('sel'));
+    r.closest('.applyto-pill').classList.add('sel');
   });
 });
 

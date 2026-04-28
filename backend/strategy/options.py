@@ -300,8 +300,8 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
     """
     if not AUTO_OPTION_STRATEGY_ENABLED or not option_index_meta:
         return
-    # apply_to gate — config switch decides whether options strategy runs.
-    if not config_loader.options_enabled():
+    # Engine gate — real engine on AND apply_to includes options.
+    if not config_loader.real_options_enabled():
         return
     now = now_ist()
 
@@ -396,6 +396,14 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                                   option_index_meta, client, spot=spot)
                     _option_auto_state["last_spot"][idx_name] = spot
                     continue
+
+            # Per-index gate: when Ganesh unticks this index for the
+            # real engine on the config page, skip ENTRY here. Exits +
+            # square-off above still run so any already-OPEN position
+            # gets cleaned up (we never strand a live position).
+            if not config_loader.index_enabled_for("real", idx_name):
+                _option_auto_state["last_spot"][idx_name] = spot
+                continue
 
             # ---- ENTRY check ----
             # Two paths:

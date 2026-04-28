@@ -1022,10 +1022,11 @@ def _strategy_ticker_loop():
                             print(f"[ticker] paper options tick failed: "
                                   f"{type(e).__name__}: {e}")
                         # Futures runs alongside options. Independent ledger
-                        # rows (asset_type=future). Single shared switch:
-                        # apply_to in {options,futures,both} — when "options"
-                        # we skip the futures fetch entirely.
-                        if config_loader.futures_enabled():
+                        # rows (asset_type=future). Fetch futures quotes
+                        # only if at least one engine (paper OR real)
+                        # wants futures — otherwise it's a wasted REST call.
+                        if (config_loader.real_futures_enabled()
+                                or config_loader.paper_futures_enabled()):
                             try:
                                 fut_data, _fut_err = fetch_future_quotes()
                                 if fut_data:

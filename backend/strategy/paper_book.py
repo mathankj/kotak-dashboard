@@ -115,7 +115,7 @@ def paper_options_tick(option_data, option_index_meta, gann_quotes):
 
     if not option_index_meta:
         return
-    if not config_loader.options_enabled():
+    if not config_loader.paper_options_enabled():
         return
 
     now = now_ist()
@@ -211,6 +211,12 @@ def paper_options_tick(option_data, option_index_meta, gann_quotes):
                     _paper_state["options_last_spot"][idx_name] = spot
                     continue
 
+            # Per-index gate (paper engine). Exits above already ran;
+            # block only new entries when this index is unticked.
+            if not config_loader.index_enabled_for("paper", idx_name):
+                _paper_state["options_last_spot"][idx_name] = spot
+                continue
+
             # ---- ENTRY check ----
             if (idx_name not in open_by_underlying
                     and _paper_can_open_more(idx_name)):
@@ -288,7 +294,7 @@ def paper_futures_tick(future_data, gann_quotes):
 
     if not future_data:
         return
-    if not config_loader.futures_enabled():
+    if not config_loader.paper_futures_enabled():
         return
 
     now = now_ist()
@@ -369,6 +375,11 @@ def paper_futures_tick(future_data, gann_quotes):
                                         spot=spot)
                     _paper_state["futures_last_spot"][idx_name] = spot
                     continue
+
+            # Per-index gate (paper engine). Block only new entries.
+            if not config_loader.index_enabled_for("paper", idx_name):
+                _paper_state["futures_last_spot"][idx_name] = spot
+                continue
 
             # ---- ENTRY check ----
             if (idx_name not in open_by_underlying

@@ -247,9 +247,8 @@ def future_auto_strategy_tick(future_data, gann_quotes, client=None):
     """
     if not AUTO_FUTURE_STRATEGY_ENABLED or not future_data:
         return
-    # apply_to gate — config switch decides whether futures strategy runs.
-    # When apply_to is "options", this short-circuits the whole tick.
-    if not config_loader.futures_enabled():
+    # Engine gate — real engine on AND apply_to includes futures.
+    if not config_loader.real_futures_enabled():
         return
 
     now = now_ist()
@@ -333,6 +332,12 @@ def future_auto_strategy_tick(future_data, gann_quotes, client=None):
                                            future_data, client, spot=spot)
                     _future_auto_state["last_spot"][idx_name] = spot
                     continue
+
+            # Per-index gate (real engine). Exits above already ran for
+            # any OPEN position; only entries are blocked by the toggle.
+            if not config_loader.index_enabled_for("real", idx_name):
+                _future_auto_state["last_spot"][idx_name] = spot
+                continue
 
             # ---- ENTRY check ----
             if (idx_name not in open_by_underlying
