@@ -229,6 +229,11 @@ def paper_options_tick(option_data, option_index_meta, gann_quotes):
                             "expiry": (str(m.get("expiry"))
                                        if m.get("expiry") else None),
                             "trading_symbol": trading_symbol,
+                            # Stash WS token+exchange so the live API can
+                            # read _feed.get() directly even after this
+                            # strike drifts out of the ATM window.
+                            "instrument_token":   (opt_q or {}).get("token"),
+                            "exchange_segment":   (opt_q or {}).get("exchange"),
                             "order_type": "BUY",
                             "entry_time": now.strftime("%H:%M:%S"),
                             "entry_ts": now.timestamp(),
@@ -372,6 +377,9 @@ def paper_futures_tick(future_data, gann_quotes):
                         "expiry": (str(fut.get("expiry"))
                                    if fut.get("expiry") else None),
                         "trading_symbol": fut.get("trading_symbol"),
+                        # Future cache already carries token+exchange.
+                        "instrument_token":   fut.get("token"),
+                        "exchange_segment":   fut.get("exchange"),
                         "order_type": side,
                         "entry_time": now.strftime("%H:%M:%S"),
                         "entry_ts": now.timestamp(),

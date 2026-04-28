@@ -432,8 +432,15 @@ def trades_view():
 def paper_trades_live_api():
     """Live LTP + recomputed P&L for every OPEN paper row.
     Polled by paper_trades.html so Ganesh can watch the trail SL move
-    in real-time vs the spot/option LTP. Reads the existing option /
-    future quote caches — no extra REST traffic."""
+    in real-time vs the spot/option LTP.
+
+    Read order:
+      1. WS feed via stored instrument_token+exchange (cheapest, freshest)
+      2. option/future REST quote caches (fallback for legacy rows)
+    The WS path is necessary for option strikes that drift out of the
+    ATM window — the REST cache only covers strikes near current ATM,
+    so an OPEN trade at an old strike would otherwise show null.
+    """
     from backend.storage.paper_ledger import read_paper_ledger
     from backend.quotes import _option_quote_cache, _future_quote_cache
     opt_data = _option_quote_cache.get("data") or {}
@@ -444,12 +451,20 @@ def paper_trades_live_api():
         if t.get("status") != "OPEN":
             continue
         ltp = None
-        if t.get("asset_type") == "option":
-            q = opt_data.get(t.get("option_key")) or {}
-            ltp = q.get("ltp")
-        elif t.get("asset_type") == "future":
-            q = fut_data.get(t.get("underlying")) or {}
-            ltp = q.get("ltp")
+        # Path 1: WS direct read using stored token (fresh sub-second).
+        token = t.get("instrument_token")
+        exch  = t.get("exchange_segment")
+        if token and exch:
+            tick = _feed.get(exch, str(token)) or {}
+            ltp = tick.get("ltp")
+        # Path 2: fallback to REST cache for legacy rows w/o token.
+        if ltp is None:
+            if t.get("asset_type") == "option":
+                q = opt_data.get(t.get("option_key")) or {}
+                ltp = q.get("ltp")
+            elif t.get("asset_type") == "future":
+                q = fut_data.get(t.get("underlying")) or {}
+                ltp = q.get("ltp")
         pnl_pts = pnl_pct = None
         entry_price = t.get("entry_price")
         if ltp is not None and entry_price:

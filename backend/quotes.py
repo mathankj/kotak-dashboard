@@ -384,6 +384,11 @@ def fetch_option_quotes(force=False):
             "ltp": ltp_v,
             "close": close,
             "change_pct": change_pct,
+            # Token+exchange propagated so callers (paper_book entry,
+            # /api/paper-trades-live) can read the WS feed directly
+            # after a strike drifts out of the ATM window.
+            "token":    i["token"],
+            "exchange": i["exchange"],
         }
     # Overlay fresh WS LTPs and refresh option subs if ATM drifted.
     try:
