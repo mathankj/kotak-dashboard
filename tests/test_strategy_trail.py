@@ -234,7 +234,68 @@ def test_trail_ratchets_on_paper_book(isolated_trade_ledger):
     assert rows[0]["trail_high_rung"] == "T2"
 
 
-# ---- 7. A/B/C variants unchanged regression ----
+# ---- 7. option-trade trail uses trigger_spot, not option premium ----
+
+def test_trail_breakeven_uses_trigger_spot_for_options():
+    """For an option PE trade with spot in the breakeven zone (between
+    SELL and SELL_WA → current_idx == 0), the returned trail must be
+    `trigger_spot` (a spot level), NOT `entry_price` (option premium).
+
+    Repro of the 2026-04-28 SENSEX 77000 PE bug where trail_sl_price
+    was stored as 404.5 (the option premium) and the PE exit check
+    `spot >= trail` fired immediately because 76998 >= 404.5 is
+    trivially true.
+    """
+    from backend.strategy.common import _compute_trail_for_trade
+    pe_trade = {
+        "asset_type": "option", "option_type": "PE",
+        "entry_price": 404.5,         # option premium (NOT spot)
+        "trigger_spot": 76984.2,      # spot at entry
+    }
+    levels = {
+        "buy":  {"BUY": 77100.0, "BUY_WA": 77050.0, "T1": 77000.0,
+                 "T2": 76950.0, "T3": 76900.0, "T4": 76850.0, "T5": 76800.0},
+        "sell": {"SELL": 77020.0, "SELL_WA": 76990.0,
+                 "S1": 76950.0, "S2": 76900.0, "S3": 76850.0,
+                 "S4": 76800.0, "S5": 76750.0},
+    }
+    # Spot 77000 — below SELL (77020), above SELL_WA (76990).
+    # PE ladder: spot <= SELL only → current_idx == 0 (breakeven case).
+    trail, rung = _compute_trail_for_trade(pe_trade, 77000.0, levels)
+    assert trail == 76984.2, (
+        f"option trail must be trigger_spot (76984.2), not option "
+        f"premium (404.5); got {trail}"
+    )
+    assert rung == "SELL"
+
+
+def test_trail_breakeven_uses_entry_price_for_futures():
+    """Futures keep using entry_price — entry_price for a future IS
+    approximately spot, so it's a valid breakeven level. This is the
+    regression guard: the option-specific fix must not change futures
+    behavior."""
+    from backend.strategy.common import _compute_trail_for_trade
+    fut_trade = {
+        "asset_type": "future", "order_type": "BUY",
+        "entry_price": 25080.0,       # future price ≈ spot
+        "trigger_spot": 25081.0,
+    }
+    levels = {
+        "buy":  {"BUY": 25050.0, "BUY_WA": 25075.0,
+                 "T1": 25100.0, "T2": 25150.0, "T3": 25200.0,
+                 "T4": 25250.0, "T5": 25300.0},
+        "sell": {"SELL": 24950.0, "SELL_WA": 24925.0,
+                 "S1": 24900.0, "S2": 24850.0, "S3": 24800.0,
+                 "S4": 24750.0, "S5": 24700.0},
+    }
+    # Spot 25060 — above BUY (25050), below BUY_WA (25075).
+    # current_idx == 0 → breakeven case.
+    trail, rung = _compute_trail_for_trade(fut_trade, 25060.0, levels)
+    assert trail == 25080.0, "futures must still use entry_price"
+    assert rung == "BUY"
+
+
+# ---- 8. A/B/C variants unchanged regression ----
 
 def test_abc_variants_unchanged():
     """Variants A, B, C must produce identical exit decisions to the

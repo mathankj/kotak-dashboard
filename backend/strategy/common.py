@@ -89,12 +89,30 @@ def _resolve_spot_quote(t, quotes_by_symbol):
     return quotes_by_symbol.get(spot_key)
 
 
+def _breakeven_for_trail(t):
+    """Spot-dimension breakeven price for variant D's initial trail.
+
+    For FUTURES: entry_price is the futures price (≈ spot) — comparing
+    against current spot is meaningful, so we use it.
+
+    For OPTIONS: entry_price is the option premium (e.g. 404.5) which
+    is in a totally different dimension than spot (e.g. 76984). Using
+    it as a "trail level" makes `spot >= trail` trivially true on PE
+    and trivially false on CE — neither what variant D intends. Use
+    `trigger_spot` (spot at entry) instead so the trail compares
+    apples-to-apples.
+    """
+    if t.get("asset_type") == "option":
+        return t.get("trigger_spot")
+    return t.get("entry_price")
+
+
 def _compute_trail_for_trade(t, spot, spot_levels):
     """Returns (new_trail_price, new_high_rung_name) for variant D, or
     (None, None) if the ladder can't be resolved."""
     from backend.strategy.gann import BUY_LEVEL_ORDER, SELL_LEVEL_ORDER
     is_bullish = _trade_is_bullish(t)
-    entry_price = t.get("entry_price")
+    breakeven = _breakeven_for_trail(t)
     if is_bullish:
         ladder = [(n, (spot_levels.get("buy") or {}).get(n))
                   for n in BUY_LEVEL_ORDER]
@@ -106,9 +124,9 @@ def _compute_trail_for_trade(t, spot, spot_levels):
                 current_idx = i
         if current_idx < 0:
             # Below first rung — initial breakeven (entry).
-            return (entry_price, None)
+            return (breakeven, None)
         if current_idx == 0:
-            return (entry_price, ladder[0][0])
+            return (breakeven, ladder[0][0])
         return (ladder[current_idx - 1][1], ladder[current_idx][0])
     else:
         ladder = [(n, (spot_levels.get("sell") or {}).get(n))
@@ -119,9 +137,9 @@ def _compute_trail_for_trade(t, spot, spot_levels):
             if spot <= p:
                 current_idx = i
         if current_idx < 0:
-            return (entry_price, None)
+            return (breakeven, None)
         if current_idx == 0:
-            return (entry_price, ladder[0][0])
+            return (breakeven, ladder[0][0])
         return (ladder[current_idx - 1][1], ladder[current_idx][0])
 
 
