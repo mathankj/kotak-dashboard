@@ -246,6 +246,7 @@ def feed_status_api():
 def health_api():
     """Strong-API stats: per-method call counts, errors, retries, breaker state."""
     from backend.kotak.api import stats as kotak_stats
+    from backend.quotes import _feed_started  # moved out of app.py
     return jsonify({
         "ok": True,
         "kotak": kotak_stats(),
