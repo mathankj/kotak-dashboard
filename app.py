@@ -442,9 +442,30 @@ def paper_trades_live_api():
     so an OPEN trade at an old strike would otherwise show null.
     """
     from backend.storage.paper_ledger import read_paper_ledger
-    from backend.quotes import _option_quote_cache, _future_quote_cache
+    from backend.quotes import (
+        _option_quote_cache, _future_quote_cache, _quote_cache,
+    )
     opt_data = _option_quote_cache.get("data") or {}
     fut_data = _future_quote_cache.get("data") or {}
+    spot_cache = _quote_cache.get("data") or {}
+
+    # Build {underlying_name -> live_spot} once per request. Ganesh
+    # wants to see spot move alongside the option LTP so he can watch
+    # the variant-D trail SL trigger in real time.
+    spot_by_underlying = {}
+    sym_to_underlying = {
+        cfg["spot_symbol_key"]: idx_name
+        for idx_name, cfg in INDEX_OPTIONS_CONFIG.items()
+    }
+    for s in SCRIPS:
+        if s["symbol"] not in sym_to_underlying:
+            continue
+        tick = _feed.get(s["exchange"], s["token"]) or {}
+        spot = tick.get("ltp")
+        if spot is None:
+            spot = (spot_cache.get(s["symbol"]) or {}).get("ltp")
+        spot_by_underlying[sym_to_underlying[s["symbol"]]] = spot
+
     rows = read_paper_ledger()
     out = []
     for t in rows:
@@ -476,6 +497,7 @@ def paper_trades_live_api():
         out.append({
             "id": t.get("id"),
             "ltp": ltp,
+            "spot": spot_by_underlying.get(t.get("underlying")),
             "pnl_points": pnl_pts,
             "pnl_pct": pnl_pct,
             "trail_sl_price": t.get("trail_sl_price"),

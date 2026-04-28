@@ -114,6 +114,7 @@
           <th>Entry Time</th>
           <th class="num">Entry</th>
           <th class="num">Live LTP</th>
+          <th class="num">Live Spot</th>
           <th>Exit Time</th>
           <th class="num">Exit</th>
           <th>Exit Reason</th>
@@ -154,6 +155,10 @@
             <td class="num">{{ t.get('entry_price', '') }}</td>
             {# Live LTP cell — JS poller fills this for OPEN rows. #}
             <td class="num" data-col="live_ltp">
+              {% if is_open %}…{% else %}—{% endif %}
+            </td>
+            {# Live Spot cell — underlying spot, drives trail SL trigger. #}
+            <td class="num" data-col="live_spot">
               {% if is_open %}…{% else %}—{% endif %}
             </td>
             <td>{{ t.get('exit_time', '') or '—' }}</td>
@@ -205,6 +210,8 @@ async function paperLiveTick() {
       if (!tr) continue;
       const ltpCell = tr.querySelector('[data-col="live_ltp"]');
       if (ltpCell) ltpCell.textContent = fmt(t.ltp);
+      const spotCell = tr.querySelector('[data-col="live_spot"]');
+      if (spotCell) spotCell.textContent = fmt(t.spot);
       const plCell = tr.querySelector('[data-col="pnl_points"]');
       if (plCell) {
         plCell.textContent = fmt(t.pnl_points, true);
