@@ -50,6 +50,10 @@
   .mode-LIVE       { background: #166534; color: #d1fae5; }
   .mode-PAPER      { background: #475569; color: #f1f5f9; }
   .mode-PAPER_BOOK { background: #6d28d9; color: #ede9fe; }
+  .asset-pill { padding: 2px 8px; border-radius: 4px; font-size: 10px;
+                font-weight: 700; letter-spacing: 0.5px; }
+  .asset-OPT { background: #1e3a8a; color: #dbeafe; }
+  .asset-FUT { background: #b45309; color: #fef3c7; }
   .banner-paper { background: #4c1d95; color: #ede9fe; padding: 12px 16px;
                   border-radius: 8px; margin-bottom: 16px; font-size: 14px;
                   border: 1px solid #6d28d9; font-weight: 600; }
@@ -100,13 +104,21 @@
       <thead>
         <tr>
           <th>Mode</th>
-          <th>Date</th><th>Scrip</th><th>Side</th>
+          <th>Date</th>
+          <th>Asset</th>
+          <th>Scrip</th>
+          <th>Side</th>
           <th>Entry Reason</th>
-          <th>Entry Time</th><th class="num">Entry</th>
+          <th>Trigger Lvl</th>
+          <th class="num">Trigger Spot</th>
+          <th>Entry Time</th>
+          <th class="num">Entry</th>
           <th class="num">Live LTP</th>
-          <th>Exit Time</th><th class="num">Exit</th>
+          <th>Exit Time</th>
+          <th class="num">Exit</th>
           <th>Exit Reason</th>
-          <th class="num">P&amp;L pts</th><th class="num">P&amp;L %</th>
+          <th class="num">P&amp;L pts</th>
+          <th class="num">P&amp;L %</th>
           {% if cfg and cfg.stoploss.active == 'D' %}
             <th class="num">Trail SL</th>
           {% endif %}
@@ -120,11 +132,24 @@
           <tr data-id="{{ t.get('id', '') }}" data-status="{{ t.get('status', '') }}">
             <td><span class="mode-pill mode-{{ mode }}">{{ mode }}</span></td>
             <td>{{ t.get('date', '') }}</td>
+            <td>
+              {% set at = t.get('asset_type') %}
+              {% if at == 'option' %}
+                <span class="asset-pill asset-OPT">OPT {{ t.get('option_type','') }}</span>
+              {% elif at == 'future' %}
+                <span class="asset-pill asset-FUT">FUT</span>
+              {% else %}—{% endif %}
+            </td>
             <td>{{ t.get('scrip', '') }}</td>
             <td class="{% if t.get('order_type') == 'BUY' %}buy{% else %}sell{% endif %}">
               {{ t.get('order_type', '') }}
             </td>
             <td>{{ t.get('entry_reason', '') or '—' }}</td>
+            <td>{{ t.get('trigger_level', '') or '—' }}</td>
+            <td class="num">
+              {% set ts = t.get('trigger_spot') %}
+              {% if ts is not none %}{{ '%.2f'|format(ts) }}{% else %}—{% endif %}
+            </td>
             <td>{{ t.get('entry_time', '') }}</td>
             <td class="num">{{ t.get('entry_price', '') }}</td>
             {# Live LTP cell — JS poller fills this for OPEN rows. #}
