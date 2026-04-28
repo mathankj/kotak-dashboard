@@ -200,6 +200,76 @@ def test_paper_entry_reason_captured(isolated_paper_ledger):
     )
 
 
+def test_paper_exit_uses_ws_feed_when_strike_drifts(isolated_paper_ledger):
+    """If a strike has drifted out of the ATM option_data window, the
+    exit check must still fire by reading the WS feed directly via the
+    row's stored instrument_token + exchange_segment. Otherwise
+    variant-D SL_TRAIL stays stuck OPEN even when spot is below trail.
+    Repro of the 2026-04-28 NIFTY 24100 CE bug.
+    """
+    from backend.storage.paper_ledger import (
+        read_paper_ledger, write_paper_ledger,
+    )
+    from backend.strategy import paper_book
+
+    write_paper_ledger([{
+        "id": "1", "date": "2026-04-27",
+        "scrip": "NIFTY 24100 CE", "option_key": "NIFTY 24100 CE",
+        "asset_type": "option", "underlying": "NIFTY",
+        "strike": 24100, "option_type": "CE",
+        "order_type": "BUY", "entry_price": 67.45, "entry_ts": 1000.0,
+        "instrument_token": "12345", "exchange_segment": "nse_fo",
+        "trail_sl_price": 24146.92, "trail_high_rung": "T3",
+        "status": "OPEN", "mode": "PAPER_BOOK",
+    }])
+
+    # 24100 CE NOT in option_data — ATM has drifted to 24150.
+    option_data = {}
+    meta = {"NIFTY": {"spot": 24130.0, "atm": 24150,
+                      "expiry": "2026-04-30"}}
+    levels = {
+        "buy":  {"BUY": 24050.0, "BUY_WA": 24075.0,
+                 "T1": 24100.0, "T2": 24125.0, "T3": 24150.0,
+                 "T4": 24175.0, "T5": 24200.0},
+        "sell": {"SELL": 23950.0, "SELL_WA": 23925.0,
+                 "S1": 23900.0, "S2": 23850.0, "S3": 23800.0,
+                 "S4": 23750.0, "S5": 23700.0},
+    }
+    gq = {"NIFTY 50": {"ltp": 24130.0, "levels": levels}}
+
+    cfg_d = {
+        "stoploss": {"active": "D",
+                     "variant_c_buy_level": "BUY_WA",
+                     "variant_c_sell_level": "SELL_WA"},
+        "target":   {"ce_level": "T1", "pe_level": "S1"},
+        "entry":    {"market_open_path": True,
+                     "market_open_buy_level": "BUY_WA",
+                     "market_open_sell_level": "SELL_WA",
+                     "crossing_path": True,
+                     "crossing_buy_level": "BUY_WA",
+                     "crossing_sell_level": "SELL_WA"},
+        "timings":  {"market_start": "09:15", "square_off": "15:15"},
+    }
+
+    fake_tick = {"ltp": 64.15, "ts": 1234567.0}
+    with patch("backend.strategy.paper_book.now_ist",
+               return_value=_in_hours_now()), \
+         patch("backend.strategy.paper_book.config_loader.get",
+               return_value=cfg_d), \
+         patch("backend.strategy.options.config_loader.get",
+               return_value=cfg_d), \
+         patch("backend.quotes._feed.get",
+               return_value=fake_tick):
+        paper_book.paper_options_tick(option_data, meta, gq)
+
+    rows = read_paper_ledger()
+    assert rows[0]["status"] == "CLOSED", (
+        "drifted-out CE must still close via WS-feed fallback"
+    )
+    assert rows[0]["exit_reason"] == "SL_TRAIL"
+    assert rows[0]["exit_price"] == 64.15
+
+
 def test_paper_square_off_independent(isolated_paper_ledger):
     """At/after squareoff, paper closes its OPEN rows independently."""
     from backend.storage.paper_ledger import (

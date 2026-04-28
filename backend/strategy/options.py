@@ -370,6 +370,18 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
             if open_t:
                 opt_q = option_data.get(open_t.get("option_key"))
                 opt_ltp = (opt_q or {}).get("ltp")
+                # Fallback: when this strike has drifted out of the
+                # ATM window option_data carries, read the WS feed
+                # directly via the row's stored token+exchange. Without
+                # this, variant-D SL_TRAIL never fires on out-of-window
+                # strikes because the opt_ltp guard below blocks it.
+                if opt_ltp is None:
+                    token = open_t.get("instrument_token")
+                    exch  = open_t.get("exchange_segment")
+                    if token and exch:
+                        from backend.quotes import _feed
+                        tick = _feed.get(exch, str(token)) or {}
+                        opt_ltp = tick.get("ltp")
                 reason = _check_exit_reason(
                     open_t, opt_ltp, spot,
                     slc_buy_lvl, slc_sell_lvl,
