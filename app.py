@@ -35,6 +35,7 @@ from backend.storage.trades import (
 from backend.storage.orders import ORDERS_FILE, append_order, read_orders
 from backend.storage.blocked import (
     append_blocked, read_recent_blocked, read_blocked_since,
+    read_blocked_page,
 )
 from backend import config_loader
 from backend.strategy.gann import (
@@ -60,7 +61,7 @@ from backend.safety.orders import (
     RESULT_OK, RESULT_PAPER, RESULT_BLOCKED_HALTED,
     RESULT_BLOCKED_MARGIN, RESULT_KOTAK_ERROR,
 )
-from backend.safety.audit import audit, read_audit_tail
+from backend.safety.audit import audit, read_audit_tail, read_audit_page
 
 app = Flask(__name__,
             template_folder="frontend/templates",
@@ -675,14 +676,19 @@ def trades_xlsx():
 # ---------- Blockers (refused order attempts) ----------
 @app.route("/blockers")
 def blockers_view():
-    """Page showing every order the safety wrapper refused. Lets Ganesh
-    see exactly what the auto-strategy *would have* traded and why it
-    couldn't (e.g. zero balance, kill switch engaged, broker error)."""
+    """Page showing every order the safety wrapper refused. Paginated
+    server-side to keep the response small even when the JSONL store has
+    grown to thousands of rows. Query params: page=N, date=YYYY-MM-DD."""
+    page = request.args.get("page", 1)
+    date = request.args.get("date") or ""
+    p = read_blocked_page(page=page, page_size=50, date=date)
     return render_template(
         "blockers.html",
         tabs=TABS,
         active="blockers",
-        blocks=read_recent_blocked(500),
+        blocks=p["items"],
+        pagination=p,
+        date_filter=date,
     )
 
 
@@ -700,12 +706,19 @@ def recent_blocks_api():
 
 @app.route("/api/blocked-list")
 def blocked_list_api():
-    """Live-table feed for the /blockers page. Returns the same list the
-    page first server-renders (last 500 blocks, newest first). Polled by
-    the page every 3s so the count + rows update without a manual refresh
-    when the autonomous ticker writes new entries."""
+    """Live-table feed for the /blockers page. Returns ONE PAGE of records
+    (newest first) plus pagination metadata. The page poller asks for the
+    page the user is currently viewing — it never pulls the full file
+    again. That's the whole pagination win: small payload + bounded DOM."""
+    page = request.args.get("page", 1)
+    date = request.args.get("date") or ""
+    p = read_blocked_page(page=page, page_size=50, date=date)
     return jsonify({
-        "blocks": read_recent_blocked(500),
+        "blocks": p["items"],
+        "page": p["page"],
+        "pages": p["pages"],
+        "page_size": p["page_size"],
+        "total": p["total"],
         "ts": now_ist().isoformat(),
     })
 
@@ -928,11 +941,20 @@ def orderlog_csv():
 
 @app.route("/audit")
 def audit_view():
-    """Last 100 audit events — human-readable. Useful for forensics after
-    a halt or unexpected behaviour."""
-    return render_template("audit.html",
-                           tabs=TABS, active="audit",
-                           events=list(reversed(read_audit_tail(100))))
+    """Audit events — paginated newest-first. Useful for forensics after
+    a halt or unexpected behaviour. Query params: page=N, date=YYYY-MM-DD.
+    Server-side paginated so the response stays small even when audit.log
+    has grown to thousands of lines."""
+    page = request.args.get("page", 1)
+    date = request.args.get("date") or ""
+    p = read_audit_page(page=page, page_size=50, date=date)
+    return render_template(
+        "audit.html",
+        tabs=TABS, active="audit",
+        events=p["items"],
+        pagination=p,
+        date_filter=date,
+    )
 
 
 # ---------- KILL SWITCH ----------

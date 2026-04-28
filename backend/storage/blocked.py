@@ -114,6 +114,68 @@ def _parse_iso(ts):
         return None
 
 
+def read_blocked_page(page=1, page_size=50, date=None):
+    """Return one page of blocked-attempt records, newest first.
+
+    page:      1-based page number (clamped to 1..pages).
+    page_size: rows per page.
+    date:      optional 'YYYY-MM-DD' filter — only rows whose `ts`
+               starts with that prefix are included.
+
+    Returns: {
+      "items":     [<page slice>, newest first],
+      "total":     int (matching the optional date filter),
+      "page":      int (clamped),
+      "page_size": int,
+      "pages":     int (>=1),
+    }
+
+    The full file is parsed every call. JSONL stays cheap to stream and
+    we only render `page_size` rows so the browser never gets the
+    full list at once — that's the entire point of paginating: stop
+    hauling thousands of rows over the wire just to throw them away.
+    """
+    try:
+        page = max(1, int(page))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = max(1, min(500, int(page_size)))
+    except (TypeError, ValueError):
+        page_size = 50
+    date_prefix = (date or "").strip()[:10] or None
+
+    if not os.path.exists(BLOCKED_FILE):
+        return {"items": [], "total": 0, "page": 1,
+                "page_size": page_size, "pages": 1}
+    try:
+        with open(BLOCKED_FILE, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        return {"items": [], "total": 0, "page": 1,
+                "page_size": page_size, "pages": 1}
+    parsed = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        if date_prefix and not str(r.get("ts", ""))[:10] == date_prefix:
+            continue
+        parsed.append(r)
+    parsed.reverse()  # newest first
+    total = len(parsed)
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, pages)
+    start = (page - 1) * page_size
+    items = parsed[start:start + page_size]
+    return {"items": items, "total": total, "page": page,
+            "page_size": page_size, "pages": pages}
+
+
 def read_blocked_since(since_ts):
     """Return blocked-attempt records strictly newer than `since_ts` (ISO string).
     Used by the toaster's poll endpoint. Always returns at most the last 50,

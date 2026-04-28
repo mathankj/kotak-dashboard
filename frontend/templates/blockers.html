@@ -44,6 +44,19 @@
              border-radius: 6px; cursor: pointer; font-size: 14px; }
   .reason { font-family: ui-monospace, monospace; font-size: 11px;
             color: #fb923c; }
+  .pager { display: flex; align-items: center; gap: 12px; margin-top: 14px;
+           flex-wrap: wrap; font-size: 13px; color: #a1a1aa; }
+  .pager a, .pager button { padding: 6px 12px; background: #27272a; color: #fafafa;
+            border: 1px solid #3f3f46; border-radius: 6px; cursor: pointer;
+            font-size: 13px; text-decoration: none; }
+  .pager a:hover, .pager button:hover { background: #3f3f46; }
+  .pager .disabled { opacity: 0.4; pointer-events: none; }
+  .filterbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px;
+               flex-wrap: wrap; }
+  .filterbar input[type=date] { background: #0f1419; color: #fafafa;
+            border: 1px solid #27272a; border-radius: 6px; padding: 6px 10px;
+            font-size: 13px; }
+  .filterbar .clear { color: #fb923c; text-decoration: none; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -64,7 +77,10 @@
 
 <div class="card">
   <div class="card-head">
-    <h2>Blocked Order Attempts (<span id="blkCount">{{ blocks|length }}</span>)</h2>
+    <h2>Blocked Order Attempts
+      (<span id="blkCount">{{ pagination.total }}</span> total,
+       page <span id="blkPage">{{ pagination.page }}</span> of
+       <span id="blkPages">{{ pagination.pages }}</span>)</h2>
     <span id="blkLive" style="font-size:11px;color:#16a34a;">● live</span>
   </div>
   <div class="lead">
@@ -73,6 +89,16 @@
     couldn't &mdash; e.g. zero balance, kill switch engaged, broker error,
     or no matching position to exit.
   </div>
+  {# Filter + pager. Date filter and page changes do a real page reload
+     (anchor tags) — keeps URL shareable. The live poller stays on the
+     current page only; opening a date filter pauses live-update implicitly
+     since the user is now investigating a past day, not today. #}
+  <form class="filterbar" method="get" action="/blockers">
+    <label style="font-size:12px;color:#a1a1aa;">Date:</label>
+    <input type="date" name="date" value="{{ date_filter }}">
+    <button type="submit" class="refresh" style="background:#2563eb;padding:6px 14px;font-size:13px;">Filter</button>
+    {% if date_filter %}<a class="clear" href="/blockers">clear</a>{% endif %}
+  </form>
   {# Always render the table (even when empty) so the JS poller can fill it
      in live as the autonomous ticker writes new blocked-attempt entries.
      Empty state is handled inside <tbody> as a single placeholder row. #}
@@ -115,9 +141,25 @@
         {% endfor %}
       </tbody>
     </table>
+  {# Server-rendered pager. JS poller doesn't touch this — when the user
+     wants a different page they click a link and the page reloads with
+     ?page=N. Keeps the implementation dead simple. #}
+  <div class="pager">
+    {% set base = '/blockers?' ~ ('date=' ~ date_filter ~ '&' if date_filter else '') %}
+    <a href="{{ base }}page={{ pagination.page - 1 }}"
+       class="{% if pagination.page <= 1 %}disabled{% endif %}">← Prev</a>
+    <span>Page {{ pagination.page }} of {{ pagination.pages }}
+          &middot; {{ pagination.page_size }} per page</span>
+    <a href="{{ base }}page={{ pagination.page + 1 }}"
+       class="{% if pagination.page >= pagination.pages %}disabled{% endif %}">Next →</a>
+  </div>
 </div>
 
 <script>
+// Current page the user is viewing — the poller fetches this same page so
+// it sees only the slice the user cares about, never the full file.
+const BLK_PAGE = {{ pagination.page }};
+const BLK_DATE = {{ (date_filter or '')|tojson }};
 // Live-refresh the blocked-attempts table every 3s so the count and rows
 // update on their own as the autonomous ticker writes new entries — no
 // manual page refresh required. The toaster (_blocker_toaster.html) handles
@@ -157,15 +199,23 @@ function rowHtml(b) {
 async function refreshBlockers() {
   const live = document.getElementById('blkLive');
   try {
-    const r = await fetch('/api/blocked-list', {cache: 'no-store'});
+    // Poll only the current page slice, not the full file. The total +
+    // pages counters update from the server response so the user sees
+    // the count climb in real time even while parked on page 1.
+    const params = new URLSearchParams({page: BLK_PAGE});
+    if (BLK_DATE) params.set('date', BLK_DATE);
+    const r = await fetch('/api/blocked-list?' + params.toString(),
+                          {cache: 'no-store'});
     const d = await r.json();
     const blocks = d.blocks || [];
-    document.getElementById('blkCount').textContent = blocks.length;
+    document.getElementById('blkCount').textContent = d.total ?? blocks.length;
+    document.getElementById('blkPage').textContent  = d.page  ?? BLK_PAGE;
+    document.getElementById('blkPages').textContent = d.pages ?? 1;
     const body = document.getElementById('blkBody');
     if (body) {
       body.innerHTML = blocks.length
         ? blocks.map(rowHtml).join('')
-        : '<tr><td colspan="10" class="empty" style="text-align:center;">No blocked attempts yet. (Live-updates every 3s.)</td></tr>';
+        : '<tr><td colspan="10" class="empty" style="text-align:center;">No blocked attempts on this page. (Live-updates every 3s.)</td></tr>';
     }
     live.textContent = '● live'; live.style.color = '#16a34a';
   } catch (e) {

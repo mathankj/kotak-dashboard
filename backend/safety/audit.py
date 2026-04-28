@@ -72,3 +72,51 @@ def read_audit_tail(n=100):
         return out
     except Exception:
         return []
+
+
+def read_audit_page(page=1, page_size=50, date=None):
+    """Return one page of audit events, newest first.
+
+    Same shape/semantics as storage.blocked.read_blocked_page — see that
+    docstring for the rationale. Kept inline (not factored into a shared
+    helper) because the two stores are independent and might diverge.
+    """
+    try:
+        page = max(1, int(page))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = max(1, min(500, int(page_size)))
+    except (TypeError, ValueError):
+        page_size = 50
+    date_prefix = (date or "").strip()[:10] or None
+
+    if not os.path.exists(AUDIT_FILE):
+        return {"items": [], "total": 0, "page": 1,
+                "page_size": page_size, "pages": 1}
+    try:
+        with open(AUDIT_FILE, "r") as f:
+            lines = f.readlines()
+    except Exception:
+        return {"items": [], "total": 0, "page": 1,
+                "page_size": page_size, "pages": 1}
+    parsed = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            r = json.loads(line)
+        except Exception:
+            r = {"raw": line}
+        if date_prefix and not str(r.get("ts", ""))[:10] == date_prefix:
+            continue
+        parsed.append(r)
+    parsed.reverse()  # newest first
+    total = len(parsed)
+    pages = max(1, (total + page_size - 1) // page_size)
+    page = min(page, pages)
+    start = (page - 1) * page_size
+    items = parsed[start:start + page_size]
+    return {"items": items, "total": total, "page": page,
+            "page_size": page_size, "pages": pages}

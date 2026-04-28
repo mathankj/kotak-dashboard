@@ -48,6 +48,21 @@
   pre { font-family: monospace; font-size: 11px; margin: 0;
         white-space: pre-wrap; word-break: break-word; color: #fbbf24; }
   .empty { color: #71717a; font-style: italic; padding: 20px 0; }
+  .pager { display: flex; align-items: center; gap: 12px; margin-top: 14px;
+           flex-wrap: wrap; font-size: 13px; color: #a1a1aa; }
+  .pager a { padding: 6px 12px; background: #27272a; color: #fafafa;
+            border: 1px solid #3f3f46; border-radius: 6px; cursor: pointer;
+            font-size: 13px; text-decoration: none; }
+  .pager a:hover { background: #3f3f46; }
+  .pager .disabled { opacity: 0.4; pointer-events: none; }
+  .filterbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px;
+               flex-wrap: wrap; }
+  .filterbar input[type=date] { background: #0f1419; color: #fafafa;
+            border: 1px solid #27272a; border-radius: 6px; padding: 6px 10px;
+            font-size: 13px; }
+  .filterbar button { padding: 6px 14px; background: #2563eb; color: white;
+            border: none; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .filterbar .clear { color: #fb923c; text-decoration: none; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -68,13 +83,20 @@
 
 <div class="card">
   <div class="head">
-    <h2>Audit Log (last {{ events|length }} events)</h2>
+    <h2>Audit Log
+      ({{ pagination.total }} total, page {{ pagination.page }} of {{ pagination.pages }})</h2>
   </div>
   <div class="help">
     Newest at top. Every order intent, block, kill-switch toggle, and
     LIVE/PAPER mode change is recorded here AND in <code>data/audit.log</code>
     (one JSON line per event). The full log is never auto-deleted.
   </div>
+  <form class="filterbar" method="get" action="/audit">
+    <label style="font-size:12px;color:#a1a1aa;">Date:</label>
+    <input type="date" name="date" value="{{ date_filter }}">
+    <button type="submit">Filter</button>
+    {% if date_filter %}<a class="clear" href="/audit">clear</a>{% endif %}
+  </form>
   {% if events %}
     <table>
       <thead>
@@ -96,8 +118,17 @@
         {% endfor %}
       </tbody>
     </table>
+    <div class="pager">
+      {% set base = '/audit?' ~ ('date=' ~ date_filter ~ '&' if date_filter else '') %}
+      <a href="{{ base }}page={{ pagination.page - 1 }}"
+         class="{% if pagination.page <= 1 %}disabled{% endif %}">← Prev</a>
+      <span>Page {{ pagination.page }} of {{ pagination.pages }}
+            &middot; {{ pagination.page_size }} per page</span>
+      <a href="{{ base }}page={{ pagination.page + 1 }}"
+         class="{% if pagination.page >= pagination.pages %}disabled{% endif %}">Next →</a>
+    </div>
   {% else %}
-    <div class="empty">No audit events yet.</div>
+    <div class="empty">No audit events {{ 'on this date' if date_filter else 'yet' }}.</div>
   {% endif %}
 </div>
 {% include "_blocker_toaster.html" %}
