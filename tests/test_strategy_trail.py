@@ -15,20 +15,27 @@ from backend.utils import IST
 
 @pytest.fixture
 def isolated_trade_ledger(tmp_path, monkeypatch):
-    """Point trades.LEDGER_FILE at a temp file. update_open_trades_mfe
-    reads/writes via this module, so monkeypatching here isolates the
-    test from production data."""
+    """Point both LIVE and PAPER ledgers at temp files.
+    update_open_trades_mfe walks both — leaving either pointing at the
+    real on-disk file would corrupt production data during tests."""
     from backend.storage import trades as tr
-    fake = tmp_path / "trade_ledger.json"
-    monkeypatch.setattr(tr, "LEDGER_FILE", str(fake))
-    # The strategy.common module re-imports read_/write_trade_ledger
-    # at module load time, so patch those bindings too.
+    from backend.storage import paper_ledger as pl
+    fake_live = tmp_path / "trade_ledger.json"
+    fake_paper = tmp_path / "paper_ledger.json"
+    monkeypatch.setattr(tr, "LEDGER_FILE", str(fake_live))
+    monkeypatch.setattr(pl, "LEDGER_FILE", str(fake_paper))
+    # The strategy.common module re-imports the read/write helpers at
+    # module load time, so patch those bindings too.
     from backend.strategy import common as cm
     monkeypatch.setattr(cm, "read_trade_ledger",
-                        lambda: tr.read_json(str(fake), []))
+                        lambda: tr.read_json(str(fake_live), []))
     monkeypatch.setattr(cm, "write_trade_ledger",
-                        lambda rows: tr.atomic_write_json(str(fake), rows))
-    return fake
+                        lambda rows: tr.atomic_write_json(str(fake_live), rows))
+    monkeypatch.setattr(cm, "read_paper_ledger",
+                        lambda: pl.read_json(str(fake_paper), []))
+    monkeypatch.setattr(cm, "write_paper_ledger",
+                        lambda rows: pl.atomic_write_json(str(fake_paper), rows))
+    return fake_live
 
 
 def _in_hours():
@@ -204,7 +211,30 @@ def test_trail_gated_by_in_hours(isolated_trade_ledger):
     assert rows[0].get("trail_sl_price") is None
 
 
-# ---- 6. A/B/C variants unchanged regression ----
+# ---- 6. trail also ratchets on paper-book trades ----
+
+def test_trail_ratchets_on_paper_book(isolated_trade_ledger):
+    """update_open_trades_mfe must walk the paper ledger too — the
+    point of paper-mode is to validate that the SL behaves correctly
+    before flipping the kill switch off."""
+    from backend.storage.paper_ledger import (
+        write_paper_ledger, read_paper_ledger,
+    )
+    from backend.strategy.common import update_open_trades_mfe
+
+    write_paper_ledger([_ce_open_trade()])
+
+    with patch("backend.strategy.common.config_loader.get",
+               return_value=_cfg_d()), \
+         patch("backend.strategy.common.now_ist", return_value=_in_hours()):
+        update_open_trades_mfe(_quotes_with_spot(25160.0))
+
+    rows = read_paper_ledger()
+    assert rows[0]["trail_sl_price"] == 25100.0
+    assert rows[0]["trail_high_rung"] == "T2"
+
+
+# ---- 7. A/B/C variants unchanged regression ----
 
 def test_abc_variants_unchanged():
     """Variants A, B, C must produce identical exit decisions to the

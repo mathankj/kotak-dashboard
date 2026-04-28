@@ -14,6 +14,7 @@ plumbing that any strategy needs:
 """
 from backend import config_loader
 from backend.storage.trades import read_trade_ledger, write_trade_ledger
+from backend.storage.paper_ledger import read_paper_ledger, write_paper_ledger
 from backend.strategy.gann import compute_target_level_reached
 from backend.utils import now_ist
 
@@ -125,15 +126,13 @@ def _compute_trail_for_trade(t, spot, spot_levels):
 
 
 # ---------- track best price reached so far ----------
-def update_open_trades_mfe(quotes_by_symbol):
-    """For every OPEN trade, update max_min_target_price /
-    target_level_reached / (variant D) trail_sl_price."""
-    trades = read_trade_ledger()
-    changed = False
-    cfg = config_loader.get()
-    trail_active = cfg["stoploss"]["active"] == "D"
-    in_hours = _auto_in_hours(now_ist())
+def _apply_mfe_and_trail(trades, quotes_by_symbol, trail_active, in_hours):
+    """Mutate `trades` in place: bump max_min_target_price /
+    target_level_reached and (variant D) trail_sl_price for every OPEN
+    row. Returns True if anything changed (so the caller can persist).
 
+    Same logic for live and paper books — only the storage differs."""
+    changed = False
     for t in trades:
         if t.get("status") != "OPEN":
             continue
@@ -192,6 +191,22 @@ def update_open_trades_mfe(quotes_by_symbol):
             # disarm the trail SL.
             print(f"[trail] update failed for trade {t.get('id')}: "
                   f"{type(e).__name__}: {e}")
+    return changed
 
-    if changed:
-        write_trade_ledger(trades)
+
+def update_open_trades_mfe(quotes_by_symbol):
+    """For every OPEN trade in BOTH the live and paper ledgers, update
+    max_min_target_price / target_level_reached / (variant D)
+    trail_sl_price. Trail SL must apply to paper trades too — that's the
+    whole point of paper-mode validation."""
+    cfg = config_loader.get()
+    trail_active = cfg["stoploss"]["active"] == "D"
+    in_hours = _auto_in_hours(now_ist())
+
+    live = read_trade_ledger()
+    if _apply_mfe_and_trail(live, quotes_by_symbol, trail_active, in_hours):
+        write_trade_ledger(live)
+
+    paper = read_paper_ledger()
+    if _apply_mfe_and_trail(paper, quotes_by_symbol, trail_active, in_hours):
+        write_paper_ledger(paper)
