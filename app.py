@@ -428,6 +428,47 @@ def trades_view():
     )
 
 
+@app.route("/api/paper-trades-live")
+def paper_trades_live_api():
+    """Live LTP + recomputed P&L for every OPEN paper row.
+    Polled by paper_trades.html so Ganesh can watch the trail SL move
+    in real-time vs the spot/option LTP. Reads the existing option /
+    future quote caches — no extra REST traffic."""
+    from backend.storage.paper_ledger import read_paper_ledger
+    from backend.quotes import _option_quote_cache, _future_quote_cache
+    opt_data = _option_quote_cache.get("data") or {}
+    fut_data = _future_quote_cache.get("data") or {}
+    rows = read_paper_ledger()
+    out = []
+    for t in rows:
+        if t.get("status") != "OPEN":
+            continue
+        ltp = None
+        if t.get("asset_type") == "option":
+            q = opt_data.get(t.get("option_key")) or {}
+            ltp = q.get("ltp")
+        elif t.get("asset_type") == "future":
+            q = fut_data.get(t.get("underlying")) or {}
+            ltp = q.get("ltp")
+        pnl_pts = pnl_pct = None
+        entry_price = t.get("entry_price")
+        if ltp is not None and entry_price:
+            if t.get("order_type") == "BUY":
+                pnl_pts = round(float(ltp) - float(entry_price), 2)
+            else:
+                pnl_pts = round(float(entry_price) - float(ltp), 2)
+            pnl_pct = round((pnl_pts / float(entry_price)) * 100, 2)
+        out.append({
+            "id": t.get("id"),
+            "ltp": ltp,
+            "pnl_points": pnl_pts,
+            "pnl_pct": pnl_pct,
+            "trail_sl_price": t.get("trail_sl_price"),
+            "trail_high_rung": t.get("trail_high_rung"),
+        })
+    return jsonify({"trades": out, "ts": now_ist().strftime("%H:%M:%S IST")})
+
+
 @app.route("/paper-trades")
 def paper_trades_view():
     """Paper Book page — independent ledger of virtual paper trades."""

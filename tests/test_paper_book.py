@@ -178,6 +178,28 @@ def test_paper_per_day_cap_independent(isolated_paper_ledger):
     assert rows == [], "cap=0 must block paper entry"
 
 
+def test_paper_entry_reason_captured(isolated_paper_ledger):
+    """A paper entry must record entry_reason so the UI can show WHY
+    the trade fired (OPEN_ABOVE_BUY_WA / CROSS_UP_BUY_WA / ...)."""
+    from backend.storage.paper_ledger import read_paper_ledger
+    from backend.strategy import paper_book
+
+    option_data, meta, gq = _synthetic_option_inputs()
+    paper_book._paper_state["options_open_evaluated"].clear()
+    paper_book._paper_state["options_last_spot"].clear()
+
+    with patch("backend.strategy.paper_book.now_ist",
+               return_value=_in_hours_now()):
+        paper_book.paper_options_tick(option_data, meta, gq)
+
+    rows = read_paper_ledger()
+    assert len(rows) == 1
+    reason = rows[0].get("entry_reason")
+    assert reason is not None and reason.startswith("OPEN_ABOVE_"), (
+        f"expected OPEN_ABOVE_* on market-open path, got {reason!r}"
+    )
+
+
 def test_paper_square_off_independent(isolated_paper_ledger):
     """At/after squareoff, paper closes its OPEN rows independently."""
     from backend.storage.paper_ledger import (

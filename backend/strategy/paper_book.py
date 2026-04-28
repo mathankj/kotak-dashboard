@@ -30,6 +30,42 @@ _paper_state = {
 }
 
 
+# ---------- entry reason helpers ----------
+# Derive a short human label so the paper-book UI can show WHY the
+# trade fired (e.g. "OPEN_ABOVE_BUY_WA" vs "CROSS_UP_BUY_WA"). The
+# pure-decision _compute_entry_signal() hides this distinction; we
+# reconstruct it from the same inputs the caller already has.
+
+def _derive_option_entry_reason(option_type, already_evaluated_open, entry_cfg):
+    """option_type: 'CE' bullish or 'PE' bearish. entry_cfg: cfg['entry']."""
+    market_open_path = (not already_evaluated_open
+                        and entry_cfg.get("market_open_path"))
+    if option_type == "CE":
+        if market_open_path:
+            return f"OPEN_ABOVE_{entry_cfg['market_open_buy_level']}"
+        return f"CROSS_UP_{entry_cfg['crossing_buy_level']}"
+    if option_type == "PE":
+        if market_open_path:
+            return f"OPEN_BELOW_{entry_cfg['market_open_sell_level']}"
+        return f"CROSS_DOWN_{entry_cfg['crossing_sell_level']}"
+    return None
+
+
+def _derive_futures_entry_reason(side, already_evaluated_open, entry_cfg):
+    """side: 'BUY' long or 'SELL' short."""
+    market_open_path = (not already_evaluated_open
+                        and entry_cfg.get("market_open_path"))
+    if side == "BUY":
+        if market_open_path:
+            return f"OPEN_ABOVE_{entry_cfg['market_open_buy_level']}"
+        return f"CROSS_UP_{entry_cfg['crossing_buy_level']}"
+    if side == "SELL":
+        if market_open_path:
+            return f"OPEN_BELOW_{entry_cfg['market_open_sell_level']}"
+        return f"CROSS_DOWN_{entry_cfg['crossing_sell_level']}"
+    return None
+
+
 # ---------- low-level paper writes ----------
 def _paper_execute_entry(row):
     """Insert an OPEN paper row. `row` MUST be a fully-populated dict
@@ -179,6 +215,9 @@ def paper_options_tick(option_data, option_index_meta, gann_quotes):
                         qty = lot_size * config_loader.lot_multiplier(idx_name)
                         trading_symbol = _option_trading_symbol(
                             idx_name, atm, option_type, m.get("expiry"))
+                        entry_reason = _derive_option_entry_reason(
+                            option_type, already_evaluated_open,
+                            cfg_full["entry"])
                         row = {
                             "date": today,
                             "scrip": opt_key,
@@ -198,6 +237,7 @@ def paper_options_tick(option_data, option_index_meta, gann_quotes):
                             "trigger_spot": round(float(spot), 2),
                             "trigger_level": ("BUY" if option_type == "CE"
                                               else "SELL"),
+                            "entry_reason": entry_reason,
                             "max_min_target_price": round(float(opt_ltp), 2),
                             "target_level_reached": None,
                             "exit_time": None, "exit_ts": None,
@@ -319,6 +359,8 @@ def paper_futures_tick(future_data, gann_quotes):
                         limit_price = _round_for_buy(fut_ltp, step)
                     else:
                         limit_price = _round_for_sell(fut_ltp, step)
+                    entry_reason = _derive_futures_entry_reason(
+                        side, already_evaluated_open, cfg["entry"])
                     row = {
                         "date": today,
                         "scrip": f"{idx_name} FUT",
@@ -338,6 +380,7 @@ def paper_futures_tick(future_data, gann_quotes):
                         "trigger_spot": round(spot, 2),
                         "trigger_level": ("BUY" if side == "BUY"
                                           else "SELL"),
+                        "entry_reason": entry_reason,
                         "max_min_target_price": round(float(limit_price), 2),
                         "target_level_reached": None,
                         "exit_time": None, "exit_ts": None,

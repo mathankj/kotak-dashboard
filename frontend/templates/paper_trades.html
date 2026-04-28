@@ -101,7 +101,9 @@
         <tr>
           <th>Mode</th>
           <th>Date</th><th>Scrip</th><th>Side</th>
+          <th>Entry Reason</th>
           <th>Entry Time</th><th class="num">Entry</th>
+          <th class="num">Live LTP</th>
           <th>Exit Time</th><th class="num">Exit</th>
           <th>Exit Reason</th>
           <th class="num">P&amp;L pts</th><th class="num">P&amp;L %</th>
@@ -114,30 +116,39 @@
       <tbody>
         {% for t in trades %}
           {% set mode = t.get('mode') or 'PAPER_BOOK' %}
-          <tr>
+          {% set is_open = t.get('status') == 'OPEN' %}
+          <tr data-id="{{ t.get('id', '') }}" data-status="{{ t.get('status', '') }}">
             <td><span class="mode-pill mode-{{ mode }}">{{ mode }}</span></td>
             <td>{{ t.get('date', '') }}</td>
             <td>{{ t.get('scrip', '') }}</td>
             <td class="{% if t.get('order_type') == 'BUY' %}buy{% else %}sell{% endif %}">
               {{ t.get('order_type', '') }}
             </td>
+            <td>{{ t.get('entry_reason', '') or '—' }}</td>
             <td>{{ t.get('entry_time', '') }}</td>
             <td class="num">{{ t.get('entry_price', '') }}</td>
+            {# Live LTP cell — JS poller fills this for OPEN rows. #}
+            <td class="num" data-col="live_ltp">
+              {% if is_open %}…{% else %}—{% endif %}
+            </td>
             <td>{{ t.get('exit_time', '') or '—' }}</td>
             <td class="num">{{ t.get('exit_price', '') or '—' }}</td>
             <td>{{ t.get('exit_reason', '') or '—' }}</td>
             {% set pl = t.get('pnl_points') %}
-            <td class="num {% if pl is not none and pl >= 0 %}pos{% elif pl is not none %}neg{% endif %}">
-              {% if pl is not none %}{{ '%+.2f'|format(pl) }}{% else %}—{% endif %}
+            {# For OPEN rows: live P&L pts is filled by the poller. #}
+            <td class="num {% if pl is not none and pl >= 0 %}pos{% elif pl is not none %}neg{% endif %}"
+                data-col="pnl_points">
+              {% if pl is not none %}{{ '%+.2f'|format(pl) }}{% elif is_open %}…{% else %}—{% endif %}
             </td>
             {% set plp = t.get('pnl_pct') %}
-            <td class="num {% if plp is not none and plp >= 0 %}pos{% elif plp is not none %}neg{% endif %}">
-              {% if plp is not none %}{{ '%+.2f'|format(plp) }}%{% else %}—{% endif %}
+            <td class="num {% if plp is not none and plp >= 0 %}pos{% elif plp is not none %}neg{% endif %}"
+                data-col="pnl_pct">
+              {% if plp is not none %}{{ '%+.2f'|format(plp) }}%{% elif is_open %}…{% else %}—{% endif %}
             </td>
             {% if cfg and cfg.stoploss.active == 'D' %}
               {% set trail = t.get('trail_sl_price') %}
-              <td class="num">
-                {% if t.get('status') == 'OPEN' and trail is not none %}{{ '%.2f'|format(trail) }}{% else %}—{% endif %}
+              <td class="num" data-col="trail">
+                {% if is_open and trail is not none %}{{ '%.2f'|format(trail) }}{% elif is_open %}…{% else %}—{% endif %}
               </td>
             {% endif %}
             <td>{{ t.get('duration_str', '') or '—' }}</td>
@@ -150,5 +161,55 @@
   {% endif %}
 </div>
 {% include "_blocker_toaster.html" %}
+<script>
+// Live poll for OPEN paper rows. Shows current LTP, recomputed P&L,
+// and the trail SL as it ratchets. Lets Ganesh watch the strategy
+// move in real time without reloading the page.
+const TRAIL_ACTIVE = {{ 'true' if cfg and cfg.stoploss and cfg.stoploss.active == 'D' else 'false' }};
+function fmt(n, sign=false) {
+  if (n === null || n === undefined || !isFinite(n)) return "—";
+  const v = Number(n);
+  return (sign && v >= 0 ? "+" : "") + v.toFixed(2);
+}
+async function paperLiveTick() {
+  try {
+    const r = await fetch("/api/paper-trades-live");
+    const data = await r.json();
+    for (const t of (data.trades || [])) {
+      const tr = document.querySelector('tr[data-id="' + t.id + '"]');
+      if (!tr) continue;
+      const ltpCell = tr.querySelector('[data-col="live_ltp"]');
+      if (ltpCell) ltpCell.textContent = fmt(t.ltp);
+      const plCell = tr.querySelector('[data-col="pnl_points"]');
+      if (plCell) {
+        plCell.textContent = fmt(t.pnl_points, true);
+        plCell.classList.remove("pos", "neg");
+        if (t.pnl_points !== null && t.pnl_points !== undefined) {
+          plCell.classList.add(t.pnl_points >= 0 ? "pos" : "neg");
+        }
+      }
+      const plpCell = tr.querySelector('[data-col="pnl_pct"]');
+      if (plpCell) {
+        plpCell.textContent = (t.pnl_pct !== null && t.pnl_pct !== undefined)
+          ? fmt(t.pnl_pct, true) + "%" : "—";
+        plpCell.classList.remove("pos", "neg");
+        if (t.pnl_pct !== null && t.pnl_pct !== undefined) {
+          plpCell.classList.add(t.pnl_pct >= 0 ? "pos" : "neg");
+        }
+      }
+      if (TRAIL_ACTIVE) {
+        const trCell = tr.querySelector('[data-col="trail"]');
+        if (trCell) {
+          trCell.textContent = (t.trail_sl_price !== null && t.trail_sl_price !== undefined)
+            ? Number(t.trail_sl_price).toFixed(2)
+            + (t.trail_high_rung ? " (" + t.trail_high_rung + ")" : "")
+            : "—";
+        }
+      }
+    }
+  } catch (e) { /* swallow — page is informational, not critical */ }
+}
+setInterval(paperLiveTick, 1000); paperLiveTick();
+</script>
 </body>
 </html>
