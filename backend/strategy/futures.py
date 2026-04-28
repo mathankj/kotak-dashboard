@@ -54,7 +54,7 @@ from backend.storage.trades import (
     read_trade_ledger, write_trade_ledger, next_trade_id,
 )
 from backend.strategy.common import (
-    _auto_at_or_after_squareoff, _auto_in_hours,
+    _auto_at_or_after_squareoff, _auto_in_hours, _derive_exit_level,
 )
 # Reuse the SAME LIVE_MODE master switch as options. One source of truth —
 # flipping options live also flips futures live (and vice versa). That's
@@ -267,9 +267,15 @@ def future_auto_strategy_tick(future_data, gann_quotes, client=None):
                 fut = future_data.get(idx_name)
                 if not fut or fut.get("ltp") is None:
                     continue
+                # Look up spot from gann_quotes so the exit row records
+                # spot at exit. Same pattern as paper book.
+                so_key = (INDEX_OPTIONS_CONFIG.get(idx_name)
+                          or {}).get("spot_symbol_key")
+                so_val = ((gann_quotes.get(so_key) or {}).get("ltp")
+                          if so_key else None)
                 _execute_futures_exit(t, float(fut["ltp"]),
                                        "AUTO_SQUARE_OFF",
-                                       future_data, client)
+                                       future_data, client, spot=so_val)
             return
 
         if not _auto_in_hours(now):
@@ -324,7 +330,7 @@ def future_auto_strategy_tick(future_data, gann_quotes, client=None):
                 )
                 if reason and fut_ltp is not None:
                     _execute_futures_exit(open_t, float(fut_ltp), reason,
-                                           future_data, client)
+                                           future_data, client, spot=spot)
                     _future_auto_state["last_spot"][idx_name] = spot
                     continue
 
@@ -464,12 +470,16 @@ def _execute_futures_entry(idx_name, side, fut, fut_ltp, spot, client):
     return True
 
 
-def _execute_futures_exit(open_trade, fut_ltp, reason, future_data, client):
+def _execute_futures_exit(open_trade, fut_ltp, reason, future_data, client,
+                          spot=None):
     """Close a futures position. Long open -> SELL; short open -> BUY.
 
     Uses position verification (same as options) before sending in LIVE
     mode, so a closed/flat Kotak position never produces a fresh
     opposite-side order.
+
+    `spot` records the underlying spot at exit so the closed row carries
+    the spot value and Gann level (T1/S2/etc.) for the UI.
     """
     idx_name = open_trade.get("underlying")
     open_side = open_trade.get("order_type")  # "BUY" or "SELL"
@@ -577,6 +587,9 @@ def _execute_futures_exit(open_trade, fut_ltp, reason, future_data, client):
             t["exit_ts"] = now.timestamp()
             t["exit_price"] = round(exit_price, 2)
             t["exit_reason"] = reason
+            t["exit_spot"] = (round(float(spot), 2)
+                              if spot is not None else None)
+            t["exit_level"] = _derive_exit_level(t, reason)
             t["pnl_points"] = round(pnl, 2)
             t["pnl_pct"] = (round((pnl / entry_price) * 100, 2)
                             if entry_price else 0.0)

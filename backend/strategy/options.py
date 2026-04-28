@@ -48,7 +48,7 @@ from backend.storage.trades import (
     read_trade_ledger, write_trade_ledger, next_trade_id,
 )
 from backend.strategy.common import (
-    _auto_at_or_after_squareoff, _auto_in_hours,
+    _auto_at_or_after_squareoff, _auto_in_hours, _derive_exit_level,
 )
 from backend.utils import now_ist
 
@@ -317,8 +317,12 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                 q = option_data.get(t.get("option_key"))
                 if not q or q.get("ltp") is None:
                     continue
+                # Look up spot for this row's underlying so the exit
+                # row records spot at exit (UI shows "exited at N").
+                so_meta = option_index_meta.get(t.get("underlying")) or {}
                 _execute_exit(t, float(q["ltp"]), "AUTO_SQUARE_OFF",
-                              option_index_meta, client)
+                              option_index_meta, client,
+                              spot=so_meta.get("spot"))
             return
 
         if not _auto_in_hours(now):
@@ -389,7 +393,7 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                 )
                 if reason and opt_ltp is not None:
                     _execute_exit(open_t, float(opt_ltp), reason,
-                                  option_index_meta, client)
+                                  option_index_meta, client, spot=spot)
                     _option_auto_state["last_spot"][idx_name] = spot
                     continue
 
@@ -554,12 +558,16 @@ def _execute_entry(idx_name, atm, option_type, opt_key,
     return True
 
 
-def _execute_exit(open_trade, opt_ltp, reason, option_index_meta, client):
+def _execute_exit(open_trade, opt_ltp, reason, option_index_meta, client,
+                  spot=None):
     """Place a real SELL order to close `open_trade` and update the ledger.
 
     LIVE only: verify with Kotak that the position is still open before
     sending the SELL (don't open a fresh short on a closed position).
     PAPER skips verification — there's nothing real to verify.
+
+    `spot` records the underlying spot at exit so the closed row carries
+    the spot value and Gann level (T1/S2/etc.) for the UI.
     """
     opt_key = open_trade.get("option_key")
     idx_name = open_trade.get("underlying")
@@ -653,6 +661,9 @@ def _execute_exit(open_trade, opt_ltp, reason, option_index_meta, client):
             t["exit_ts"] = now.timestamp()
             t["exit_price"] = round(exit_price, 2)
             t["exit_reason"] = reason
+            t["exit_spot"] = (round(float(spot), 2)
+                              if spot is not None else None)
+            t["exit_level"] = _derive_exit_level(t, reason)
             t["pnl_points"] = round(pnl, 2)
             t["pnl_pct"] = (round((pnl / entry_price) * 100, 2)
                             if entry_price else 0.0)

@@ -46,12 +46,30 @@ def _auto_at_or_after_squareoff(now):
 
 
 # ---------- close a paper trade ----------
-def _auto_close(trade, ltp, now, reason):
-    """Stamp exit fields and compute P&L on an OPEN trade. Mutates the dict."""
+def _derive_exit_level(trade, reason):
+    """Pick the Gann-level name to show alongside exit_spot.
+    SL_TRAIL → highest rung the trail had reached.
+    TARGET_X → strip prefix → e.g. 'T1', 'S2'.
+    Any other reason (manual, AUTO_SQUARE_OFF, SL_FUT_FIXED, etc.) → no level."""
+    if reason == "SL_TRAIL":
+        return trade.get("trail_high_rung")
+    if reason and reason.startswith("TARGET_"):
+        return reason.split("_", 1)[1]
+    return None
+
+
+def _auto_close(trade, ltp, now, reason, spot=None):
+    """Stamp exit fields and compute P&L on an OPEN trade. Mutates the dict.
+
+    `spot` (optional) records the underlying spot at exit so the UI
+    can show "exited at spot 76998 (S2)" instead of just the option
+    premium. Level name comes from `_derive_exit_level`."""
     trade["exit_time"]   = now.strftime("%H:%M:%S")
     trade["exit_ts"]     = now.timestamp()
     trade["exit_price"]  = round(ltp, 2)
     trade["exit_reason"] = reason
+    trade["exit_spot"]   = round(float(spot), 2) if spot is not None else None
+    trade["exit_level"]  = _derive_exit_level(trade, reason)
     if trade["order_type"] == "BUY":
         pnl = ltp - trade["entry_price"]
     else:

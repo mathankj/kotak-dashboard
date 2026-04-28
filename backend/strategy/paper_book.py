@@ -84,12 +84,14 @@ def _paper_execute_entry(row):
     return row
 
 
-def _paper_execute_exit(open_row, ltp, reason):
-    """Close a paper OPEN row at `ltp` with the given reason."""
+def _paper_execute_exit(open_row, ltp, reason, spot=None):
+    """Close a paper OPEN row at `ltp` with the given reason. `spot`
+    is the underlying spot at exit — recorded so the UI can show
+    'exited at spot N (level)'."""
     rows = read_paper_ledger()
     for t in rows:
         if t.get("id") == open_row.get("id") and t.get("status") == "OPEN":
-            _auto_close(t, float(ltp), now_ist(), reason)
+            _auto_close(t, float(ltp), now_ist(), reason, spot=spot)
             t["mode"] = "PAPER_BOOK"
             t["kotak_exit_order_id"] = None
             break
@@ -131,7 +133,14 @@ def paper_options_tick(option_data, option_index_meta, gann_quotes):
                 q = option_data.get(t.get("option_key"))
                 if not q or q.get("ltp") is None:
                     continue
-                _paper_execute_exit(t, float(q["ltp"]), "AUTO_SQUARE_OFF")
+                # Look up spot from gann_quotes for the row's
+                # underlying so the exit row records spot at exit.
+                so_key = (INDEX_OPTIONS_CONFIG.get(t.get("underlying"))
+                          or {}).get("spot_symbol_key")
+                so_val = ((gann_quotes.get(so_key) or {}).get("ltp")
+                          if so_key else None)
+                _paper_execute_exit(t, float(q["ltp"]), "AUTO_SQUARE_OFF",
+                                    spot=so_val)
             return
 
         if not _auto_in_hours(now):
@@ -197,7 +206,8 @@ def paper_options_tick(option_data, option_index_meta, gann_quotes):
                     ce_target_lvl, pe_target_lvl,
                 )
                 if reason and opt_ltp is not None:
-                    _paper_execute_exit(open_t, float(opt_ltp), reason)
+                    _paper_execute_exit(open_t, float(opt_ltp), reason,
+                                        spot=spot)
                     _paper_state["options_last_spot"][idx_name] = spot
                     continue
 
@@ -296,7 +306,14 @@ def paper_futures_tick(future_data, gann_quotes):
                 fut = future_data.get(idx_name)
                 if not fut or fut.get("ltp") is None:
                     continue
-                _paper_execute_exit(t, float(fut["ltp"]), "AUTO_SQUARE_OFF")
+                # Look up spot from gann_quotes for this underlying
+                # so the exit row records spot at exit.
+                so_key = (INDEX_OPTIONS_CONFIG.get(idx_name)
+                          or {}).get("spot_symbol_key")
+                so_val = ((gann_quotes.get(so_key) or {}).get("ltp")
+                          if so_key else None)
+                _paper_execute_exit(t, float(fut["ltp"]), "AUTO_SQUARE_OFF",
+                                    spot=so_val)
             return
 
         if not _auto_in_hours(now):
@@ -348,7 +365,8 @@ def paper_futures_tick(future_data, gann_quotes):
                     long_target_lvl, short_target_lvl,
                 )
                 if reason and fut_ltp is not None:
-                    _paper_execute_exit(open_t, float(fut_ltp), reason)
+                    _paper_execute_exit(open_t, float(fut_ltp), reason,
+                                        spot=spot)
                     _paper_state["futures_last_spot"][idx_name] = spot
                     continue
 

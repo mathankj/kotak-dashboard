@@ -95,6 +95,7 @@
           <th>Date</th><th>Scrip</th><th>Side</th>
           <th>Entry Time</th><th class="num">Entry</th>
           <th>Exit Time</th><th class="num">Exit</th>
+          <th class="num">Exit Spot</th>
           <th>Exit Reason</th>
           <th class="num">P&amp;L pts</th><th class="num">P&amp;L %</th>
           {% if cfg and cfg.stoploss.active == 'D' %}
@@ -118,6 +119,14 @@
             <td class="num">{{ t.get('entry_price', '') }}</td>
             <td>{{ t.get('exit_time', '') or '—' }}</td>
             <td class="num">{{ t.get('exit_price', '') or '—' }}</td>
+            {# Exit Spot — underlying spot at exit + Gann level (T1/S2…) when known #}
+            <td class="num">
+              {% set xs = t.get('exit_spot') %}
+              {% set xl = t.get('exit_level') %}
+              {% if xs is not none %}
+                {{ '%.2f'|format(xs) }}{% if xl %} ({{ xl }}){% endif %}
+              {% else %}—{% endif %}
+            </td>
             <td>{{ t.get('exit_reason', '') or '—' }}</td>
             {% set pl = t.get('pnl_points') %}
             <td class="num {% if pl is not none and pl >= 0 %}pos{% elif pl is not none %}neg{% endif %}">
