@@ -1,4 +1,20 @@
-apply_to: both
+engines:
+  paper:
+    enabled: true
+    apply_to: both
+  real:
+    enabled: true
+    apply_to: both
+indices:
+  NIFTY:
+    paper: true
+    real: true
+  BANKNIFTY:
+    paper: true
+    real: true
+  SENSEX:
+    paper: true
+    real: true
 timings:
   market_start: 09:15
   square_off: '15:15'
@@ -30,7 +46,54 @@ per_day_cap:
   NIFTY: null
   BANKNIFTY: null
   SENSEX: null
+risk:
+  max_daily_drawdown: null
 futures_round_step:
   NIFTY: 50
   BANKNIFTY: 100
   SENSEX: 100
+current_logic:
+  enabled: true
+reverse_logic:
+  enabled: false
+reverse_engine:
+  entry:
+    market_open_path: true
+    market_open_buy_level: BUY
+    market_open_sell_level: SELL
+    crossing_path: true
+    crossing_buy_level: BUY
+    crossing_sell_level: SELL
+  stoploss:
+    active: C
+    variant_a_drop_rs: 5.0
+    variant_a_buy_level: BUY
+    variant_a_sell_level: SELL
+    variant_b_drop_pct: 30.0
+    variant_b_buy_level: BUY
+    variant_b_sell_level: SELL
+    variant_c_buy_level: BUY
+    variant_c_sell_level: SELL
+  target:
+    ce_level: T1
+    pe_level: S1
+  indices:
+    NIFTY:
+      paper: true
+      real: true
+    BANKNIFTY:
+      paper: true
+      real: true
+    SENSEX:
+      paper: true
+      real: true
+  lots:
+    NIFTY: 1
+    BANKNIFTY: 1
+    SENSEX: 1
+  per_day_cap:
+    NIFTY: null
+    BANKNIFTY: null
+    SENSEX: null
+  risk:
+    max_daily_drawdown: null
