@@ -56,7 +56,10 @@ from backend.strategy.futures import (
 from backend.strategy.paper_book import (
     paper_options_tick, paper_futures_tick,
 )
-from backend.safety.kill_switch import is_halted, halt, halt_info
+from backend.safety.kill_switch import (
+    is_halted, halt, halt_info,
+    is_engine_halted, halt_engine, engine_halt_info,
+)
 from backend.safety.orders import (
     place_order_safe,
     RESULT_OK, RESULT_PAPER, RESULT_BLOCKED_HALTED,
@@ -1341,9 +1344,35 @@ def stop_confirm():
 # in Python — collapsing repeated calls during a 5 s window cuts CPU on the
 # request thread without losing freshness (the tile already updates on the
 # next page nav, and a closed-position P&L change is not real-time anyway).
-_TODAY_PNL_CACHE = {"ts": 0.0, "value": None}
+_TODAY_PNL_CACHE = {"ts": 0.0, "value": None, "by_engine": None}
 _TODAY_PNL_LOCK = threading.Lock()
 _TODAY_PNL_TTL = 5.0
+
+
+def _compute_today_pnl():
+    """Walk both ledgers once, return (combined_pnl, {engine: pnl}).
+    Used by both _today_pnl_cached and the per-engine drawdown check
+    so a single ledger pass populates both views."""
+    from backend.storage.paper_ledger import read_paper_ledger
+    real_today  = _filter_trades_by_range(read_trade_ledger(),  "today", "")
+    paper_today = _filter_trades_by_range(read_paper_ledger(),  "today", "")
+    combined = 0.0
+    by_engine = {"current": 0.0, "reverse": 0.0}
+    for t in (real_today + paper_today):
+        if t.get("status") != "CLOSED" or t.get("pnl_points") is None:
+            continue
+        try:
+            rs = float(t["pnl_points"]) * int(t.get("qty", 1))
+        except (TypeError, ValueError):
+            continue
+        combined += rs
+        eng = t.get("engine") or "current"
+        if eng in by_engine:
+            by_engine[eng] += rs
+        else:
+            # Future-proof: any new engine name shows up as its own bucket.
+            by_engine[eng] = by_engine.get(eng, 0.0) + rs
+    return round(combined, 2), {k: round(v, 2) for k, v in by_engine.items()}
 
 
 def _today_pnl_cached():
@@ -1352,23 +1381,22 @@ def _today_pnl_cached():
         if (now - _TODAY_PNL_CACHE["ts"]) < _TODAY_PNL_TTL:
             return _TODAY_PNL_CACHE["value"]
     try:
-        from backend.storage.paper_ledger import read_paper_ledger
-        real_today  = _filter_trades_by_range(read_trade_ledger(),  "today", "")
-        paper_today = _filter_trades_by_range(read_paper_ledger(),  "today", "")
-        s = 0.0
-        for t in (real_today + paper_today):
-            if t.get("status") == "CLOSED" and t.get("pnl_points") is not None:
-                try:
-                    s += float(t["pnl_points"]) * int(t.get("qty", 1))
-                except (TypeError, ValueError):
-                    pass
-        value = round(s, 2)
+        value, by_engine = _compute_today_pnl()
     except Exception:
-        value = None
+        value, by_engine = None, None
     with _TODAY_PNL_LOCK:
         _TODAY_PNL_CACHE["ts"] = now
         _TODAY_PNL_CACHE["value"] = value
+        _TODAY_PNL_CACHE["by_engine"] = by_engine
     return value
+
+
+def _today_pnl_by_engine_cached():
+    """Per-engine P&L for today, dict keyed by engine name. Shares the
+    same 5s cache as _today_pnl_cached — calling either populates both."""
+    _today_pnl_cached()
+    with _TODAY_PNL_LOCK:
+        return dict(_TODAY_PNL_CACHE["by_engine"] or {})
 
 
 @app.context_processor
@@ -1421,30 +1449,66 @@ def _check_drawdown_halt():
     repeatedly within a single tick. Audit + halt-flag write happen
     exactly once per breach because is_halted() flips True after the
     first call and short-circuits subsequent ticks.
+
+    Phase 3 — also checks per-engine thresholds. Each logic engine
+    (current/reverse) has its own max_daily_drawdown in config; if
+    that engine's P&L breaches its threshold and the OTHER engine is
+    still healthy, only that engine gets halted (halt_engine) rather
+    than the whole bot. The global threshold is unchanged — it still
+    halts everything when combined P&L is bad enough.
     """
     try:
-        if is_halted():
-            return
-        threshold = config_loader.max_daily_drawdown()
-        if not threshold:
-            return
+        # Always populate the per-engine cache so we get both views
+        # off a single ledger pass, even when global is already halted.
         pnl = _today_pnl_cached()
-        if pnl is None:
-            return
-        if pnl <= -float(threshold):
-            # Reason string is ASCII-only — halt() opens the flag file
-            # without an explicit encoding, and on Windows that's cp1252
-            # which would crash on the rupee glyph. "Rs." matches the
-            # convention already used in safety/orders.py messages.
-            reason = (f"auto-drawdown: today P&L Rs.{pnl:.2f} <= "
-                      f"-Rs.{int(threshold)} threshold")
-            halt(reason=reason)
-            try:
-                audit("AUTO_HALT_DRAWDOWN", today_pnl=pnl,
-                      threshold=int(threshold))
-            except Exception:
-                pass
-            print(f"[ticker] {reason} — kill switch engaged")
+        by_engine = _today_pnl_by_engine_cached()
+
+        # 1. Global combined-P&L threshold (unchanged from H.2).
+        if not is_halted():
+            threshold = config_loader.max_daily_drawdown()
+            if threshold and pnl is not None and pnl <= -float(threshold):
+                # Reason string is ASCII-only — halt() opens the flag file
+                # without an explicit encoding, and on Windows that's cp1252
+                # which would crash on the rupee glyph. "Rs." matches the
+                # convention already used in safety/orders.py messages.
+                reason = (f"auto-drawdown: today P&L Rs.{pnl:.2f} <= "
+                          f"-Rs.{int(threshold)} threshold")
+                halt(reason=reason)
+                try:
+                    audit("AUTO_HALT_DRAWDOWN", today_pnl=pnl,
+                          threshold=int(threshold))
+                except Exception:
+                    pass
+                print(f"[ticker] {reason} — kill switch engaged")
+
+        # 2. Per-engine threshold — independent of global. If the engine
+        # is already halted (via global flag OR its own per-engine flag)
+        # is_engine_halted short-circuits; we don't re-engage on every
+        # tick. Per-engine halt blocks NEW entries from that engine
+        # only — exits + square-off + the other engine keep running.
+        for eng in ("current", "reverse"):
+            if not config_loader.engine_enabled(eng):
+                continue
+            if is_engine_halted(eng):
+                continue
+            eng_threshold = config_loader.engine_max_daily_drawdown(eng)
+            if not eng_threshold:
+                continue
+            eng_pnl = by_engine.get(eng) if by_engine else None
+            if eng_pnl is None:
+                continue
+            if eng_pnl <= -float(eng_threshold):
+                reason = (f"auto-drawdown ({eng}): engine P&L "
+                          f"Rs.{eng_pnl:.2f} <= -Rs.{int(eng_threshold)} "
+                          f"threshold")
+                halt_engine(eng, reason=reason)
+                try:
+                    audit("AUTO_HALT_ENGINE_DRAWDOWN", engine=eng,
+                          engine_pnl=eng_pnl,
+                          threshold=int(eng_threshold))
+                except Exception:
+                    pass
+                print(f"[ticker] {reason} — {eng} engine halted")
     except Exception as e:
         # Best-effort guard. A drawdown-check failure must NOT kill the
         # ticker — strategy logic still needs to run for stoploss/exit.

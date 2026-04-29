@@ -446,6 +446,16 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                 eng_state["last_spot"][idx_name] = spot
                 continue
 
+            # Phase 3 — per-engine halt gate. is_halted is global; the
+            # per-engine flag is engaged automatically by auto-drawdown
+            # when this engine alone breaches its threshold. Either way,
+            # block NEW entries; exits + square-off above still run so
+            # OPEN positions can be cleaned up.
+            from backend.safety.kill_switch import is_halted, is_engine_halted
+            if is_halted() or is_engine_halted(engine):
+                eng_state["last_spot"][idx_name] = spot
+                continue
+
             # ---- ENTRY check ----
             # Two paths:
             #   (a) MARKET-OPEN evaluation — the first time we see this index

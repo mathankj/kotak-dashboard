@@ -252,6 +252,18 @@ def paper_options_tick(option_data, option_index_meta, gann_quotes,
                 eng_state["last_spot"][idx_name] = spot
                 continue
 
+            # Phase 3 — per-engine halt gate. Paper deliberately does
+            # NOT check the global is_halted flag (manual kill switch
+            # is for real-money safety; paper book is a research tool
+            # that should keep running). But auto-drawdown's per-engine
+            # flag DOES freeze paper too — when an engine has bled
+            # past its threshold, we want all simulation of that engine
+            # to stop so paper P&L stays a faithful proxy.
+            from backend.safety.kill_switch import is_engine_halted
+            if is_engine_halted(engine):
+                eng_state["last_spot"][idx_name] = spot
+                continue
+
             # ---- ENTRY check ----
             if (idx_name not in open_by_underlying
                     and _paper_can_open_more(idx_name)):
@@ -429,6 +441,15 @@ def paper_futures_tick(future_data, gann_quotes, engine="current"):
 
             # Per-index gate (paper sub-engine of this logic engine).
             if not config_loader.engine_index_enabled_for(engine, "paper", idx_name):
+                eng_state["last_spot"][idx_name] = spot
+                continue
+
+            # Phase 3 — per-engine halt gate. Paper deliberately ignores
+            # the global is_halted flag (research tool); per-engine halt
+            # still applies so auto-drawdown freezes paper sims of that
+            # engine alongside its real trades.
+            from backend.safety.kill_switch import is_engine_halted
+            if is_engine_halted(engine):
                 eng_state["last_spot"][idx_name] = spot
                 continue
 

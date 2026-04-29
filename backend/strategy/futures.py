@@ -366,6 +366,12 @@ def future_auto_strategy_tick(future_data, gann_quotes, client=None,
                 eng_state["last_spot"][idx_name] = spot
                 continue
 
+            # Phase 3 — per-engine halt gate. See options.py for rationale.
+            from backend.safety.kill_switch import is_halted, is_engine_halted
+            if is_halted() or is_engine_halted(engine):
+                eng_state["last_spot"][idx_name] = spot
+                continue
+
             # ---- ENTRY check ----
             if (idx_name not in open_by_underlying
                     and _can_open_more(idx_name, counts, engine=engine)):
