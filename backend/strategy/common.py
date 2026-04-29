@@ -162,16 +162,35 @@ def _compute_trail_for_trade(t, spot, spot_levels):
 
 
 # ---------- track best price reached so far ----------
-def _apply_mfe_and_trail(trades, quotes_by_symbol, trail_active, in_hours):
+def _apply_mfe_and_trail(trades, quotes_by_symbol, in_hours):
     """Mutate `trades` in place: bump max_min_target_price /
     target_level_reached and (variant D) trail_sl_price for every OPEN
     row. Returns True if anything changed (so the caller can persist).
 
+    Phase 3: engine-aware. Each open row carries an `engine` field
+    ("current" or "reverse"; legacy rows default to "current"). The
+    target_level_reached badge and the variant-D trail walk the row's
+    OWN ladder — open-anchored `levels` for current, low/high-anchored
+    `rev_levels` for reverse — and trail-active is decided per engine
+    (since current and reverse can pick different SL variants from
+    their respective `stoploss.active` configs).
+
     Same logic for live and paper books — only the storage differs."""
+    # Pre-resolve trail-active once per engine so we don't refetch the
+    # config for every open row.
+    trail_active_by_engine = {
+        "current": (config_loader.engine_block("current").get("stoploss") or {})
+                       .get("active") == "D",
+        "reverse": (config_loader.engine_block("reverse").get("stoploss") or {})
+                       .get("active") == "D",
+    }
     changed = False
     for t in trades:
         if t.get("status") != "OPEN":
             continue
+        engine = t.get("engine") or "current"
+        # Reverse-engine rows track target/trail along the rev ladder.
+        levels_key = "rev_levels" if engine == "reverse" else "levels"
 
         # ---- existing MFE block (unchanged for trades where q exists) ----
         q = quotes_by_symbol.get(t["scrip"])
@@ -188,7 +207,7 @@ def _apply_mfe_and_trail(trades, quotes_by_symbol, trail_active, in_hours):
                     changed = True
                 side_bs = "B" if t["order_type"] == "BUY" else "S"
                 reached = compute_target_level_reached(
-                    side_bs, t["entry_price"], new_mfe, q.get("levels"))
+                    side_bs, t["entry_price"], new_mfe, q.get(levels_key))
                 if reached and reached != t.get("target_level_reached"):
                     t["target_level_reached"] = reached
                     changed = True
@@ -196,14 +215,14 @@ def _apply_mfe_and_trail(trades, quotes_by_symbol, trail_active, in_hours):
         # ---- Variant D: trail SL — gated, walks SPOT ladder ----
         # Only in-hours; trail_sl_price is load-bearing for SL correctness
         # and must not ratchet on stale weekend prints.
-        if not (trail_active and in_hours):
+        if not (trail_active_by_engine.get(engine, False) and in_hours):
             continue
         try:
             spot_q = _resolve_spot_quote(t, quotes_by_symbol)
             if not spot_q:
                 continue
             spot = spot_q.get("ltp")
-            spot_levels = spot_q.get("levels") or {}
+            spot_levels = spot_q.get(levels_key) or {}
             if spot is None:
                 continue
             new_trail, new_high = _compute_trail_for_trade(
@@ -234,15 +253,17 @@ def update_open_trades_mfe(quotes_by_symbol):
     """For every OPEN trade in BOTH the live and paper ledgers, update
     max_min_target_price / target_level_reached / (variant D)
     trail_sl_price. Trail SL must apply to paper trades too — that's the
-    whole point of paper-mode validation."""
-    cfg = config_loader.get()
-    trail_active = cfg["stoploss"]["active"] == "D"
+    whole point of paper-mode validation.
+
+    Phase 3: trail-active and the levels ladder are decided per row
+    inside `_apply_mfe_and_trail` based on each row's `engine` field,
+    so this entry point no longer pre-computes a global trail-active."""
     in_hours = _auto_in_hours(now_ist())
 
     live = read_trade_ledger()
-    if _apply_mfe_and_trail(live, quotes_by_symbol, trail_active, in_hours):
+    if _apply_mfe_and_trail(live, quotes_by_symbol, in_hours):
         write_trade_ledger(live)
 
     paper = read_paper_ledger()
-    if _apply_mfe_and_trail(paper, quotes_by_symbol, trail_active, in_hours):
+    if _apply_mfe_and_trail(paper, quotes_by_symbol, in_hours):
         write_paper_ledger(paper)

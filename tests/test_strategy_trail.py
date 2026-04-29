@@ -369,3 +369,118 @@ def test_abc_variants_unchanged():
                                   buy_lvl=None, sell_lvl=None,
                                   ce_target_lvl=25100.0,
                                   pe_target_lvl=None) == "TARGET_T1"
+
+
+# ---- 9. engine-aware: reverse-engine row walks rev_levels ladder ----
+
+def test_trail_engine_aware_reverse_uses_rev_levels(isolated_trade_ledger):
+    """A reverse-engine OPEN row must trail along the `rev_levels`
+    ladder (low/high-anchored) — NOT the current-engine `levels`
+    (open-anchored) ladder. Also proves trail-active is decided per
+    engine: current on variant C (no trail) must not block reverse on
+    variant D (trail active).
+
+    Phase 3d regression guard: the previous _apply_mfe_and_trail walked
+    `q.get("levels")` for every row and read trail_active from a single
+    config slice, so a reverse-engine row would silently track the
+    wrong ladder while a current-engine variant-A/B/C config disabled
+    its trail entirely.
+    """
+    from backend.storage.trades import write_trade_ledger, read_trade_ledger
+    from backend.strategy.common import update_open_trades_mfe
+
+    rev_trade = _ce_open_trade()
+    rev_trade["engine"] = "reverse"
+    write_trade_ledger([rev_trade])
+
+    # Distinct ladders so the assertion proves WHICH was walked.
+    # rev ladder is offset +1000 from the current ladder.
+    levels_current = _nifty_levels()                 # centered at 25000
+    levels_reverse = {                               # centered at 26000
+        "buy":  {"BUY": 26050.0, "BUY_WA": 26075.0,
+                 "T1": 26100.0, "T2": 26150.0, "T3": 26200.0,
+                 "T4": 26250.0, "T5": 26300.0},
+        "sell": {"SELL": 25950.0, "SELL_WA": 25925.0,
+                 "S1": 25900.0, "S2": 25850.0, "S3": 25800.0,
+                 "S4": 25750.0, "S5": 25700.0},
+    }
+    quotes = {"NIFTY 50": {"ltp": 26110.0,
+                           "levels":     levels_current,
+                           "rev_levels": levels_reverse}}
+
+    # Current engine on variant C (no trail), reverse engine on variant
+    # D (trail active). engine_block synthesises 'current' from
+    # top-level keys and pulls 'reverse' from reverse_engine sub-dict.
+    cfg_full = {
+        "stoploss": {"active": "C"},
+        "target":   {"ce_level": "T1", "pe_level": "S1"},
+        "timings":  {"market_start": "09:15", "square_off": "15:15"},
+        "reverse_engine": {
+            "stoploss": {"active": "D"},
+            "target":   {"ce_level": "T1", "pe_level": "S1"},
+        },
+    }
+
+    with patch("backend.strategy.common.config_loader.get",
+               return_value=cfg_full), \
+         patch("backend.strategy.common.now_ist", return_value=_in_hours()):
+        update_open_trades_mfe(quotes)
+
+    rows = read_trade_ledger()
+    # Spot 26110 on rev ladder: highest rung where 26110 >= price is T1
+    # (idx 2, price 26100). trail = ladder[idx-1].price = BUY_WA = 26075.
+    # If the buggy code walked `levels` instead, spot 26110 is past T5
+    # (25300) so trail would have been 25250 (T4) — distinct value.
+    assert rows[0]["trail_sl_price"] == 26075.0, (
+        f"reverse-engine trail must walk rev_levels (BUY_WA=26075), "
+        f"got {rows[0].get('trail_sl_price')} — likely walked the "
+        f"current-engine `levels` ladder instead"
+    )
+    assert rows[0]["trail_high_rung"] == "T1"
+
+
+def test_trail_engine_aware_current_unaffected_by_reverse_variant(
+        isolated_trade_ledger):
+    """Mirror guard: a current-engine row must keep walking `levels`
+    even when reverse_engine.stoploss.active is set to D. Proves the
+    levels_key choice is per-row, not global."""
+    from backend.storage.trades import write_trade_ledger, read_trade_ledger
+    from backend.strategy.common import update_open_trades_mfe
+
+    cur_trade = _ce_open_trade()  # legacy / current — no engine field
+    write_trade_ledger([cur_trade])
+
+    levels_current = _nifty_levels()
+    levels_reverse = {
+        "buy":  {"BUY": 26050.0, "BUY_WA": 26075.0,
+                 "T1": 26100.0, "T2": 26150.0, "T3": 26200.0,
+                 "T4": 26250.0, "T5": 26300.0},
+        "sell": {"SELL": 25950.0, "SELL_WA": 25925.0,
+                 "S1": 25900.0, "S2": 25850.0, "S3": 25800.0,
+                 "S4": 25750.0, "S5": 25700.0},
+    }
+    # Spot inside the current ladder, well below the rev ladder.
+    quotes = {"NIFTY 50": {"ltp": 25160.0,
+                           "levels":     levels_current,
+                           "rev_levels": levels_reverse}}
+
+    cfg_full = {
+        "stoploss": {"active": "D"},
+        "target":   {"ce_level": "T1", "pe_level": "S1"},
+        "timings":  {"market_start": "09:15", "square_off": "15:15"},
+        "reverse_engine": {
+            "stoploss": {"active": "D"},
+            "target":   {"ce_level": "T1", "pe_level": "S1"},
+        },
+    }
+
+    with patch("backend.strategy.common.config_loader.get",
+               return_value=cfg_full), \
+         patch("backend.strategy.common.now_ist", return_value=_in_hours()):
+        update_open_trades_mfe(quotes)
+
+    rows = read_trade_ledger()
+    # Spot 25160 on current ladder: highest crossed = T2 (idx 3, 25150).
+    # trail = ladder[2].price = T1 = 25100.
+    assert rows[0]["trail_sl_price"] == 25100.0
+    assert rows[0]["trail_high_rung"] == "T2"
