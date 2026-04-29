@@ -87,18 +87,27 @@ AUTO_OPTION_STRATEGY_ENABLED = True
 
 
 _option_auto_state = {
-    "last_spot": {},        # index_name -> last seen spot
-    "open_evaluated": {},   # index_name -> "YYYY-MM-DD" once we've done the
-                            # market-open evaluation for that day. Resets at
-                            # midnight (in-memory, but counts[idx] from the
-                            # trade ledger is the persistent backstop — see
-                            # ENTRY block in option_auto_strategy_tick).
+    # Phase 2: per-engine state. Each logic engine ("current" / "reverse")
+    # tracks its own last_spot + open_evaluated independently so a CE entry
+    # on the current engine doesn't suppress a CE entry on the reverse
+    # engine (and vice-versa). The lock is shared — only one engine ticks
+    # at a time inside a single tick() call.
+    "current": {
+        "last_spot": {},        # index_name -> last seen spot
+        "open_evaluated": {},   # index_name -> "YYYY-MM-DD" once we've done
+                                # the market-open evaluation for that day.
+    },
+    "reverse": {
+        "last_spot": {},
+        "open_evaluated": {},
+    },
     "lock": threading.Lock(),
 }
 
 
 def _check_exit_reason(open_t, opt_ltp, spot,
-                       buy_lvl, sell_lvl, ce_target_lvl, pe_target_lvl):
+                       buy_lvl, sell_lvl, ce_target_lvl, pe_target_lvl,
+                       cfg=None):
     """Return the exit reason string for an open option trade, or None.
 
     =======================================================================
@@ -132,7 +141,11 @@ def _check_exit_reason(open_t, opt_ltp, spot,
     entry_price = open_t.get("entry_price")
     side = open_t.get("option_type")  # 'CE' or 'PE'
 
-    cfg = config_loader.get()
+    # Phase 2: when called from the per-engine tick, `cfg` is the engine
+    # block ({stoploss, target, ...}). Fall back to the top-level (current
+    # engine) config for legacy callers that don't pass cfg.
+    if cfg is None:
+        cfg = config_loader.engine_block("current")
     sl_cfg = cfg["stoploss"]
     active_sl = sl_cfg["active"]   # validated to A|B|C|D by loader
 
@@ -191,9 +204,10 @@ def _check_exit_reason(open_t, opt_ltp, spot,
     return None
 
 
-def _can_open_more(idx_name, counts):
-    """Per-day cap check. None (or missing) in config means unlimited."""
-    cap = config_loader.per_day_cap(idx_name)
+def _can_open_more(idx_name, counts, engine="current"):
+    """Per-day cap check. None (or missing) in config means unlimited.
+    Reads the engine-specific cap so the reverse engine has its own cap."""
+    cap = config_loader.engine_per_day_cap(engine, idx_name)
     if cap is None:
         return True
     return counts.get(idx_name, 0) < cap
@@ -291,32 +305,52 @@ def _compute_entry_signal(idx_name, spot, prev_spot, levels, cfg,
 
 
 def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
-                              client=None):
+                              client=None, engine="current"):
     """One tick of the option auto-strategy.
 
     option_data:        {key: {index, strike, option_type, ltp, ...}}
     option_index_meta:  {index_name: {spot, atm, expiry, ...}}
-    gann_quotes:        stock-side quotes (need .levels for the index spots)
+    gann_quotes:        stock-side quotes (need .levels / .rev_levels for the index spots)
     client:             Kotak NeoAPI client. Required when LIVE_MODE=True.
+    engine:             "current" (open-anchored Gann; default) or
+                        "reverse" (anchored to today's running intraday
+                        low/high — see strategy/gann.py reverse_buy_levels
+                        / reverse_sell_levels). The reverse engine reads
+                        gq["rev_levels"] and the `reverse_engine` config
+                        block, and tags every row/blocker with
+                        engine="reverse".
 
     Phase 4: every signal goes straight through place_order_safe and writes
     a trade row on success. No banner, no human confirm.
     """
     if not AUTO_OPTION_STRATEGY_ENABLED or not option_index_meta:
         return
-    # Engine gate — real engine on AND apply_to includes options.
+    # Phase 2 master flag — current_logic.enabled / reverse_logic.enabled.
+    if not config_loader.engine_enabled(engine):
+        return
+    # Engine gate — real (sub-)engine on AND apply_to includes options.
     if not config_loader.real_options_enabled():
         return
     now = now_ist()
 
+    # Engine-specific config block + state slot. Reverse uses `rev_levels`
+    # off gann_quotes; current uses `levels`.
+    cfg_eng    = config_loader.engine_block(engine)
+    eng_state  = _option_auto_state[engine]
+    levels_key = "rev_levels" if engine == "reverse" else "levels"
+
     with _option_auto_state["lock"]:
         trades = read_trade_ledger()
 
-        # 1. SQUARE OFF at/after 15:15 — close everything OPEN
+        # 1. SQUARE OFF at/after 15:15 — close everything OPEN for THIS engine
         if _auto_at_or_after_squareoff(now):
             for t in trades:
                 if (t.get("status") != "OPEN"
                         or t.get("asset_type") != "option"):
+                    continue
+                # Only close rows owned by this engine (legacy rows with
+                # no engine field are treated as 'current').
+                if (t.get("engine") or "current") != engine:
                     continue
                 q = option_data.get(t.get("option_key"))
                 if not q or q.get("ltp") is None:
@@ -326,22 +360,26 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                 so_meta = option_index_meta.get(t.get("underlying")) or {}
                 _execute_exit(t, float(q["ltp"]), "AUTO_SQUARE_OFF",
                               option_index_meta, client,
-                              spot=so_meta.get("spot"))
+                              spot=so_meta.get("spot"), engine=engine)
             return
 
         if not _auto_in_hours(now):
             return
 
-        # Daily per-index trade cap — counts trades placed today
+        # Daily per-index trade cap — counts trades placed today FOR THIS engine.
         today = now.strftime("%Y-%m-%d")
         counts = {}
         for t in trades:
-            if t.get("date") == today and t.get("asset_type") == "option":
+            if (t.get("date") == today
+                    and t.get("asset_type") == "option"
+                    and (t.get("engine") or "current") == engine):
                 u = t.get("underlying", "")
                 counts[u] = counts.get(u, 0) + 1
         open_by_underlying = {
             t["underlying"]: t for t in trades
-            if t.get("status") == "OPEN" and t.get("asset_type") == "option"
+            if (t.get("status") == "OPEN"
+                and t.get("asset_type") == "option"
+                and (t.get("engine") or "current") == engine)
         }
 
         for idx_name, m in option_index_meta.items():
@@ -351,27 +389,24 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                 continue
             gann_sym = INDEX_OPTIONS_CONFIG[idx_name]["spot_symbol_key"]
             gq = gann_quotes.get(gann_sym) or {}
-            levels  = gq.get("levels") or {}
-            cfg_full   = config_loader.get()
-            entry_cfg  = cfg_full["entry"]
-            sl_cfg_idx = cfg_full["stoploss"]
-            cfg_target = cfg_full["target"]
+            levels  = gq.get(levels_key) or {}
+            entry_cfg  = cfg_eng["entry"]
+            sl_cfg_idx = cfg_eng["stoploss"]
+            cfg_target = cfg_eng["target"]
             # Per-row level resolution (Ganesh's BUY/BUY_WA + SELL/SELL_WA dropdowns):
             # entry uses market_open_* / crossing_* picks.
             # variant C exit uses variant_c_* picks (CE exit if spot < sell pick;
             # PE exit if spot > buy pick).
-            mo_buy_lvl   = config_loader.resolve_buy_level (levels, entry_cfg["market_open_buy_level"])
-            mo_sell_lvl  = config_loader.resolve_sell_level(levels, entry_cfg["market_open_sell_level"])
-            cr_buy_lvl   = config_loader.resolve_buy_level (levels, entry_cfg["crossing_buy_level"])
-            cr_sell_lvl  = config_loader.resolve_sell_level(levels, entry_cfg["crossing_sell_level"])
+            cr_buy_lvl   = config_loader.resolve_buy_level (levels, entry_cfg["crossing_buy_level"])  # noqa: F841
+            cr_sell_lvl  = config_loader.resolve_sell_level(levels, entry_cfg["crossing_sell_level"]) # noqa: F841
             slc_buy_lvl  = config_loader.resolve_buy_level (levels, sl_cfg_idx["variant_c_buy_level"])
             slc_sell_lvl = config_loader.resolve_sell_level(levels, sl_cfg_idx["variant_c_sell_level"])
-            # Profit-target levels per config: CE side reads from `buy`
+            # Profit-target levels per engine config: CE side reads from `buy`
             # group (BUY/BUY_WA/T1/T2/T3); PE side reads from `sell` group
             # (SELL/SELL_WA/S1/S2/S3).
             ce_target_lvl = (levels.get("buy")  or {}).get(cfg_target["ce_level"])
             pe_target_lvl = (levels.get("sell") or {}).get(cfg_target["pe_level"])
-            prev_spot = _option_auto_state["last_spot"].get(idx_name)
+            prev_spot = eng_state["last_spot"].get(idx_name)
 
             # ---- EXIT check ----
             open_t = open_by_underlying.get(idx_name)
@@ -394,19 +429,21 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                     open_t, opt_ltp, spot,
                     slc_buy_lvl, slc_sell_lvl,
                     ce_target_lvl, pe_target_lvl,
+                    cfg=cfg_eng,
                 )
                 if reason and opt_ltp is not None:
                     _execute_exit(open_t, float(opt_ltp), reason,
-                                  option_index_meta, client, spot=spot)
-                    _option_auto_state["last_spot"][idx_name] = spot
+                                  option_index_meta, client, spot=spot,
+                                  engine=engine)
+                    eng_state["last_spot"][idx_name] = spot
                     continue
 
             # Per-index gate: when Ganesh unticks this index for the
-            # real engine on the config page, skip ENTRY here. Exits +
-            # square-off above still run so any already-OPEN position
-            # gets cleaned up (we never strand a live position).
-            if not config_loader.index_enabled_for("real", idx_name):
-                _option_auto_state["last_spot"][idx_name] = spot
+            # real (sub-)engine of this logic engine on the config page,
+            # skip ENTRY here. Exits + square-off above still run so any
+            # already-OPEN position gets cleaned up.
+            if not config_loader.engine_index_enabled_for(engine, "real", idx_name):
+                eng_state["last_spot"][idx_name] = spot
                 continue
 
             # ---- ENTRY check ----
@@ -420,15 +457,14 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
             #   (b) CROSSING — for every subsequent tick, the original strict
             #       "prev_spot ≤ BUY < spot" rule applies.
             if (idx_name not in open_by_underlying
-                    and _can_open_more(idx_name, counts)):
+                    and _can_open_more(idx_name, counts, engine=engine)):
                 today_str = today  # already computed above
                 already_evaluated_open = (
-                    _option_auto_state["open_evaluated"].get(idx_name)
-                        == today_str
+                    eng_state["open_evaluated"].get(idx_name) == today_str
                     or counts.get(idx_name, 0) > 0
                 )
                 option_type, stamp_now = _compute_entry_signal(
-                    idx_name, spot, prev_spot, levels, cfg_full,
+                    idx_name, spot, prev_spot, levels, cfg_eng,
                     already_evaluated_open=already_evaluated_open,
                 )
                 if stamp_now:
@@ -436,11 +472,11 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                     # disabled — mark evaluated so we don't re-check
                     # market-open every tick. (Crossing branch never
                     # needs a stamp.)
-                    _option_auto_state["open_evaluated"][idx_name] = today_str
+                    eng_state["open_evaluated"][idx_name] = today_str
                 # If option_type IS set on the market-open path, the
-                # stamp is deferred — it lands at ~line 379 just before
-                # _execute_entry, so a missing opt_ltp at this exact
-                # tick won't burn the open-evaluation slot for the day.
+                # stamp is deferred — it lands just before _execute_entry,
+                # so a missing opt_ltp at this exact tick won't burn the
+                # open-evaluation slot for the day.
 
                 if option_type:
                     opt_key = f"{idx_name} {atm} {option_type}"
@@ -451,38 +487,46 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                         # ultimately succeeds, blocks on margin, or hits a
                         # Kotak error). Either way we tried — don't burn the
                         # slot earlier when LTP might still be missing.
-                        _option_auto_state["open_evaluated"][idx_name] = today_str
+                        eng_state["open_evaluated"][idx_name] = today_str
                         # Same entry_reason derivation as the paper book —
                         # feeds the new "Entry Reason" column on /trades.
                         entry_reason = _derive_option_entry_reason(
                             option_type, already_evaluated_open, entry_cfg,
                         )
+                        if engine == "reverse" and entry_reason:
+                            entry_reason = "REV_" + entry_reason
                         placed = _execute_entry(
                             idx_name, atm, option_type, opt_key,
                             float(opt_ltp), float(spot),
                             m.get("expiry"), client,
                             entry_reason=entry_reason,
                             option_quote=opt_q,
+                            engine=engine,
                         )
                         if placed:
                             counts[idx_name] = counts.get(idx_name, 0) + 1
 
-            _option_auto_state["last_spot"][idx_name] = spot
+            eng_state["last_spot"][idx_name] = spot
 
 
 def _execute_entry(idx_name, atm, option_type, opt_key,
                    opt_ltp, spot, expiry, client,
-                   entry_reason=None, option_quote=None):
+                   entry_reason=None, option_quote=None, engine="current"):
     """Place a real BUY order via place_order_safe and write trade ledger row.
 
     Returns True if the order was PLACED (LIVE) or recorded (PAPER), False
     if it was refused. The caller uses this to decide whether to bump the
     daily count.
+
+    `engine` is the logic engine name ("current" or "reverse") — written
+    onto the trade row and the blocker row so /trades and /blockers can
+    show which logic engine fired.
     """
     cfg = INDEX_OPTIONS_CONFIG.get(idx_name) or {}
     lot_size = cfg.get("lot_size")
     if not lot_size:
-        audit("ORDER_REFUSED_NO_LOT_SIZE", scrip=opt_key, idx=idx_name)
+        audit("ORDER_REFUSED_NO_LOT_SIZE", scrip=opt_key, idx=idx_name,
+              engine=engine)
         append_blocked(
             kind="ENTRY", scrip=opt_key, side="B", qty=0, price=opt_ltp,
             result="NO_LOT_SIZE",
@@ -490,15 +534,18 @@ def _execute_entry(idx_name, atm, option_type, opt_key,
             underlying=idx_name, strike=atm, option_type=option_type,
             trigger_spot=spot,
             trigger_level="BUY" if option_type == "CE" else "SELL",
+            engine=engine,
         )
         return False
-    # Apply user-configured lot multiplier from config.yaml. Final qty =
-    # broker's lot_size × multiplier (e.g. NIFTY 65 × 2 = 130 qty).
-    qty = lot_size * config_loader.lot_multiplier(idx_name)
+    # Apply user-configured lot multiplier — engine-specific (current vs
+    # reverse can have different lot sizes). Final qty = broker's lot_size ×
+    # multiplier (e.g. NIFTY 65 × 2 = 130 qty).
+    qty = lot_size * config_loader.engine_lot_multiplier(engine, idx_name)
     trading_symbol = _option_trading_symbol(idx_name, atm, option_type, expiry)
     if not trading_symbol:
         audit("ORDER_REFUSED_NO_TRADING_SYMBOL",
-              scrip=opt_key, idx=idx_name, expiry=str(expiry))
+              scrip=opt_key, idx=idx_name, expiry=str(expiry),
+              engine=engine)
         append_blocked(
             kind="ENTRY", scrip=opt_key, side="B", qty=qty, price=opt_ltp,
             result="NO_TRADING_SYMBOL",
@@ -506,6 +553,7 @@ def _execute_entry(idx_name, atm, option_type, opt_key,
             underlying=idx_name, strike=atm, option_type=option_type,
             trigger_spot=spot,
             trigger_level="BUY" if option_type == "CE" else "SELL",
+            engine=engine,
         )
         return False
 
@@ -534,6 +582,7 @@ def _execute_entry(idx_name, atm, option_type, opt_key,
             underlying=idx_name, strike=atm, option_type=option_type,
             trading_symbol=trading_symbol, trigger_spot=spot,
             trigger_level="BUY" if option_type == "CE" else "SELL",
+            engine=engine,
         )
         return False
 
@@ -549,6 +598,8 @@ def _execute_entry(idx_name, atm, option_type, opt_key,
         "option_key": opt_key,
         "asset_type": "option",
         "underlying": idx_name,
+        # Phase 2: which logic engine fired this trade.
+        "engine": engine,
         "strike": atm,
         "option_type": option_type,
         "expiry": str(expiry) if expiry else None,
@@ -582,12 +633,13 @@ def _execute_entry(idx_name, atm, option_type, opt_key,
     trades.insert(0, row)
     write_trade_ledger(trades)
     audit("AUTO_ENTRY_PLACED", scrip=opt_key, mode=mode,
-          kotak_order_id=kotak_order_id, qty=qty, price=opt_ltp)
+          kotak_order_id=kotak_order_id, qty=qty, price=opt_ltp,
+          engine=engine)
     return True
 
 
 def _execute_exit(open_trade, opt_ltp, reason, option_index_meta, client,
-                  spot=None):
+                  spot=None, engine=None):
     """Place a real SELL order to close `open_trade` and update the ledger.
 
     LIVE only: verify with Kotak that the position is still open before
@@ -596,7 +648,13 @@ def _execute_exit(open_trade, opt_ltp, reason, option_index_meta, client,
 
     `spot` records the underlying spot at exit so the closed row carries
     the spot value and Gann level (T1/S2/etc.) for the UI.
+
+    `engine` (optional) overrides the open trade's stored engine name.
+    If not given, the open trade's engine field is used (legacy rows
+    without one fall back to "current").
     """
+    if engine is None:
+        engine = open_trade.get("engine") or "current"
     opt_key = open_trade.get("option_key")
     idx_name = open_trade.get("underlying")
     cfg = INDEX_OPTIONS_CONFIG.get(idx_name) or {}
@@ -608,20 +666,22 @@ def _execute_exit(open_trade, opt_ltp, reason, option_index_meta, client,
                           (option_index_meta.get(idx_name) or {}).get("expiry"),
                       ))
     if not trading_symbol:
-        audit("EXIT_REFUSED_NO_TRADING_SYMBOL", scrip=opt_key)
+        audit("EXIT_REFUSED_NO_TRADING_SYMBOL", scrip=opt_key, engine=engine)
         append_blocked(
             kind="EXIT", scrip=opt_key, side="S", qty=int(lot_size),
             price=opt_ltp, result="NO_TRADING_SYMBOL",
             message="Could not build trading symbol for exit",
             underlying=idx_name, strike=open_trade.get("strike"),
             option_type=open_trade.get("option_type"),
+            engine=engine,
         )
         return False
 
     # LIVE only: verify Kotak shows the position open before exit.
     if LIVE_MODE:
         if client is None:
-            audit("EXIT_REFUSED_NO_CLIENT", scrip=opt_key, reason=reason)
+            audit("EXIT_REFUSED_NO_CLIENT", scrip=opt_key, reason=reason,
+                  engine=engine)
             append_blocked(
                 kind="EXIT", scrip=opt_key, side="S", qty=int(lot_size),
                 price=opt_ltp, result="NO_CLIENT",
@@ -629,13 +689,14 @@ def _execute_exit(open_trade, opt_ltp, reason, option_index_meta, client,
                 underlying=idx_name, strike=open_trade.get("strike"),
                 option_type=open_trade.get("option_type"),
                 trading_symbol=trading_symbol,
+                engine=engine,
             )
             return False
         ok, info = verify_open_position(client, trading_symbol, side="BUY")
         if not ok:
             audit("EXIT_REFUSED_NO_KOTAK_POSITION",
                   scrip=opt_key, trading_symbol=trading_symbol,
-                  kotak_info=info)
+                  kotak_info=info, engine=engine)
             append_blocked(
                 kind="EXIT", scrip=opt_key, side="S", qty=int(lot_size),
                 price=opt_ltp, result="NO_KOTAK_POSITION",
@@ -644,6 +705,7 @@ def _execute_exit(open_trade, opt_ltp, reason, option_index_meta, client,
                 underlying=idx_name, strike=open_trade.get("strike"),
                 option_type=open_trade.get("option_type"),
                 trading_symbol=trading_symbol,
+                engine=engine,
             )
             return False
 
@@ -670,6 +732,7 @@ def _execute_exit(open_trade, opt_ltp, reason, option_index_meta, client,
             underlying=idx_name, strike=open_trade.get("strike"),
             option_type=open_trade.get("option_type"),
             trading_symbol=trading_symbol,
+            engine=engine,
         )
         return False
 
@@ -703,5 +766,6 @@ def _execute_exit(open_trade, opt_ltp, reason, option_index_meta, client,
             break
     write_trade_ledger(trades)
     audit("AUTO_EXIT_PLACED", scrip=opt_key, mode=mode, reason=reason,
-          kotak_order_id=kotak_order_id, qty=qty, price=opt_ltp)
+          kotak_order_id=kotak_order_id, qty=qty, price=opt_ltp,
+          engine=engine)
     return True

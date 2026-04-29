@@ -23,10 +23,18 @@ from backend.utils import now_ist
 _paper_state = {
     "options_lock": threading.Lock(),
     "futures_lock": threading.Lock(),
-    "options_open_evaluated": {},
-    "futures_open_evaluated": {},
-    "options_last_spot": {},
-    "futures_last_spot": {},
+    # Phase 2: per-engine state nested under engine name. Each logic
+    # engine ("current" / "reverse") has its own market-open evaluation
+    # marker and last-spot tracker so they don't suppress each other's
+    # signals when they happen to fire on the same index.
+    "options": {
+        "current": {"open_evaluated": {}, "last_spot": {}},
+        "reverse": {"open_evaluated": {}, "last_spot": {}},
+    },
+    "futures": {
+        "current": {"open_evaluated": {}, "last_spot": {}},
+        "reverse": {"open_evaluated": {}, "last_spot": {}},
+    },
 }
 
 
@@ -99,13 +107,20 @@ def _paper_execute_exit(open_row, ltp, reason, spot=None):
 
 
 # ---------- high-level ticks ----------
-def paper_options_tick(option_data, option_index_meta, gann_quotes):
+def paper_options_tick(option_data, option_index_meta, gann_quotes,
+                       engine="current"):
     """Paper analogue of option_auto_strategy_tick.
 
     No `client` param — never sends orders. Reuses the SAME entry
     signal + exit reason functions as the live tick (imported lazily
     from backend.strategy.options) — single source of truth for
     strategy logic.
+
+    engine: "current" (open-anchored Gann; default) or "reverse"
+    (anchored to today's intraday low/high). The reverse engine reads
+    gq["rev_levels"] and the `reverse_engine` config block, filters the
+    paper ledger by engine field, and tags every new row with
+    engine="reverse".
     """
     # Lazy import to avoid module-load cycles.
     from backend.strategy.options import (
@@ -115,20 +130,34 @@ def paper_options_tick(option_data, option_index_meta, gann_quotes):
 
     if not option_index_meta:
         return
+    # Phase 2 master flag — current_logic.enabled / reverse_logic.enabled.
+    if not config_loader.engine_enabled(engine):
+        return
+    # Paper sub-engine on AND apply_to includes options.
     if not config_loader.paper_options_enabled():
         return
 
     now = now_ist()
 
+    # Engine-specific config block + state slot. Reverse uses `rev_levels`
+    # off gann_quotes; current uses `levels`.
+    cfg_eng    = config_loader.engine_block(engine)
+    eng_state  = _paper_state["options"][engine]
+    levels_key = "rev_levels" if engine == "reverse" else "levels"
+
     with _paper_state["options_lock"]:
         rows = read_paper_ledger()
         today = now.strftime("%Y-%m-%d")
 
-        # 1. SQUARE OFF at/after configured square_off — close all OPEN
+        # 1. SQUARE OFF at/after configured square_off — close OPEN rows
+        # for THIS engine only. Legacy rows with no engine field count
+        # as 'current'.
         if _auto_at_or_after_squareoff(now):
             for t in rows:
                 if (t.get("status") != "OPEN"
                         or t.get("asset_type") != "option"):
+                    continue
+                if (t.get("engine") or "current") != engine:
                     continue
                 q = option_data.get(t.get("option_key"))
                 if not q or q.get("ltp") is None:
@@ -146,28 +175,32 @@ def paper_options_tick(option_data, option_index_meta, gann_quotes):
         if not _auto_in_hours(now):
             return
 
-        # Paper-side counts — independent of live ledger.
+        # Paper-side counts — independent of live ledger AND scoped per
+        # engine so current+reverse don't share daily caps.
         paper_counts = {}
         for r in rows:
             if (r.get("asset_type") == "option"
-                    and r.get("date") == today):
+                    and r.get("date") == today
+                    and (r.get("engine") or "current") == engine):
                 u = r.get("underlying")
                 if u:
                     paper_counts[u] = paper_counts.get(u, 0) + 1
         open_by_underlying = {
             t["underlying"]: t for t in rows
-            if t.get("status") == "OPEN" and t.get("asset_type") == "option"
+            if (t.get("status") == "OPEN"
+                and t.get("asset_type") == "option"
+                and (t.get("engine") or "current") == engine)
         }
 
         def _paper_can_open_more(idx_name):
-            cap = config_loader.per_day_cap(idx_name)
+            cap = config_loader.engine_per_day_cap(engine, idx_name)
             if cap is None:
                 return True
             return paper_counts.get(idx_name, 0) < cap
 
-        cfg_full   = config_loader.get()
-        sl_cfg_idx = cfg_full["stoploss"]
-        cfg_target = cfg_full["target"]
+        sl_cfg_idx = cfg_eng["stoploss"]
+        cfg_target = cfg_eng["target"]
+        entry_cfg  = cfg_eng["entry"]
 
         for idx_name, m in option_index_meta.items():
             spot = m.get("spot")
@@ -176,12 +209,12 @@ def paper_options_tick(option_data, option_index_meta, gann_quotes):
                 continue
             gann_sym = INDEX_OPTIONS_CONFIG[idx_name]["spot_symbol_key"]
             gq = gann_quotes.get(gann_sym) or {}
-            levels = gq.get("levels") or {}
+            levels = gq.get(levels_key) or {}
             slc_buy_lvl  = config_loader.resolve_buy_level (levels, sl_cfg_idx["variant_c_buy_level"])
             slc_sell_lvl = config_loader.resolve_sell_level(levels, sl_cfg_idx["variant_c_sell_level"])
             ce_target_lvl = (levels.get("buy")  or {}).get(cfg_target["ce_level"])
             pe_target_lvl = (levels.get("sell") or {}).get(cfg_target["pe_level"])
-            prev_spot = _paper_state["options_last_spot"].get(idx_name)
+            prev_spot = eng_state["last_spot"].get(idx_name)
 
             # ---- EXIT check ----
             open_t = open_by_underlying.get(idx_name)
@@ -204,48 +237,50 @@ def paper_options_tick(option_data, option_index_meta, gann_quotes):
                     open_t, opt_ltp, spot,
                     slc_buy_lvl, slc_sell_lvl,
                     ce_target_lvl, pe_target_lvl,
+                    cfg=cfg_eng,
                 )
                 if reason and opt_ltp is not None:
                     _paper_execute_exit(open_t, float(opt_ltp), reason,
                                         spot=spot)
-                    _paper_state["options_last_spot"][idx_name] = spot
+                    eng_state["last_spot"][idx_name] = spot
                     continue
 
-            # Per-index gate (paper engine). Exits above already ran;
-            # block only new entries when this index is unticked.
-            if not config_loader.index_enabled_for("paper", idx_name):
-                _paper_state["options_last_spot"][idx_name] = spot
+            # Per-index gate (paper sub-engine of this logic engine).
+            # Exits above already ran; block only new entries when this
+            # index is unticked.
+            if not config_loader.engine_index_enabled_for(engine, "paper", idx_name):
+                eng_state["last_spot"][idx_name] = spot
                 continue
 
             # ---- ENTRY check ----
             if (idx_name not in open_by_underlying
                     and _paper_can_open_more(idx_name)):
                 already_evaluated_open = (
-                    _paper_state["options_open_evaluated"].get(idx_name)
-                        == today
+                    eng_state["open_evaluated"].get(idx_name) == today
                     or paper_counts.get(idx_name, 0) > 0
                 )
                 option_type, stamp_now = _compute_entry_signal(
-                    idx_name, spot, prev_spot, levels, cfg_full,
+                    idx_name, spot, prev_spot, levels, cfg_eng,
                     already_evaluated_open=already_evaluated_open,
                 )
                 if stamp_now:
-                    _paper_state["options_open_evaluated"][idx_name] = today
+                    eng_state["open_evaluated"][idx_name] = today
 
                 if option_type:
                     opt_key = f"{idx_name} {atm} {option_type}"
                     opt_q = option_data.get(opt_key)
                     opt_ltp = (opt_q or {}).get("ltp")
                     if opt_ltp is not None:
-                        _paper_state["options_open_evaluated"][idx_name] = today
-                        cfg = INDEX_OPTIONS_CONFIG.get(idx_name) or {}
-                        lot_size = cfg.get("lot_size") or 0
-                        qty = lot_size * config_loader.lot_multiplier(idx_name)
+                        eng_state["open_evaluated"][idx_name] = today
+                        idx_cfg = INDEX_OPTIONS_CONFIG.get(idx_name) or {}
+                        lot_size = idx_cfg.get("lot_size") or 0
+                        qty = lot_size * config_loader.engine_lot_multiplier(engine, idx_name)
                         trading_symbol = _option_trading_symbol(
                             idx_name, atm, option_type, m.get("expiry"))
                         entry_reason = _derive_option_entry_reason(
-                            option_type, already_evaluated_open,
-                            cfg_full["entry"])
+                            option_type, already_evaluated_open, entry_cfg)
+                        if engine == "reverse" and entry_reason:
+                            entry_reason = "REV_" + entry_reason
                         row = {
                             "date": today,
                             "scrip": opt_key,
@@ -278,15 +313,18 @@ def paper_options_tick(option_data, option_index_meta, gann_quotes):
                             "pnl_points": None, "pnl_pct": None,
                             "duration_seconds": None,
                             "auto": True,
+                            # Phase 2: which logic engine fired this trade.
+                            "engine": engine,
                         }
                         _paper_execute_entry(row)
                         paper_counts[idx_name] = paper_counts.get(idx_name, 0) + 1
 
-            _paper_state["options_last_spot"][idx_name] = spot
+            eng_state["last_spot"][idx_name] = spot
 
 
-def paper_futures_tick(future_data, gann_quotes):
-    """Paper analogue of future_auto_strategy_tick. See above."""
+def paper_futures_tick(future_data, gann_quotes, engine="current"):
+    """Paper analogue of future_auto_strategy_tick. See paper_options_tick
+    for engine semantics."""
     from backend.strategy.futures import (
         _compute_futures_entry_signal, _check_futures_exit_reason,
         _round_for_buy, _round_for_sell,
@@ -294,10 +332,16 @@ def paper_futures_tick(future_data, gann_quotes):
 
     if not future_data:
         return
+    if not config_loader.engine_enabled(engine):
+        return
     if not config_loader.paper_futures_enabled():
         return
 
     now = now_ist()
+
+    cfg_eng    = config_loader.engine_block(engine)
+    eng_state  = _paper_state["futures"][engine]
+    levels_key = "rev_levels" if engine == "reverse" else "levels"
 
     with _paper_state["futures_lock"]:
         rows = read_paper_ledger()
@@ -307,6 +351,8 @@ def paper_futures_tick(future_data, gann_quotes):
             for t in rows:
                 if (t.get("status") != "OPEN"
                         or t.get("asset_type") != "future"):
+                    continue
+                if (t.get("engine") or "current") != engine:
                     continue
                 idx_name = t.get("underlying")
                 fut = future_data.get(idx_name)
@@ -325,27 +371,31 @@ def paper_futures_tick(future_data, gann_quotes):
         if not _auto_in_hours(now):
             return
 
+        # Per-engine paper counts + open-by-underlying.
         paper_counts = {}
         for r in rows:
             if (r.get("asset_type") == "future"
-                    and r.get("date") == today):
+                    and r.get("date") == today
+                    and (r.get("engine") or "current") == engine):
                 u = r.get("underlying")
                 if u:
                     paper_counts[u] = paper_counts.get(u, 0) + 1
         open_by_underlying = {
             t["underlying"]: t for t in rows
-            if t.get("status") == "OPEN" and t.get("asset_type") == "future"
+            if (t.get("status") == "OPEN"
+                and t.get("asset_type") == "future"
+                and (t.get("engine") or "current") == engine)
         }
 
         def _paper_can_open_more(idx_name):
-            cap = config_loader.per_day_cap(idx_name)
+            cap = config_loader.engine_per_day_cap(engine, idx_name)
             if cap is None:
                 return True
             return paper_counts.get(idx_name, 0) < cap
 
-        cfg = config_loader.get()
-        sl_cfg_idx = cfg["stoploss"]
-        target_cfg = cfg["target"]
+        sl_cfg_idx = cfg_eng["stoploss"]
+        target_cfg = cfg_eng["target"]
+        entry_cfg  = cfg_eng["entry"]
 
         for idx_name, fut in future_data.items():
             spot_q_key = INDEX_OPTIONS_CONFIG[idx_name]["spot_symbol_key"]
@@ -354,12 +404,12 @@ def paper_futures_tick(future_data, gann_quotes):
             if spot is None:
                 continue
             spot = float(spot)
-            levels = gq.get("levels") or {}
+            levels = gq.get(levels_key) or {}
             slc_buy_lvl  = config_loader.resolve_buy_level (levels, sl_cfg_idx["variant_c_buy_level"])
             slc_sell_lvl = config_loader.resolve_sell_level(levels, sl_cfg_idx["variant_c_sell_level"])
             long_target_lvl  = (levels.get("buy")  or {}).get(target_cfg["ce_level"])
             short_target_lvl = (levels.get("sell") or {}).get(target_cfg["pe_level"])
-            prev_spot = _paper_state["futures_last_spot"].get(idx_name)
+            prev_spot = eng_state["last_spot"].get(idx_name)
             fut_ltp = fut.get("ltp")
 
             # ---- EXIT check ----
@@ -369,44 +419,46 @@ def paper_futures_tick(future_data, gann_quotes):
                     open_t, fut_ltp, spot,
                     slc_buy_lvl, slc_sell_lvl,
                     long_target_lvl, short_target_lvl,
+                    cfg=cfg_eng,
                 )
                 if reason and fut_ltp is not None:
                     _paper_execute_exit(open_t, float(fut_ltp), reason,
                                         spot=spot)
-                    _paper_state["futures_last_spot"][idx_name] = spot
+                    eng_state["last_spot"][idx_name] = spot
                     continue
 
-            # Per-index gate (paper engine). Block only new entries.
-            if not config_loader.index_enabled_for("paper", idx_name):
-                _paper_state["futures_last_spot"][idx_name] = spot
+            # Per-index gate (paper sub-engine of this logic engine).
+            if not config_loader.engine_index_enabled_for(engine, "paper", idx_name):
+                eng_state["last_spot"][idx_name] = spot
                 continue
 
             # ---- ENTRY check ----
             if (idx_name not in open_by_underlying
                     and _paper_can_open_more(idx_name)):
                 already_evaluated_open = (
-                    _paper_state["futures_open_evaluated"].get(idx_name)
-                        == today
+                    eng_state["open_evaluated"].get(idx_name) == today
                     or paper_counts.get(idx_name, 0) > 0
                 )
                 side, stamp_now = _compute_futures_entry_signal(
-                    idx_name, spot, prev_spot, levels, cfg,
+                    idx_name, spot, prev_spot, levels, cfg_eng,
                     already_evaluated_open=already_evaluated_open,
                 )
                 if stamp_now:
-                    _paper_state["futures_open_evaluated"][idx_name] = today
+                    eng_state["open_evaluated"][idx_name] = today
 
                 if side and fut_ltp is not None:
-                    _paper_state["futures_open_evaluated"][idx_name] = today
+                    eng_state["open_evaluated"][idx_name] = today
                     sdk_lot_size = fut.get("lot_size") or 0
-                    qty = int(sdk_lot_size) * config_loader.lot_multiplier(idx_name)
+                    qty = int(sdk_lot_size) * config_loader.engine_lot_multiplier(engine, idx_name)
                     step = config_loader.futures_round_step(idx_name)
                     if side == "BUY":
                         limit_price = _round_for_buy(fut_ltp, step)
                     else:
                         limit_price = _round_for_sell(fut_ltp, step)
                     entry_reason = _derive_futures_entry_reason(
-                        side, already_evaluated_open, cfg["entry"])
+                        side, already_evaluated_open, entry_cfg)
+                    if engine == "reverse" and entry_reason:
+                        entry_reason = "REV_" + entry_reason
                     row = {
                         "date": today,
                         "scrip": f"{idx_name} FUT",
@@ -437,8 +489,10 @@ def paper_futures_tick(future_data, gann_quotes):
                         "pnl_points": None, "pnl_pct": None,
                         "duration_seconds": None,
                         "auto": True,
+                        # Phase 2: which logic engine fired this trade.
+                        "engine": engine,
                     }
                     _paper_execute_entry(row)
                     paper_counts[idx_name] = paper_counts.get(idx_name, 0) + 1
 
-            _paper_state["futures_last_spot"][idx_name] = spot
+            eng_state["last_spot"][idx_name] = spot

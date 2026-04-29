@@ -70,9 +70,15 @@ AUTO_FUTURE_STRATEGY_ENABLED = True
 
 
 _future_auto_state = {
-    "last_spot": {},        # idx_name -> last seen spot
-    "open_evaluated": {},   # idx_name -> "YYYY-MM-DD" once we've done the
-                            # market-open evaluation for that day
+    # Phase 2: per-engine state (mirrors backend/strategy/options.py).
+    "current": {
+        "last_spot": {},        # idx_name -> last seen spot
+        "open_evaluated": {},   # idx_name -> "YYYY-MM-DD"
+    },
+    "reverse": {
+        "last_spot": {},
+        "open_evaluated": {},
+    },
     "lock": threading.Lock(),
 }
 
@@ -104,7 +110,8 @@ def _close_round(open_trade, ltp, step):
 # ---------- exits ----------
 def _check_futures_exit_reason(open_t, fut_ltp, spot,
                                 buy_lvl, sell_lvl,
-                                long_target_lvl, short_target_lvl):
+                                long_target_lvl, short_target_lvl,
+                                cfg=None):
     """Return exit-reason string or None. Handles LONG and SHORT.
 
     open_t["order_type"] == "BUY"  -> long position
@@ -113,8 +120,11 @@ def _check_futures_exit_reason(open_t, fut_ltp, spot,
     entry_price = open_t.get("entry_price")
     side = open_t.get("order_type")  # "BUY" (long) or "SELL" (short)
 
-    cfg = config_loader.get()
-    fsl = cfg["stoploss"]    # unified — same SL config as options
+    # Phase 2: cfg is the engine block ({stoploss, target, ...}). Fall
+    # back to the current-engine block for legacy callers that don't pass.
+    if cfg is None:
+        cfg = config_loader.engine_block("current")
+    fsl = cfg["stoploss"]
     active = fsl["active"]   # validated A|B|C|D
 
     is_long = (side == "BUY")
@@ -171,9 +181,9 @@ def _check_futures_exit_reason(open_t, fut_ltp, spot,
     return None
 
 
-def _can_open_more(idx_name, counts):
-    # Unified per_day_cap — same caps as options strategy.
-    cap = config_loader.per_day_cap(idx_name)
+def _can_open_more(idx_name, counts, engine="current"):
+    # Phase 2: per-engine per-day cap (current vs reverse can differ).
+    cap = config_loader.engine_per_day_cap(engine, idx_name)
     if cap is None:
         return True
     return counts.get(idx_name, 0) < cap
@@ -239,31 +249,44 @@ def _compute_futures_entry_signal(idx_name, spot, prev_spot, levels, cfg,
 
 
 # ---------- main tick ----------
-def future_auto_strategy_tick(future_data, gann_quotes, client=None):
+def future_auto_strategy_tick(future_data, gann_quotes, client=None,
+                              engine="current"):
     """One tick of the futures auto-strategy.
 
     future_data:   {idx_name: {trading_symbol, token, exchange, expiry,
                                lot_size, ltp, open, low, high, close}}
                    — produced by quotes.fetch_future_quotes()
-    gann_quotes:   stock-side quotes (need .levels for index spots)
+    gann_quotes:   stock-side quotes (need .levels / .rev_levels for index spots)
     client:        Kotak NeoAPI client. Required when LIVE_MODE=True.
+    engine:        "current" (default; open-anchored Gann) or "reverse"
+                   (anchored to today's running intraday low/high).
     """
     if not AUTO_FUTURE_STRATEGY_ENABLED or not future_data:
         return
-    # Engine gate — real engine on AND apply_to includes futures.
+    # Phase 2 master flag.
+    if not config_loader.engine_enabled(engine):
+        return
+    # Engine gate — real (sub-)engine on AND apply_to includes futures.
     if not config_loader.real_futures_enabled():
         return
 
     now = now_ist()
 
+    cfg_eng    = config_loader.engine_block(engine)
+    eng_state  = _future_auto_state[engine]
+    levels_key = "rev_levels" if engine == "reverse" else "levels"
+
     with _future_auto_state["lock"]:
         trades = read_trade_ledger()
 
         # 1. SQUARE OFF at/after configured square_off — close everything OPEN
+        # for THIS engine.
         if _auto_at_or_after_squareoff(now):
             for t in trades:
                 if (t.get("status") != "OPEN"
                         or t.get("asset_type") != "future"):
+                    continue
+                if (t.get("engine") or "current") != engine:
                     continue
                 idx_name = t.get("underlying")
                 fut = future_data.get(idx_name)
@@ -277,7 +300,8 @@ def future_auto_strategy_tick(future_data, gann_quotes, client=None):
                           if so_key else None)
                 _execute_futures_exit(t, float(fut["ltp"]),
                                        "AUTO_SQUARE_OFF",
-                                       future_data, client, spot=so_val)
+                                       future_data, client, spot=so_val,
+                                       engine=engine)
             return
 
         if not _auto_in_hours(now):
@@ -286,18 +310,21 @@ def future_auto_strategy_tick(future_data, gann_quotes, client=None):
         today = now.strftime("%Y-%m-%d")
         counts = {}
         for t in trades:
-            if t.get("date") == today and t.get("asset_type") == "future":
+            if (t.get("date") == today
+                    and t.get("asset_type") == "future"
+                    and (t.get("engine") or "current") == engine):
                 u = t.get("underlying", "")
                 counts[u] = counts.get(u, 0) + 1
         open_by_underlying = {
             t["underlying"]: t for t in trades
-            if t.get("status") == "OPEN" and t.get("asset_type") == "future"
+            if (t.get("status") == "OPEN"
+                and t.get("asset_type") == "future"
+                and (t.get("engine") or "current") == engine)
         }
 
-        cfg = config_loader.get()
-        entry_cfg  = cfg["entry"]
-        sl_cfg_idx = cfg["stoploss"]
-        target_cfg = cfg["target"]
+        entry_cfg  = cfg_eng["entry"]
+        sl_cfg_idx = cfg_eng["stoploss"]
+        target_cfg = cfg_eng["target"]
 
         for idx_name, fut in future_data.items():
             spot_q_key = INDEX_OPTIONS_CONFIG[idx_name]["spot_symbol_key"]
@@ -306,20 +333,16 @@ def future_auto_strategy_tick(future_data, gann_quotes, client=None):
             if spot is None:
                 continue
             spot = float(spot)
-            levels = gq.get("levels") or {}
-            # Per-row level resolution (same picks as options — unified config):
+            levels = gq.get(levels_key) or {}
+            # Per-row level resolution (same picks as options — engine config):
             # entry uses market_open_* / crossing_* dropdowns,
             # variant C exit uses variant_c_* dropdowns (long exits below
             # sell pick; short exits above buy pick).
-            mo_buy_lvl   = config_loader.resolve_buy_level (levels, entry_cfg["market_open_buy_level"])
-            mo_sell_lvl  = config_loader.resolve_sell_level(levels, entry_cfg["market_open_sell_level"])
-            cr_buy_lvl   = config_loader.resolve_buy_level (levels, entry_cfg["crossing_buy_level"])
-            cr_sell_lvl  = config_loader.resolve_sell_level(levels, entry_cfg["crossing_sell_level"])
             slc_buy_lvl  = config_loader.resolve_buy_level (levels, sl_cfg_idx["variant_c_buy_level"])
             slc_sell_lvl = config_loader.resolve_sell_level(levels, sl_cfg_idx["variant_c_sell_level"])
             long_target_lvl  = (levels.get("buy")  or {}).get(target_cfg["ce_level"])
             short_target_lvl = (levels.get("sell") or {}).get(target_cfg["pe_level"])
-            prev_spot = _future_auto_state["last_spot"].get(idx_name)
+            prev_spot = eng_state["last_spot"].get(idx_name)
             fut_ltp = fut.get("ltp")
 
             # ---- EXIT check ----
@@ -329,57 +352,60 @@ def future_auto_strategy_tick(future_data, gann_quotes, client=None):
                     open_t, fut_ltp, spot,
                     slc_buy_lvl, slc_sell_lvl,
                     long_target_lvl, short_target_lvl,
+                    cfg=cfg_eng,
                 )
                 if reason and fut_ltp is not None:
                     _execute_futures_exit(open_t, float(fut_ltp), reason,
-                                           future_data, client, spot=spot)
-                    _future_auto_state["last_spot"][idx_name] = spot
+                                           future_data, client, spot=spot,
+                                           engine=engine)
+                    eng_state["last_spot"][idx_name] = spot
                     continue
 
-            # Per-index gate (real engine). Exits above already ran for
-            # any OPEN position; only entries are blocked by the toggle.
-            if not config_loader.index_enabled_for("real", idx_name):
-                _future_auto_state["last_spot"][idx_name] = spot
+            # Per-index gate (real sub-engine of this logic engine).
+            if not config_loader.engine_index_enabled_for(engine, "real", idx_name):
+                eng_state["last_spot"][idx_name] = spot
                 continue
 
             # ---- ENTRY check ----
             if (idx_name not in open_by_underlying
-                    and _can_open_more(idx_name, counts)):
+                    and _can_open_more(idx_name, counts, engine=engine)):
                 already_evaluated_open = (
-                    _future_auto_state["open_evaluated"].get(idx_name) == today
+                    eng_state["open_evaluated"].get(idx_name) == today
                     or counts.get(idx_name, 0) > 0
                 )
                 side, stamp_now = _compute_futures_entry_signal(
-                    idx_name, spot, prev_spot, levels, cfg,
+                    idx_name, spot, prev_spot, levels, cfg_eng,
                     already_evaluated_open=already_evaluated_open,
                 )
                 if stamp_now:
-                    _future_auto_state["open_evaluated"][idx_name] = today
+                    eng_state["open_evaluated"][idx_name] = today
                 # If side is set on the market-open path, the stamp is
                 # deferred — it lands just before _execute_futures_entry
                 # below, so a missing fut_ltp at this tick won't burn
                 # the open-evaluation slot.
 
                 if side and fut_ltp is not None:
-                    _future_auto_state["open_evaluated"][idx_name] = today
+                    eng_state["open_evaluated"][idx_name] = today
                     # Same entry_reason derivation as the paper book —
                     # feeds the new "Entry Reason" column on /trades.
                     entry_reason = _derive_futures_entry_reason(
                         side, already_evaluated_open, entry_cfg,
                     )
+                    if engine == "reverse" and entry_reason:
+                        entry_reason = "REV_" + entry_reason
                     placed = _execute_futures_entry(
                         idx_name, side, fut, float(fut_ltp), float(spot),
-                        client, entry_reason=entry_reason,
+                        client, entry_reason=entry_reason, engine=engine,
                     )
                     if placed:
                         counts[idx_name] = counts.get(idx_name, 0) + 1
 
-            _future_auto_state["last_spot"][idx_name] = spot
+            eng_state["last_spot"][idx_name] = spot
 
 
 # ---------- entry / exit order placement ----------
 def _execute_futures_entry(idx_name, side, fut, fut_ltp, spot, client,
-                           entry_reason=None):
+                           entry_reason=None, engine="current"):
     """Place a real BUY (long) or SELL (short) future order.
 
     `side` is "BUY" or "SELL" (full word — matches ledger order_type
@@ -392,7 +418,7 @@ def _execute_futures_entry(idx_name, side, fut, fut_ltp, spot, client,
     if not trading_symbol or not exchange or not sdk_lot_size:
         audit("FUT_ENTRY_REFUSED_NO_CONTRACT",
               idx=idx_name, trading_symbol=trading_symbol,
-              exchange=exchange, lot_size=sdk_lot_size)
+              exchange=exchange, lot_size=sdk_lot_size, engine=engine)
         append_blocked(
             kind="ENTRY", scrip=f"{idx_name} FUT", side="B" if side == "BUY" else "S",
             qty=0, price=fut_ltp,
@@ -401,7 +427,7 @@ def _execute_futures_entry(idx_name, side, fut, fut_ltp, spot, client,
             underlying=idx_name, trading_symbol=trading_symbol,
             trigger_spot=spot,
             trigger_level="BUY" if side == "BUY" else "SELL",
-            source="auto_futures",
+            source="auto_futures", engine=engine,
         )
         return False
 
@@ -411,8 +437,8 @@ def _execute_futures_entry(idx_name, side, fut, fut_ltp, spot, client,
     else:
         limit_price = _round_for_sell(fut_ltp, step)
 
-    # Unified lot multiplier — same lots config as options strategy.
-    qty = int(sdk_lot_size) * config_loader.lot_multiplier(idx_name)
+    # Phase 2: per-engine lot multiplier.
+    qty = int(sdk_lot_size) * config_loader.engine_lot_multiplier(engine, idx_name)
 
     scrip = {
         "symbol": f"{idx_name} FUT",
@@ -439,7 +465,7 @@ def _execute_futures_entry(idx_name, side, fut, fut_ltp, spot, client,
             underlying=idx_name, trading_symbol=trading_symbol,
             trigger_spot=spot,
             trigger_level="BUY" if side == "BUY" else "SELL",
-            source="auto_futures",
+            source="auto_futures", engine=engine,
         )
         return False
 
@@ -454,6 +480,8 @@ def _execute_futures_entry(idx_name, side, fut, fut_ltp, spot, client,
         "option_key": None,
         "asset_type": "future",
         "underlying": idx_name,
+        # Phase 2: which logic engine fired this trade.
+        "engine": engine,
         "strike": None,
         "option_type": None,
         "expiry": str(expiry) if expiry else None,
@@ -488,12 +516,12 @@ def _execute_futures_entry(idx_name, side, fut, fut_ltp, spot, client,
     write_trade_ledger(trades)
     audit("AUTO_FUT_ENTRY_PLACED", scrip=f"{idx_name} FUT",
           side=side, mode=mode, kotak_order_id=kotak_order_id,
-          qty=qty, price=limit_price, ltp=fut_ltp, step=step)
+          qty=qty, price=limit_price, ltp=fut_ltp, step=step, engine=engine)
     return True
 
 
 def _execute_futures_exit(open_trade, fut_ltp, reason, future_data, client,
-                          spot=None):
+                          spot=None, engine=None):
     """Close a futures position. Long open -> SELL; short open -> BUY.
 
     Uses position verification (same as options) before sending in LIVE
@@ -502,7 +530,12 @@ def _execute_futures_exit(open_trade, fut_ltp, reason, future_data, client,
 
     `spot` records the underlying spot at exit so the closed row carries
     the spot value and Gann level (T1/S2/etc.) for the UI.
+
+    `engine` (optional) overrides the open trade's stored engine name.
+    Defaults to the row's engine field, or "current" for legacy rows.
     """
+    if engine is None:
+        engine = open_trade.get("engine") or "current"
     idx_name = open_trade.get("underlying")
     open_side = open_trade.get("order_type")  # "BUY" or "SELL"
     fut = future_data.get(idx_name) or {}
@@ -512,14 +545,14 @@ def _execute_futures_exit(open_trade, fut_ltp, reason, future_data, client,
 
     if not trading_symbol:
         audit("FUT_EXIT_REFUSED_NO_TRADING_SYMBOL",
-              scrip=f"{idx_name} FUT", reason=reason)
+              scrip=f"{idx_name} FUT", reason=reason, engine=engine)
         append_blocked(
             kind="EXIT", scrip=f"{idx_name} FUT",
             side="S" if open_side == "BUY" else "B",
             qty=int(open_trade.get("qty") or 0),
             price=fut_ltp, result="NO_TRADING_SYMBOL",
             message="Could not resolve trading symbol for futures exit",
-            underlying=idx_name, source="auto_futures",
+            underlying=idx_name, source="auto_futures", engine=engine,
         )
         return False
 
@@ -527,7 +560,7 @@ def _execute_futures_exit(open_trade, fut_ltp, reason, future_data, client,
     if LIVE_MODE:
         if client is None:
             audit("FUT_EXIT_REFUSED_NO_CLIENT",
-                  scrip=f"{idx_name} FUT", reason=reason)
+                  scrip=f"{idx_name} FUT", reason=reason, engine=engine)
             append_blocked(
                 kind="EXIT", scrip=f"{idx_name} FUT",
                 side="S" if open_side == "BUY" else "B",
@@ -535,7 +568,7 @@ def _execute_futures_exit(open_trade, fut_ltp, reason, future_data, client,
                 price=fut_ltp, result="NO_CLIENT",
                 message="Kotak client not initialised — cannot verify position",
                 underlying=idx_name, trading_symbol=trading_symbol,
-                source="auto_futures",
+                source="auto_futures", engine=engine,
             )
             return False
         verify_side = "BUY" if open_side == "BUY" else "SELL"
@@ -545,7 +578,7 @@ def _execute_futures_exit(open_trade, fut_ltp, reason, future_data, client,
             audit("FUT_EXIT_REFUSED_NO_KOTAK_POSITION",
                   scrip=f"{idx_name} FUT",
                   trading_symbol=trading_symbol,
-                  kotak_info=info)
+                  kotak_info=info, engine=engine)
             append_blocked(
                 kind="EXIT", scrip=f"{idx_name} FUT",
                 side="S" if open_side == "BUY" else "B",
@@ -554,13 +587,13 @@ def _execute_futures_exit(open_trade, fut_ltp, reason, future_data, client,
                 message=("Kotak shows no matching open position — refusing "
                          "to send close (would open opposite-side fresh)."),
                 underlying=idx_name, trading_symbol=trading_symbol,
-                source="auto_futures",
+                source="auto_futures", engine=engine,
             )
             return False
 
     qty = int(open_trade.get("qty") or 0)
     if qty <= 0:
-        audit("FUT_EXIT_REFUSED_NO_QTY", scrip=f"{idx_name} FUT")
+        audit("FUT_EXIT_REFUSED_NO_QTY", scrip=f"{idx_name} FUT", engine=engine)
         return False
 
     step = config_loader.futures_round_step(idx_name)
@@ -589,7 +622,7 @@ def _execute_futures_exit(open_trade, fut_ltp, reason, future_data, client,
             side=close_side, qty=qty, price=limit_price,
             result=res["result"], message=res["message"],
             underlying=idx_name, trading_symbol=trading_symbol,
-            source="auto_futures",
+            source="auto_futures", engine=engine,
         )
         return False
 
@@ -624,5 +657,5 @@ def _execute_futures_exit(open_trade, fut_ltp, reason, future_data, client,
     write_trade_ledger(trades)
     audit("AUTO_FUT_EXIT_PLACED", scrip=f"{idx_name} FUT",
           mode=mode, reason=reason, kotak_order_id=kotak_order_id,
-          qty=qty, price=limit_price, side=close_side)
+          qty=qty, price=limit_price, side=close_side, engine=engine)
     return True

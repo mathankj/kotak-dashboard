@@ -62,8 +62,15 @@ def _bump_recent_cache():
 def append_blocked(*, kind, scrip, side, qty, price, result, message,
                    underlying=None, strike=None, option_type=None,
                    trading_symbol=None, trigger_spot=None,
-                   trigger_level=None, source="auto_options"):
-    """Append one blocked-attempt record. Best-effort — never raises."""
+                   trigger_level=None, source="auto_options",
+                   engine=None):
+    """Append one blocked-attempt record. Best-effort — never raises.
+
+    `engine` ("current" | "reverse") is the Phase 2 logic engine name.
+    Optional — legacy callers (manual ticket, older code paths) leave it
+    unset and the row simply has no engine field. The /blockers UI
+    treats missing engine as 'current' for display purposes.
+    """
     record = {
         "ts": now_ist().isoformat(),
         "kind": kind,
@@ -80,6 +87,7 @@ def append_blocked(*, kind, scrip, side, qty, price, result, message,
         "trigger_spot": trigger_spot,
         "trigger_level": trigger_level,
         "source": source,
+        "engine": engine,
     }
     try:
         os.makedirs(os.path.dirname(BLOCKED_FILE), exist_ok=True)
