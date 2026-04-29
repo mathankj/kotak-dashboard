@@ -146,6 +146,40 @@
 
 <form id="cfgForm">
 
+<!-- 0. Logic engine master switches (Phase 2). Two parallel logic
+     engines run side-by-side in the ticker:
+       - current  → open-anchored Gann (the original strategy)
+       - reverse  → anchored to today's running intraday low/high
+                    (low → buy ladder, high → sell ladder)
+     Each engine has its own state, ledger filter, blocker tag, and
+     dedicated config (reverse_engine.* in config.yaml). Below this
+     card the per-engine paper/real sub-engines apply to whichever
+     logic engines are enabled here. -->
+<div class="card apply-card">
+  <h2>Logic Engines — current vs reverse</h2>
+  <div class="sub">Pick which Gann logic to run. Both can run in parallel
+    (each writes its own ledger rows, tagged with engine=current/reverse).
+    Reverse engine reads <code>reverse_engine.*</code> in config.yaml —
+    edit that block directly to tune entry/stoploss/target separately
+    from current. Defaults match current.</div>
+
+  {% for lkey, lname, ldesc in [
+    ('current', 'Current (open-anchored)',
+     'Original strategy. Levels anchored to the opening Gann square. Default ON.'),
+    ('reverse',  'Reverse (low/high-anchored)',
+     'Buy ladder anchored to today running low; sell ladder to today running high. Default OFF.'),
+  ] %}
+    <div class="engine-row">
+      <label class="toggle">
+        <input type="checkbox" name="{{ lkey }}_logic.enabled"
+               {% if cfg[lkey ~ '_logic'] and cfg[lkey ~ '_logic'].enabled %}checked{% endif %}>
+        <span class="engine-title">{{ lname }}</span>
+      </label>
+      <div class="engine-desc">{{ ldesc }}</div>
+    </div>
+  {% endfor %}
+</div>
+
 <!-- 0a. Engines (paper + real, each with its own apply_to) -->
 <div class="card apply-card">
   <h2>Engines — what to run</h2>
