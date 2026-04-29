@@ -55,7 +55,7 @@ futures_round_step:
 current_logic:
   enabled: true
 reverse_logic:
-  enabled: false
+  enabled: true
 reverse_engine:
   entry:
     market_open_path: true

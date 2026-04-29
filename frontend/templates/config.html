@@ -159,9 +159,9 @@
   <h2>Logic Engines — current vs reverse</h2>
   <div class="sub">Pick which Gann logic to run. Both can run in parallel
     (each writes its own ledger rows, tagged with engine=current/reverse).
-    Reverse engine reads <code>reverse_engine.*</code> in config.yaml —
-    edit that block directly to tune entry/stoploss/target separately
-    from current. Defaults match current.</div>
+    Each engine has its own entry/stoploss/target/lots/cap/drawdown
+    block lower down — sections marked <em>(current)</em> drive the
+    current engine, <em>(reverse)</em> drive the reverse engine.</div>
 
   {% for lkey, lname, ldesc in [
     ('current', 'Current (open-anchored)',
@@ -278,7 +278,7 @@
 
 <!-- 2. Entry logic with per-row level pickers -->
 <div class="card">
-  <h2>2. Entry (Buy) Logic</h2>
+  <h2>2. Entry (Buy) Logic <span style="color:#a1a1aa;font-weight:400;font-size:14px">(current engine)</span></h2>
   <div class="sub">Tick which signal paths are allowed to enter trades. Both can run together.
     Each row picks WHICH Gann level fires bullish (BUY or BUY-WA) and WHICH fires bearish (SELL or SELL-WA).</div>
 
@@ -345,7 +345,7 @@
 
 <!-- 3. Stoploss with per-variant level pickers -->
 <div class="card">
-  <h2>3. Stoploss</h2>
+  <h2>3. Stoploss <span style="color:#a1a1aa;font-weight:400;font-size:14px">(current engine)</span></h2>
   <div class="sub">Three variants exist in the strategy. Pick ONE — the others stay dormant.
     Each variant carries its own BUY / SELL pick (active only for variant C; cosmetic for A and B).</div>
   <div class="opt">
@@ -448,7 +448,7 @@
 
 <!-- 4. Profit target -->
 <div class="card">
-  <h2>4. Profit Target</h2>
+  <h2>4. Profit Target <span style="color:#a1a1aa;font-weight:400;font-size:14px">(current engine)</span></h2>
   <div class="sub">Which Gann level closes a winning trade. CE/long uses the BUY-side level;
     PE/short uses the SELL-side level. Same picks drive both options and futures targets.</div>
   <div class="row">
@@ -475,7 +475,7 @@
 
 <!-- 5. Lot multipliers -->
 <div class="card">
-  <h2>5. Lot Multipliers</h2>
+  <h2>5. Lot Multipliers <span style="color:#a1a1aa;font-weight:400;font-size:14px">(current engine)</span></h2>
   <div class="sub">Final qty = broker lot size × this number. Per index. Same multiplier applies
     to both options and futures (same notional risk per trade).</div>
   <div class="grid3">
@@ -492,7 +492,7 @@
 
 <!-- 6. Per-day cap -->
 <div class="card">
-  <h2>6. Per-Day Trade Cap</h2>
+  <h2>6. Per-Day Trade Cap <span style="color:#a1a1aa;font-weight:400;font-size:14px">(current engine)</span></h2>
   <div class="sub">Max entries per index per day. Counted SEPARATELY for options and futures.
     Leave blank = unlimited.</div>
   <div class="grid3">
@@ -520,6 +520,279 @@
                value="{{ cfg.futures_round_step[idx] }}" style="width:100%">
       </div>
     {% endfor %}
+  </div>
+</div>
+
+<!-- ============================================================
+     REVERSE ENGINE — separate tuning block (Phase 3)
+     Each card below mirrors the matching `(current engine)` card
+     above but writes to `reverse_engine.*` paths so Ganesh can
+     dial the reverse strategy independently. Only effective when
+     "Reverse (low/high-anchored)" is ticked in the Logic Engines
+     card at the top.
+     ============================================================ -->
+<div class="card" style="background:#1c1917;border-color:#78350f">
+  <h2 style="color:#fed7aa">Reverse Engine — separate tuning</h2>
+  <div class="sub">These mirror the cards above but apply to the
+    reverse-anchored Gann logic (buy ladder anchored to today's running
+    low; sell ladder to today's running high). Edits here only take
+    effect once the Reverse logic engine is enabled at the top.</div>
+</div>
+
+<!-- R2. Reverse entry -->
+<div class="card">
+  <h2>R2. Entry (Buy) Logic <span style="color:#fed7aa;font-weight:400;font-size:14px">(reverse engine)</span></h2>
+  <div class="sub">Same two paths as the current engine, but evaluated
+    against the reverse ladder (low-anchored BUY rungs, high-anchored SELL rungs).</div>
+
+  <div class="row">
+    <div class="lbl">Path A — Market-Open Snapshot
+      <div class="hint">First tick of the day per index against the reverse ladder.</div>
+    </div>
+    <div>
+      <label class="toggle">
+        <input type="checkbox" name="reverse_engine.entry.market_open_path"
+               {% if cfg.reverse_engine.entry.market_open_path %}checked{% endif %}>
+        <span>Enabled</span>
+      </label>
+      <div class="pickers">
+        <div class="picker-grp">
+          <span class="k">bullish trigger</span>
+          <select name="reverse_engine.entry.market_open_buy_level" class="inline">
+            {% for lvl in ['BUY','BUY_WA'] %}
+              <option value="{{ lvl }}" {% if cfg.reverse_engine.entry.market_open_buy_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="picker-grp">
+          <span class="k">bearish trigger</span>
+          <select name="reverse_engine.entry.market_open_sell_level" class="inline">
+            {% for lvl in ['SELL','SELL_WA'] %}
+              <option value="{{ lvl }}" {% if cfg.reverse_engine.entry.market_open_sell_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="lbl">Path B — Live Crossing
+      <div class="hint">Spot crosses the reverse BUY pick upward → bullish; SELL pick downward → bearish.</div>
+    </div>
+    <div>
+      <label class="toggle">
+        <input type="checkbox" name="reverse_engine.entry.crossing_path"
+               {% if cfg.reverse_engine.entry.crossing_path %}checked{% endif %}>
+        <span>Enabled</span>
+      </label>
+      <div class="pickers">
+        <div class="picker-grp">
+          <span class="k">bullish trigger</span>
+          <select name="reverse_engine.entry.crossing_buy_level" class="inline">
+            {% for lvl in ['BUY','BUY_WA'] %}
+              <option value="{{ lvl }}" {% if cfg.reverse_engine.entry.crossing_buy_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="picker-grp">
+          <span class="k">bearish trigger</span>
+          <select name="reverse_engine.entry.crossing_sell_level" class="inline">
+            {% for lvl in ['SELL','SELL_WA'] %}
+              <option value="{{ lvl }}" {% if cfg.reverse_engine.entry.crossing_sell_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- R3. Reverse stoploss -->
+<div class="card">
+  <h2>R3. Stoploss <span style="color:#fed7aa;font-weight:400;font-size:14px">(reverse engine)</span></h2>
+  <div class="sub">Pick ONE variant. Variants A, B, C mirror the current
+    engine; variant D (trailing) is shared logic with reverse ladder rungs.</div>
+  <div class="opt">
+
+    <label>
+      <input type="radio" name="reverse_engine.stoploss.active" value="A" {% if cfg.reverse_engine.stoploss.active=='A' %}checked{% endif %}>
+      <span style="flex:1">
+        <span class="name">Variant A — Fixed ₹X drop</span>
+        <span class="desc">Exit when LTP moves
+          <input type="number" name="reverse_engine.stoploss.variant_a_drop_rs" min="0" step="0.5" style="width:70px"
+                 value="{{ cfg.reverse_engine.stoploss.variant_a_drop_rs }}"> ₹ against entry.</span>
+        <div class="pickers">
+          <div class="picker-grp">
+            <span class="k">bullish trigger</span>
+            <select name="reverse_engine.stoploss.variant_a_buy_level" class="inline">
+              {% for lvl in ['BUY','BUY_WA'] %}
+                <option value="{{ lvl }}" {% if cfg.reverse_engine.stoploss.variant_a_buy_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="picker-grp">
+            <span class="k">bearish trigger</span>
+            <select name="reverse_engine.stoploss.variant_a_sell_level" class="inline">
+              {% for lvl in ['SELL','SELL_WA'] %}
+                <option value="{{ lvl }}" {% if cfg.reverse_engine.stoploss.variant_a_sell_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+      </span>
+    </label>
+
+    <label>
+      <input type="radio" name="reverse_engine.stoploss.active" value="B" {% if cfg.reverse_engine.stoploss.active=='B' %}checked{% endif %}>
+      <span style="flex:1">
+        <span class="name">Variant B — Percentage drop</span>
+        <span class="desc">Exit when LTP moves
+          <input type="number" name="reverse_engine.stoploss.variant_b_drop_pct" min="0" max="100" step="1" style="width:70px"
+                 value="{{ cfg.reverse_engine.stoploss.variant_b_drop_pct }}">% against entry.</span>
+        <div class="pickers">
+          <div class="picker-grp">
+            <span class="k">bullish trigger</span>
+            <select name="reverse_engine.stoploss.variant_b_buy_level" class="inline">
+              {% for lvl in ['BUY','BUY_WA'] %}
+                <option value="{{ lvl }}" {% if cfg.reverse_engine.stoploss.variant_b_buy_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="picker-grp">
+            <span class="k">bearish trigger</span>
+            <select name="reverse_engine.stoploss.variant_b_sell_level" class="inline">
+              {% for lvl in ['SELL','SELL_WA'] %}
+                <option value="{{ lvl }}" {% if cfg.reverse_engine.stoploss.variant_b_sell_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+      </span>
+    </label>
+
+    <label>
+      <input type="radio" name="reverse_engine.stoploss.active" value="C" {% if cfg.reverse_engine.stoploss.active=='C' %}checked{% endif %}>
+      <span style="flex:1">
+        <span class="name">Variant C — Opposite Gann level</span>
+        <span class="desc">CE/long: exit if spot drops below the SELL pick.
+          PE/short: exit if spot rises above the BUY pick.</span>
+        <div class="pickers">
+          <div class="picker-grp">
+            <span class="k">PE/short exit above</span>
+            <select name="reverse_engine.stoploss.variant_c_buy_level" class="inline">
+              {% for lvl in ['BUY','BUY_WA'] %}
+                <option value="{{ lvl }}" {% if cfg.reverse_engine.stoploss.variant_c_buy_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="picker-grp">
+            <span class="k">CE/long exit below</span>
+            <select name="reverse_engine.stoploss.variant_c_sell_level" class="inline">
+              {% for lvl in ['SELL','SELL_WA'] %}
+                <option value="{{ lvl }}" {% if cfg.reverse_engine.stoploss.variant_c_sell_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+      </span>
+    </label>
+
+    <label>
+      <input type="radio" name="reverse_engine.stoploss.active" value="D" {% if cfg.reverse_engine.stoploss.active=='D' %}checked{% endif %}>
+      <span style="flex:1">
+        <span class="name">Variant D — Trailing along Gann ladder</span>
+        <span class="desc">SL trails one rung BEHIND spot's reverse-ladder rung.
+          Initial SL = entry price (breakeven).</span>
+      </span>
+    </label>
+
+  </div>
+</div>
+
+<!-- R4. Reverse profit target -->
+<div class="card">
+  <h2>R4. Profit Target <span style="color:#fed7aa;font-weight:400;font-size:14px">(reverse engine)</span></h2>
+  <div class="sub">Same level vocabulary as current engine but resolved
+    on the reverse ladder.</div>
+  <div class="row">
+    <div class="lbl">CE / long target
+      <div class="hint">Above-anchor reverse levels. Default T1.</div>
+    </div>
+    <select name="reverse_engine.target.ce_level">
+      {% for lvl in ['T1','T2','T3','T4','T5','BUY_WA'] %}
+        <option value="{{ lvl }}" {% if cfg.reverse_engine.target.ce_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="row">
+    <div class="lbl">PE / short target
+      <div class="hint">Below-anchor reverse levels. Default S1.</div>
+    </div>
+    <select name="reverse_engine.target.pe_level">
+      {% for lvl in ['S1','S2','S3','S4','S5','SELL_WA'] %}
+        <option value="{{ lvl }}" {% if cfg.reverse_engine.target.pe_level==lvl %}selected{% endif %}>{{ lvl }}</option>
+      {% endfor %}
+    </select>
+  </div>
+</div>
+
+<!-- R5. Reverse lot multipliers -->
+<div class="card">
+  <h2>R5. Lot Multipliers <span style="color:#fed7aa;font-weight:400;font-size:14px">(reverse engine)</span></h2>
+  <div class="sub">Per index. Lets Ganesh size the reverse engine smaller
+    while it earns its keep, or larger once it does.</div>
+  <div class="grid3">
+    {% for idx, lot in [('NIFTY',75),('BANKNIFTY',35),('SENSEX',20)] %}
+      <div class="idx">
+        <h4>{{ idx }}</h4>
+        <div class="hint">Broker option lot: {{ lot }}</div>
+        <input type="number" name="reverse_engine.lots.{{ idx }}" min="1" step="1"
+               value="{{ cfg.reverse_engine.lots[idx] }}" style="width:100%">
+        <div class="hint">×{{ cfg.reverse_engine.lots[idx] }} = {{ lot * cfg.reverse_engine.lots[idx] }} qty per option trade</div>
+      </div>
+    {% endfor %}
+  </div>
+</div>
+
+<!-- R6. Reverse per-day cap -->
+<div class="card">
+  <h2>R6. Per-Day Trade Cap <span style="color:#fed7aa;font-weight:400;font-size:14px">(reverse engine)</span></h2>
+  <div class="sub">Independent counter from the current engine. Leave blank = unlimited.</div>
+  <div class="grid3">
+    {% for idx in ['NIFTY','BANKNIFTY','SENSEX'] %}
+      <div class="idx">
+        <h4>{{ idx }}</h4>
+        <input type="number" name="reverse_engine.per_day_cap.{{ idx }}" min="1" step="1"
+               value="{% if cfg.reverse_engine.per_day_cap[idx] is not none %}{{ cfg.reverse_engine.per_day_cap[idx] }}{% endif %}"
+               placeholder="unlimited" style="width:100%">
+      </div>
+    {% endfor %}
+  </div>
+</div>
+
+<!-- R7. Per-engine drawdown auto-halt thresholds -->
+<div class="card">
+  <h2>R7. Drawdown Auto-Halt <span style="color:#a1a1aa;font-weight:400;font-size:14px">(per engine)</span></h2>
+  <div class="sub">Each engine has its own daily loss threshold. When today's
+    realised P&amp;L for an engine drops below <strong>−</strong>(this number),
+    that engine auto-halts (writes <code>data/HALTED_&lt;engine&gt;.flag</code>)
+    while the other engine keeps trading. Leave blank = no auto-halt.</div>
+  <div class="grid3">
+    <div class="idx">
+      <h4>Current engine</h4>
+      <input type="number" name="risk.max_daily_drawdown" min="0" step="100"
+             value="{% if cfg.risk and cfg.risk.max_daily_drawdown is not none %}{{ cfg.risk.max_daily_drawdown }}{% endif %}"
+             placeholder="no halt" style="width:100%">
+      <div class="hint">₹ — current-engine daily loss cap</div>
+    </div>
+    <div class="idx">
+      <h4>Reverse engine</h4>
+      <input type="number" name="reverse_engine.risk.max_daily_drawdown" min="0" step="100"
+             value="{% if cfg.reverse_engine.risk and cfg.reverse_engine.risk.max_daily_drawdown is not none %}{{ cfg.reverse_engine.risk.max_daily_drawdown }}{% endif %}"
+             placeholder="no halt" style="width:100%">
+      <div class="hint">₹ — reverse-engine daily loss cap</div>
+    </div>
   </div>
 </div>
 
