@@ -114,8 +114,10 @@ def test_paper_independent_when_live_blocked(isolated_paper_ledger):
 
     option_data, meta, gq = _synthetic_option_inputs()
     # Reset paper_state so prev_spot is None (forces market-open path).
-    paper_book._paper_state["options_open_evaluated"].clear()
-    paper_book._paper_state["options_last_spot"].clear()
+    # Phase 2c — per-engine state. Clear the current-engine slot
+    # (these tests don't exercise the reverse engine).
+    paper_book._paper_state["options"]["current"]["open_evaluated"].clear()
+    paper_book._paper_state["options"]["current"]["last_spot"].clear()
 
     with patch("backend.strategy.paper_book.now_ist",
                return_value=_in_hours_now()):
@@ -145,8 +147,10 @@ def test_paper_skips_kill_switch_freeze(isolated_paper_ledger, tmp_path,
     flag.write_text("test-halt", encoding="utf-8")
 
     option_data, meta, gq = _synthetic_option_inputs()
-    paper_book._paper_state["options_open_evaluated"].clear()
-    paper_book._paper_state["options_last_spot"].clear()
+    # Phase 2c — per-engine state. Clear the current-engine slot
+    # (these tests don't exercise the reverse engine).
+    paper_book._paper_state["options"]["current"]["open_evaluated"].clear()
+    paper_book._paper_state["options"]["current"]["last_spot"].clear()
 
     with patch("backend.strategy.paper_book.now_ist",
                return_value=_in_hours_now()):
@@ -165,12 +169,17 @@ def test_paper_per_day_cap_independent(isolated_paper_ledger):
     from backend.strategy import paper_book
 
     option_data, meta, gq = _synthetic_option_inputs()
-    paper_book._paper_state["options_open_evaluated"].clear()
-    paper_book._paper_state["options_last_spot"].clear()
+    # Phase 2c — per-engine state. Clear the current-engine slot
+    # (these tests don't exercise the reverse engine).
+    paper_book._paper_state["options"]["current"]["open_evaluated"].clear()
+    paper_book._paper_state["options"]["current"]["last_spot"].clear()
 
+    # Phase 2c — paper_book now reads the per-engine cap via
+    # engine_per_day_cap(engine, idx) instead of the legacy
+    # per_day_cap(idx). Patch the new function so cap=0 blocks entry.
     with patch("backend.strategy.paper_book.now_ist",
                return_value=_in_hours_now()), \
-         patch("backend.strategy.paper_book.config_loader.per_day_cap",
+         patch("backend.strategy.paper_book.config_loader.engine_per_day_cap",
                return_value=0):
         paper_book.paper_options_tick(option_data, meta, gq)
 
@@ -185,8 +194,10 @@ def test_paper_entry_reason_captured(isolated_paper_ledger):
     from backend.strategy import paper_book
 
     option_data, meta, gq = _synthetic_option_inputs()
-    paper_book._paper_state["options_open_evaluated"].clear()
-    paper_book._paper_state["options_last_spot"].clear()
+    # Phase 2c — per-engine state. Clear the current-engine slot
+    # (these tests don't exercise the reverse engine).
+    paper_book._paper_state["options"]["current"]["open_evaluated"].clear()
+    paper_book._paper_state["options"]["current"]["last_spot"].clear()
 
     with patch("backend.strategy.paper_book.now_ist",
                return_value=_in_hours_now()):
