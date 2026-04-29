@@ -51,7 +51,7 @@ INDEX_OPTIONS_CONFIG = {
         "exchange_segment": "nse_fo",
         "strike_step": 50,
         "atm_window": 5,
-        "lot_size": 75,           # NIFTY weekly/monthly, current as of 2025
+        "lot_size": 65,           # NIFTY weekly/monthly, current as of 2025
     },
     "BANKNIFTY": {
         "label": "BANK NIFTY",
@@ -59,7 +59,7 @@ INDEX_OPTIONS_CONFIG = {
         "exchange_segment": "nse_fo",
         "strike_step": 100,
         "atm_window": 5,
-        "lot_size": 35,           # BANKNIFTY monthly, current as of 2025
+        "lot_size": 30,           # BANKNIFTY monthly, current as of 2025
     },
     "SENSEX": {
         "label": "SENSEX",

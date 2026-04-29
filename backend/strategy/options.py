@@ -493,7 +493,7 @@ def _execute_entry(idx_name, atm, option_type, opt_key,
         )
         return False
     # Apply user-configured lot multiplier from config.yaml. Final qty =
-    # broker's lot_size × multiplier (e.g. NIFTY 75 × 2 = 150 qty).
+    # broker's lot_size × multiplier (e.g. NIFTY 65 × 2 = 130 qty).
     qty = lot_size * config_loader.lot_multiplier(idx_name)
     trading_symbol = _option_trading_symbol(idx_name, atm, option_type, expiry)
     if not trading_symbol:
