@@ -1469,18 +1469,39 @@ def _strategy_ticker_loop():
                             client_for_strategy = ensure_client()
                         except Exception:
                             client_for_strategy = None
-                        option_auto_strategy_tick(
-                            data, meta, gann_quotes,
-                            client=client_for_strategy,
-                        )
-                        # Paper book — runs the same strategy logic
-                        # against an independent ledger. Never sends
-                        # real orders; not gated by the kill switch.
-                        try:
-                            paper_options_tick(data, meta, gann_quotes)
-                        except Exception as e:
-                            print(f"[ticker] paper options tick failed: "
-                                  f"{type(e).__name__}: {e}")
+                        # Phase 2c — run each enabled logic engine in
+                        # turn. current + reverse are independent: own
+                        # state slots, own config block, own per-engine
+                        # ledger filtering. Each tick short-circuits
+                        # internally if its master flag is off, so this
+                        # loop is cheap when only one is enabled.
+                        active_engines = [
+                            e for e in ("current", "reverse")
+                            if config_loader.engine_enabled(e)
+                        ]
+                        for _eng in active_engines:
+                            try:
+                                option_auto_strategy_tick(
+                                    data, meta, gann_quotes,
+                                    client=client_for_strategy,
+                                    engine=_eng,
+                                )
+                            except Exception as e:
+                                print(f"[ticker] real options tick "
+                                      f"engine={_eng} failed: "
+                                      f"{type(e).__name__}: {e}")
+                            # Paper book — runs the same strategy logic
+                            # against an independent ledger. Never sends
+                            # real orders; not gated by the kill switch.
+                            try:
+                                paper_options_tick(
+                                    data, meta, gann_quotes,
+                                    engine=_eng,
+                                )
+                            except Exception as e:
+                                print(f"[ticker] paper options tick "
+                                      f"engine={_eng} failed: "
+                                      f"{type(e).__name__}: {e}")
                         # Futures runs alongside options. Independent ledger
                         # rows (asset_type=future). Fetch futures quotes
                         # only if at least one engine (paper OR real)
@@ -1490,17 +1511,28 @@ def _strategy_ticker_loop():
                             try:
                                 fut_data, _fut_err = fetch_future_quotes()
                                 if fut_data:
-                                    future_auto_strategy_tick(
-                                        fut_data, gann_quotes,
-                                        client=client_for_strategy,
-                                    )
-                                    try:
-                                        paper_futures_tick(
-                                            fut_data, gann_quotes)
-                                    except Exception as e:
-                                        print(f"[ticker] paper futures tick"
-                                              f" failed: "
-                                              f"{type(e).__name__}: {e}")
+                                    for _eng in active_engines:
+                                        try:
+                                            future_auto_strategy_tick(
+                                                fut_data, gann_quotes,
+                                                client=client_for_strategy,
+                                                engine=_eng,
+                                            )
+                                        except Exception as e:
+                                            print(f"[ticker] real futures "
+                                                  f"tick engine={_eng} "
+                                                  f"failed: "
+                                                  f"{type(e).__name__}: {e}")
+                                        try:
+                                            paper_futures_tick(
+                                                fut_data, gann_quotes,
+                                                engine=_eng,
+                                            )
+                                        except Exception as e:
+                                            print(f"[ticker] paper futures "
+                                                  f"tick engine={_eng} "
+                                                  f"failed: "
+                                                  f"{type(e).__name__}: {e}")
                             except Exception as e:
                                 print(f"[ticker] futures tick failed: "
                                       f"{type(e).__name__}: {e}")
