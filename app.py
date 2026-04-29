@@ -831,9 +831,14 @@ def paper_trades_xlsx():
     wb = Workbook()
     ws = wb.active
     ws.title = "Paper Ledger"
-    headers = ["Date", "Scrip", "Order Type", "Entry Time (IST)", "Entry Price",
-               "Target Level Reached", "Max/Min Target Price", "Exit Time (IST)",
-               "Exit Price", "Exit Reason", "P&L Points", "P&L %", "Duration"]
+    # Phase 3: Engine column (current/reverse) inserted after Order Type so
+    # Ganesh can filter the export by engine in Excel. Legacy rows that
+    # predate Phase 2 don't have an "engine" key and get rendered as
+    # 'current' to match the HTML table behaviour.
+    headers = ["Date", "Scrip", "Order Type", "Engine", "Entry Time (IST)",
+               "Entry Price", "Target Level Reached", "Max/Min Target Price",
+               "Exit Time (IST)", "Exit Price", "Exit Reason",
+               "P&L Points", "P&L %", "Duration"]
     ws.append(headers)
     hdr_fill = PatternFill("solid", fgColor="FFEB3B")
     for c, _ in enumerate(headers, start=1):
@@ -855,6 +860,7 @@ def paper_trades_xlsx():
             t.get("date", ""),
             t.get("scrip", ""),
             t.get("order_type", ""),
+            t.get("engine") or "current",
             t.get("entry_time", ""),
             t.get("entry_price", ""),
             t.get("target_level_reached", "") or "",
@@ -873,13 +879,15 @@ def paper_trades_xlsx():
         else:
             otype_cell.fill = buy_fill
         otype_cell.alignment = Alignment(horizontal="center")
+        ws.cell(row=r, column=4).alignment = Alignment(horizontal="center")
         try:
             pl = float(t.get("pnl_points") or 0)
-            ws.cell(row=r, column=11).font = pos_font if pl >= 0 else neg_font
+            # P&L points is now col 12, P&L % col 13 after Engine insert.
             ws.cell(row=r, column=12).font = pos_font if pl >= 0 else neg_font
+            ws.cell(row=r, column=13).font = pos_font if pl >= 0 else neg_font
         except (TypeError, ValueError):
             pass
-    widths = [12, 12, 12, 18, 14, 20, 20, 18, 12, 14, 12, 10, 12]
+    widths = [12, 12, 12, 10, 18, 14, 20, 20, 18, 12, 14, 12, 10, 12]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -915,9 +923,13 @@ def trades_xlsx():
     wb = Workbook()
     ws = wb.active
     ws.title = "Trade Ledger"
-    headers = ["Date", "Scrip", "Order Type", "Entry Time (IST)", "Entry Price",
-               "Target Level Reached", "Max/Min Target Price", "Exit Time (IST)",
-               "Exit Price", "Exit Reason", "P&L Points", "P&L %", "Duration"]
+    # Phase 3: Engine column (current/reverse) — see /paper-trades.xlsx for
+    # the rationale. Inserted after Order Type; legacy rows fall back to
+    # 'current' to match the HTML rendering.
+    headers = ["Date", "Scrip", "Order Type", "Engine", "Entry Time (IST)",
+               "Entry Price", "Target Level Reached", "Max/Min Target Price",
+               "Exit Time (IST)", "Exit Price", "Exit Reason",
+               "P&L Points", "P&L %", "Duration"]
     ws.append(headers)
     # Header styling
     hdr_fill = PatternFill("solid", fgColor="FFEB3B")
@@ -940,6 +952,7 @@ def trades_xlsx():
             t.get("date", ""),
             t.get("scrip", ""),
             t.get("order_type", ""),
+            t.get("engine") or "current",
             t.get("entry_time", ""),
             t.get("entry_price", ""),
             t.get("target_level_reached", "") or "",
@@ -959,15 +972,16 @@ def trades_xlsx():
         else:
             otype_cell.fill = buy_fill
         otype_cell.alignment = Alignment(horizontal="center")
-        # P&L colouring
+        ws.cell(row=r, column=4).alignment = Alignment(horizontal="center")
+        # P&L colouring (cols shifted right by 1 after Engine insert)
         try:
             pl = float(t.get("pnl_points") or 0)
-            ws.cell(row=r, column=11).font = pos_font if pl >= 0 else neg_font
             ws.cell(row=r, column=12).font = pos_font if pl >= 0 else neg_font
+            ws.cell(row=r, column=13).font = pos_font if pl >= 0 else neg_font
         except (TypeError, ValueError):
             pass
     # Column widths
-    widths = [12, 12, 12, 18, 14, 20, 20, 18, 12, 14, 12, 10, 12]
+    widths = [12, 12, 12, 10, 18, 14, 20, 20, 18, 12, 14, 12, 10, 12]
     from openpyxl.utils import get_column_letter
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
