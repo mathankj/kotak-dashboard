@@ -70,6 +70,28 @@
   td[data-col].lvl-T4, td[data-col].lvl-T5 {
     font-weight: 600;
   }
+  /* Reverse Gann table — same layout, slightly different chrome to make
+     it visually distinct at a glance. The level cells reuse the same
+     .lvl-* heatmap classes so colour semantics stay identical. */
+  .card.rev { margin-top: 16px; border-color: #6d28d9; }
+  .card.rev th.group-sell,
+  .card.rev th.group-buy { background: #4c1d95; color: #ede9fe; }
+  .card.rev th.group-ltp { background: #5b21b6; color: #fafafa; }
+  .card.rev .card-title { padding: 10px 14px 0; color: #c4b5fd;
+                          font-weight: 700; font-size: 13px;
+                          letter-spacing: 0.3px; }
+  .card.rev .card-title small { color: #a78bfa; font-weight: 500;
+                                margin-left: 8px; font-size: 11px; }
+  /* Anchor pills next to the scrip name show the live low/high used as
+     anchors. Flash green/red briefly when a new low/high prints — that's
+     the user signal that a rev ladder just refreshed. */
+  .anchor-pills { display: inline-flex; gap: 4px; margin-left: 6px; }
+  .anchor-pill { padding: 1px 6px; border-radius: 3px; font-size: 9px;
+                 font-weight: 700; letter-spacing: 0.3px;
+                 background: #27272a; color: #a1a1aa;
+                 transition: background 0.6s, color 0.6s; }
+  .anchor-pill.lo-flash { background: #15803d; color: #fff; }
+  .anchor-pill.hi-flash { background: #b91c1c; color: #fff; }
   /* Header counter + toggle */
   .counter { display: inline-flex; gap: 10px; align-items: center;
              background: #27272a; padding: 6px 12px; border-radius: 6px;
@@ -198,6 +220,9 @@
 </div>
 
 <div class="card">
+<div class="card-title" style="padding:10px 14px 0;color:#a1a1aa;font-weight:700;font-size:13px;">
+  CURRENT LOGIC <small style="color:#71717a;font-weight:500;margin-left:8px;font-size:11px;">anchor: today's open</small>
+</div>
 <table>
   <thead>
     <tr>
@@ -221,6 +246,72 @@
     {% for s in scrips %}
     <tr data-symbol="{{ s.symbol }}" data-tradeable="{{ '1' if s.tradeable else '0' }}">
       <td class="scrip">{{ s.symbol }}</td>
+      <td class="pnl" data-col="pnl">+0.00</td>
+      <td class="pnl" data-col="livepnl">+0.00</td>
+      <td data-col="qty">0</td>
+      <td data-col="open">-</td>
+      <td data-col="low">-</td>
+      <td data-col="high">-</td>
+      <td data-col="S5">-</td>
+      <td data-col="S4">-</td>
+      <td data-col="S3">-</td>
+      <td data-col="S2">-</td>
+      <td data-col="S1">-</td>
+      <td data-col="SELL_WA">-</td>
+      <td data-col="SELL">-</td>
+      <td class="ltp" data-col="ltp">-</td>
+      <td data-col="BUY">-</td>
+      <td data-col="BUY_WA">-</td>
+      <td data-col="T1">-</td>
+      <td data-col="T2">-</td>
+      <td data-col="T3">-</td>
+      <td data-col="T4">-</td>
+      <td data-col="T5">-</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+{# Phase 1 — Reverse Gann ladders. Read-only display. Same column layout
+   as Current; level cells are computed from intraday low/high anchors
+   (stepped — anchor only moves on a new lower-low / higher-high). The
+   anchor-pills next to the scrip name show which low/high is currently
+   driving the rev-buy / rev-sell ladders for that row. #}
+<div class="card rev">
+<div class="card-title">
+  REVERSE LOGIC
+  <small>sell levels anchored to today's HIGH, buy levels anchored to today's LOW</small>
+</div>
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2">SCRIP</th>
+      <th rowspan="2">P&amp;L</th>
+      <th rowspan="2">LIVE P&amp;L</th>
+      <th rowspan="2">QTY</th>
+      <th rowspan="2">OPEN</th>
+      <th rowspan="2">LOW</th>
+      <th rowspan="2">HIGH</th>
+      <th colspan="7" class="group-sell">REV SELL LEVELS</th>
+      <th rowspan="2" class="group-ltp">LTP</th>
+      <th colspan="7" class="group-buy">REV BUY LEVELS</th>
+    </tr>
+    <tr>
+      <th>S5</th><th>S4</th><th>S3</th><th>S2</th><th>S1</th><th>WA</th><th>SELL</th>
+      <th>BUY</th><th>WA</th><th>T1</th><th>T2</th><th>T3</th><th>T4</th><th>T5</th>
+    </tr>
+  </thead>
+  <tbody id="revRows">
+    {% for s in scrips %}
+    <tr data-symbol="{{ s.symbol }}">
+      <td class="scrip">
+        {{ s.symbol }}
+        <span class="anchor-pills">
+          <span class="anchor-pill" data-anchor="lo">Lo: -</span>
+          <span class="anchor-pill" data-anchor="hi">Hi: -</span>
+        </span>
+      </td>
       <td class="pnl" data-col="pnl">+0.00</td>
       <td class="pnl" data-col="livepnl">+0.00</td>
       <td data-col="qty">0</td>
@@ -319,6 +410,74 @@ function paintLtpCell(td, nearest) {
   if (nearest) td.classList.add("lvl-" + nearest);
 }
 
+// Phase 1 — helpers shared by current + reverse tables.
+// computeNearest is needed client-side for the rev table because the
+// server only ships nearest_level for the current ladder. Cheap loop
+// (≤14 levels per row), runs once per refresh tick.
+function flattenLevels(levels) {
+  const out = {};
+  if (!levels) return out;
+  Object.assign(out, levels.sell || {}, levels.buy || {});
+  return out;
+}
+
+function computeNearest(flatLevels, ltp) {
+  const ltpN = Number(ltp);
+  if (!isFinite(ltpN)) return null;
+  let best = null, bestDist = null;
+  for (const [name, px] of Object.entries(flatLevels)) {
+    if (px === null || px === undefined) continue;
+    const pxN = Number(px);
+    if (!isFinite(pxN)) continue;
+    const d = Math.abs(ltpN - pxN);
+    if (bestDist === null || d < bestDist) { bestDist = d; best = name; }
+  }
+  return best;
+}
+
+// Paints the level + LTP cells for one row. Used for both tables —
+// the only difference between them is which {sell,buy} dict you pass.
+function paintLevelRow(tr, levels, ltp, nearest) {
+  if (!tr) return;
+  const ltpCell = tr.querySelector('[data-col=ltp]');
+  if (ltpCell) {
+    ltpCell.textContent = fmt(ltp);
+    paintLtpCell(ltpCell, nearest);
+  }
+  const sell = (levels && levels.sell) || {};
+  const buy  = (levels && levels.buy)  || {};
+  for (const lvl of SELL_LVLS) {
+    paintCell(tr.querySelector('[data-col=' + lvl + ']'), lvl, sell[lvl], ltp);
+  }
+  for (const lvl of BUY_LVLS) {
+    paintCell(tr.querySelector('[data-col=' + lvl + ']'), lvl, buy[lvl], ltp);
+  }
+}
+
+// Track previous anchor timestamps per symbol so we can flash the pills
+// when a new lower-low / higher-high prints. Stepped — see _update_rev_anchors
+// in backend/quotes.py for the matching server-side tracker.
+const _lastAnchorTs = {};
+
+function updateAnchorPills(tr, anchor, symbol) {
+  if (!tr) return;
+  const loPill = tr.querySelector('[data-anchor=lo]');
+  const hiPill = tr.querySelector('[data-anchor=hi]');
+  const a = anchor || {};
+  if (loPill) loPill.textContent = "Lo: " + (a.low != null ? fmt(a.low) : "-");
+  if (hiPill) hiPill.textContent = "Hi: " + (a.high != null ? fmt(a.high) : "-");
+  const prev = _lastAnchorTs[symbol] || {};
+  if (loPill && a.low_set_at && prev.low_set_at !== a.low_set_at) {
+    loPill.classList.add('lo-flash');
+    setTimeout(() => loPill.classList.remove('lo-flash'), 800);
+  }
+  if (hiPill && a.high_set_at && prev.high_set_at !== a.high_set_at) {
+    hiPill.classList.add('hi-flash');
+    setTimeout(() => hiPill.classList.remove('hi-flash'), 800);
+  }
+  _lastAnchorTs[symbol] = { low_set_at: a.low_set_at, high_set_at: a.high_set_at };
+}
+
 function updateStats(stats) {
   if (!stats) return;
   document.getElementById("statActive").textContent = stats.active || 0;
@@ -344,22 +503,24 @@ async function refresh() {
     updateStats(data.stats);
 
     for (const s of data.scrips) {
-      const tr = document.querySelector('tr[data-symbol="' + s.symbol + '"]');
-      if (!tr) continue;
-      const ltp = s.ltp;
-      const ltpCell = tr.querySelector('[data-col=ltp]');
-      ltpCell.textContent = fmt(ltp);
-      paintLtpCell(ltpCell, s.nearest_level);
-      tr.querySelector('[data-col=open]').textContent = fmt(s.open);
-      tr.querySelector('[data-col=low]').textContent  = fmt(s.low);
-      tr.querySelector('[data-col=high]').textContent = fmt(s.high);
-      const sell = (s.levels && s.levels.sell) || {};
-      const buy  = (s.levels && s.levels.buy)  || {};
-      for (const lvl of SELL_LVLS) {
-        paintCell(tr.querySelector('[data-col=' + lvl + ']'), lvl, sell[lvl], ltp);
+      // --- Current logic table ---
+      const trCur = document.querySelector('#rows tr[data-symbol="' + s.symbol + '"]');
+      if (trCur) {
+        trCur.querySelector('[data-col=open]').textContent = fmt(s.open);
+        trCur.querySelector('[data-col=low]').textContent  = fmt(s.low);
+        trCur.querySelector('[data-col=high]').textContent = fmt(s.high);
+        paintLevelRow(trCur, s.levels, s.ltp, s.nearest_level);
       }
-      for (const lvl of BUY_LVLS) {
-        paintCell(tr.querySelector('[data-col=' + lvl + ']'), lvl, buy[lvl], ltp);
+      // --- Reverse logic table (Phase 1: visual only) ---
+      const trRev = document.querySelector('#revRows tr[data-symbol="' + s.symbol + '"]');
+      if (trRev) {
+        trRev.querySelector('[data-col=open]').textContent = fmt(s.open);
+        trRev.querySelector('[data-col=low]').textContent  = fmt(s.low);
+        trRev.querySelector('[data-col=high]').textContent = fmt(s.high);
+        const flatRev = flattenLevels(s.rev_levels);
+        const nearestRev = computeNearest(flatRev, s.ltp);
+        paintLevelRow(trRev, s.rev_levels, s.ltp, nearestRev);
+        updateAnchorPills(trRev, s.rev_anchor, s.symbol);
       }
     }
     refreshOpenPositions(data);
@@ -382,7 +543,9 @@ function fmtRs(n) {
 }
 
 function getRowLtp(symbol) {
-  const tr = document.querySelector('tr[data-symbol="' + symbol + '"]');
+  // Scope to the current-logic tbody — the rev table also has rows
+  // with the same data-symbol, but its LTP cell mirrors the current one.
+  const tr = document.querySelector('#rows tr[data-symbol="' + symbol + '"]');
   if (!tr) return null;
   const t = tr.querySelector('[data-col=ltp]').textContent;
   const n = parseFloat(t);
@@ -457,12 +620,24 @@ async function liveTick() {
     const r = await fetch("/api/gann-live");
     const data = await r.json();
     for (const s of (data.scrips || [])) {
-      const tr = document.querySelector('tr[data-symbol="' + s.symbol + '"]');
-      if (!tr) continue;
-      const ltpCell = tr.querySelector('[data-col=ltp]');
-      if (!ltpCell) continue;
-      ltpCell.textContent = fmt(s.ltp);
-      paintLtpCell(ltpCell, s.nearest_level);
+      // Current table — server-computed nearest
+      const trCur = document.querySelector('#rows tr[data-symbol="' + s.symbol + '"]');
+      if (trCur) {
+        const ltpCell = trCur.querySelector('[data-col=ltp]');
+        if (ltpCell) {
+          ltpCell.textContent = fmt(s.ltp);
+          paintLtpCell(ltpCell, s.nearest_level);
+        }
+      }
+      // Rev table — only update the LTP text on fast tick. Nearest-rev
+      // recoloring happens in refresh() since we need rev_levels to
+      // compute it and gann-live doesn't ship them. LTP value is the
+      // same number for both tables.
+      const trRev = document.querySelector('#revRows tr[data-symbol="' + s.symbol + '"]');
+      if (trRev) {
+        const ltpCell = trRev.querySelector('[data-col=ltp]');
+        if (ltpCell) ltpCell.textContent = fmt(s.ltp);
+      }
     }
   } catch (e) { /* swallow — refresh() will surface errors */ }
 }

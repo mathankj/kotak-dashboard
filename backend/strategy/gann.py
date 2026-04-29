@@ -49,6 +49,44 @@ def gann_levels(open_price):
     return {"sell": sell, "buy": buy}
 
 
+# ---- Reverse Gann ladders (Phase 1) ----
+# Same formula and step as gann_levels(), but anchored to today's intraday
+# extremes instead of the opening price. Source of truth: Ganesh's
+# Gann.xlsm Strategy sheet — "Rev Buy" block (cols AB-AH) anchored at
+# SQRT(low), "Rev Sell" block (cols AJ-AP) anchored at SQRT(high). We reuse
+# the existing 0.0625 sqrt-step and BUY/SELL level names so downstream
+# config/UI/strategy code that already understands BUY_WA, T1..T5, etc.
+# can layer on top without renaming.
+def reverse_buy_levels(low_of_day):
+    """Buy-side Gann ladder anchored to today's running intraday LOW.
+    Returns dict {BUY..T5}. Used as a bounce-target ladder once price has
+    dipped below the open. Anchor only moves when a NEW lower low is set
+    (stepped — see backend/quotes.py for the running-low tracker)."""
+    if not low_of_day or low_of_day <= 0:
+        return {k: None for k in BUY_LEVELS}
+    sq = math.sqrt(low_of_day)
+    out = {}
+    for i, name in enumerate(BUY_LEVELS):
+        n = i + 2
+        out[name] = round((sq + n * GANN_STEP) ** 2, 2)
+    return out
+
+
+def reverse_sell_levels(high_of_day):
+    """Sell-side Gann ladder anchored to today's running intraday HIGH.
+    Returns dict {S5..SELL}. Used as a rejection-target ladder once price
+    has rallied above the open. Anchor only moves when a NEW higher high
+    is set (stepped — tracker lives in backend/quotes.py)."""
+    if not high_of_day or high_of_day <= 0:
+        return {k: None for k in SELL_LEVELS}
+    sq = math.sqrt(high_of_day)
+    out = {}
+    for i, name in enumerate(SELL_LEVELS):
+        n = -(8 - i)
+        out[name] = round((sq + n * GANN_STEP) ** 2, 2)
+    return out
+
+
 def nearest_gann_level(symbol_data):
     """Return (level_name, distance_pct) of the gann level nearest to LTP.
     Used for LTP box colouring."""

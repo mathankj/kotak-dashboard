@@ -19,8 +19,46 @@ from backend.kotak.instruments import (
     _fetch_nearest_index_future,
 )
 from backend.kotak.quote_feed import QuoteFeed
-from backend.strategy.gann import gann_levels
+from backend.strategy.gann import (
+    gann_levels, reverse_buy_levels, reverse_sell_levels,
+)
 from backend.utils import now_ist
+
+
+# ---- Reverse Gann anchors (stepped) ----
+# Per-symbol running anchors used to compute reverse Gann ladders. Stepped
+# means: anchor only moves when a NEW intraday low (rev-buy anchor) or
+# NEW intraday high (rev-sell anchor) prints. Resets daily on first quote
+# of a new IST trading day. _set_at timestamps drive the brief flash
+# animation in the UI when an anchor refreshes.
+# Structure: {symbol: {"date": "YYYY-MM-DD",
+#                      "low": float|None,  "low_set_at":  ts|None,
+#                      "high": float|None, "high_set_at": ts|None}}
+_rev_anchor_state = {}
+
+
+def _update_rev_anchors(symbol, cur_low, cur_high, today):
+    """Apply stepped-anchor logic for one symbol.
+
+    cur_low / cur_high are the latest REST-reported intraday values
+    (None pre-market / off-hours). Returns the (possibly updated) state
+    dict; callers pull anchor values + set_at timestamps from it.
+    """
+    state = _rev_anchor_state.get(symbol)
+    if not state or state.get("date") != today:
+        state = {"date": today, "low": None, "high": None,
+                 "low_set_at": None, "high_set_at": None}
+    now = time.time()
+    if cur_low is not None and cur_low > 0:
+        if state["low"] is None or cur_low < state["low"]:
+            state["low"] = cur_low
+            state["low_set_at"] = now
+    if cur_high is not None and cur_high > 0:
+        if state["high"] is None or cur_high > state["high"]:
+            state["high"] = cur_high
+            state["high_set_at"] = now
+    _rev_anchor_state[symbol] = state
+    return state
 
 
 # ---- TTL cache ----
@@ -209,6 +247,23 @@ def fetch_quotes(force=False):
         _ws_overlay(out, {s["symbol"]: (s["exchange"], s["token"]) for s in SCRIPS})
     except Exception as e:
         print(f"[quote_feed] overlay (stocks) failed: {type(e).__name__}: {e}")
+
+    # Phase 1 — reverse Gann ladders. Stepped anchor: rev-buy anchored to
+    # today's running low (only updates on a new lower low); rev-sell to
+    # today's running high. Computed AFTER the WS overlay so we use the
+    # freshest possible OHLC. Empty dicts pre-market — same shape as
+    # `levels` so the frontend can treat them symmetrically.
+    today = now_ist().strftime("%Y-%m-%d")
+    for sym, rec in out.items():
+        st = _update_rev_anchors(sym, rec.get("low"), rec.get("high"), today)
+        rec["rev_anchor"] = {
+            "low": st["low"], "high": st["high"],
+            "low_set_at": st["low_set_at"], "high_set_at": st["high_set_at"],
+        }
+        rec["rev_levels"] = {
+            "buy":  reverse_buy_levels(st["low"])   if st["low"]  else {},
+            "sell": reverse_sell_levels(st["high"]) if st["high"] else {},
+        }
 
     _quote_cache["data"] = out
     _quote_cache["ts"] = now
