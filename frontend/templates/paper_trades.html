@@ -61,6 +61,11 @@
   .banner-paper { background: #4c1d95; color: #ede9fe; padding: 12px 16px;
                   border-radius: 8px; margin-bottom: 16px; font-size: 14px;
                   border: 1px solid #6d28d9; font-weight: 600; }
+  /* Phase 2d — engine pill (matches /trades + /blockers palette). */
+  .engine-pill { padding: 2px 8px; border-radius: 4px; font-size: 10px;
+                 font-weight: 700; letter-spacing: 0.5px; }
+  .engine-current { background: #334155; color: #cbd5e1; }
+  .engine-reverse { background: #78350f; color: #fed7aa; }
 </style>
 </head>
 <body>
@@ -122,6 +127,8 @@
           <th>Asset</th>
           <th>Scrip</th>
           <th>Side</th>
+          {# Phase 2d — engine column. #}
+          <th>Engine</th>
           <th>Entry Reason</th>
           <th>Trigger Lvl</th>
           <th class="num">Trigger Spot</th>
@@ -166,6 +173,9 @@
             <td class="{% if t.get('order_type') == 'BUY' %}buy{% else %}sell{% endif %}">
               {{ t.get('order_type', '') }}
             </td>
+            {# Phase 2d — engine. Legacy rows render as 'current'. #}
+            {% set _eng = t.get('engine') or 'current' %}
+            <td><span class="engine-pill engine-{{ _eng }}">{{ _eng }}</span></td>
             <td>{{ t.get('entry_reason', '') or '—' }}</td>
             <td>{{ t.get('trigger_level', '') or '—' }}</td>
             <td class="num">

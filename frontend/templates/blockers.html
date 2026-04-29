@@ -45,6 +45,12 @@
   .pill-side-S { background: #7f1d1d; color: #fecaca; }
   .pill-source { background: #1e3a8a; color: #bfdbfe; font-size: 10px; }
   .pill-kind { background: #3f3f46; color: #d4d4d8; font-size: 10px; }
+  /* Phase 2d — engine pill: which logic engine fired the attempt.
+     'current' (open-anchored Gann) is muted blue-grey, 'reverse'
+     (low/high-anchored) is amber so it's visually distinct in a
+     screenful of mostly-current rows. */
+  .pill-engine-current { background: #334155; color: #cbd5e1; font-size: 10px; }
+  .pill-engine-reverse { background: #78350f; color: #fed7aa; font-size: 10px; }
   .empty { color: #71717a; font-style: italic; padding: 20px 0; }
   .refresh { padding: 8px 16px; background: #16a34a; color: white; border: none;
              border-radius: 6px; cursor: pointer; font-size: 14px; }
@@ -138,6 +144,7 @@
           <th>Reason</th>
           <th>Message</th>
           <th>Source</th>
+          <th>Engine</th>
         </tr>
       </thead>
       <tbody id="blkBody">
@@ -177,6 +184,11 @@
             <td><span class="reason">{{ b.get('result', '') }}</span></td>
             <td class="msg">{{ b.get('message', '') }}</td>
             <td><span class="pill pill-source">{{ b.get('source', '-') }}</span></td>
+            {# Phase 2d — engine column. Legacy rows pre-Phase-2 had no
+               engine field; render them as 'current' since that was the
+               only engine then. #}
+            {% set _eng = b.get('engine') or 'current' %}
+            <td><span class="pill pill-engine-{{ _eng }}">{{ _eng }}</span></td>
           </tr>
         {% endfor %}
       </tbody>
@@ -250,6 +262,7 @@ function rowHtml(b) {
     <td><span class="reason">${escHtml(b.result || '')}</span></td>
     <td class="msg">${escHtml(b.message || '')}</td>
     <td><span class="pill pill-source">${escHtml(b.source || '-')}</span></td>
+    <td><span class="pill pill-engine-${escHtml(b.engine || 'current')}">${escHtml(b.engine || 'current')}</span></td>
   </tr>`;
 }
 
