@@ -2,66 +2,78 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Options - Kotak Neo</title>
 <style>
+  /* B.1 — dark theme matching base.html palette. Light theme retired. */
   * { box-sizing: border-box; }
   body { font-family: -apple-system, 'Segoe UI', sans-serif;
-         background: #f5f6f8; color: #1f2937; margin: 0; padding: 16px; }
+         background: #0f1419; color: #d4d4d8; margin: 0; padding: 20px; }
   header { display: flex; justify-content: space-between; align-items: center;
-           background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+           background: #18181b; border: 1px solid #27272a; border-radius: 8px;
            padding: 12px 16px; margin-bottom: 12px; }
-  .title { font-weight: 700; font-size: 18px; }
-  .live { color: #16a34a; font-size: 12px; margin-left: 8px; }
-  .stale { color: #dc2626; font-size: 12px; margin-left: 8px; }
-  .clock { font-family: monospace; background: #f3f4f6; padding: 6px 10px;
-           border-radius: 6px; font-size: 14px; }
-  .ucc { background: #f3f4f6; padding: 6px 10px; border-radius: 6px;
-         font-size: 13px; color: #374151; }
-  .tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
-  .tabs a { padding: 6px 12px; background: #fff; color: #6b7280;
-            text-decoration: none; border-radius: 6px; font-size: 13px;
-            border: 1px solid #e5e7eb; }
+  .title { font-weight: 700; font-size: 18px; color: #fafafa; }
+  .live  { color: #4ade80; font-size: 12px; margin-left: 8px; }
+  .stale { color: #f87171; font-size: 12px; margin-left: 8px; }
+  /* B.2 — .clock + .ucc styles moved into _safety_header.html. */
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tabs a { padding: 8px 16px; background: #18181b; color: #a1a1aa;
+            text-decoration: none; border-radius: 6px; font-size: 14px;
+            border: 1px solid #27272a; }
   .tabs a.active { background: #2563eb; color: white; border-color: #2563eb; }
+  .tabs a:hover:not(.active) { background: #27272a; color: #fafafa; }
   .idx-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
-  .idx-tabs button { padding: 8px 16px; background: #fff; color: #374151;
-                     border: 1px solid #e5e7eb; border-radius: 6px;
+  .idx-tabs button { padding: 8px 16px; background: #18181b; color: #a1a1aa;
+                     border: 1px solid #27272a; border-radius: 6px;
                      cursor: pointer; font-size: 13px; font-weight: 600; }
-  .idx-tabs button.active { background: #1f2937; color: #fff;
-                            border-color: #1f2937; }
-  .meta-bar { display: flex; gap: 18px; padding: 12px 16px; background: #fff;
-              border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 8px;
+  .idx-tabs button.active { background: #1e293b; color: #fafafa;
+                            border-color: #2563eb; }
+  .idx-tabs button:hover:not(.active) { background: #27272a; color: #fafafa; }
+  .meta-bar { display: flex; gap: 18px; padding: 12px 16px; background: #18181b;
+              border: 1px solid #27272a; border-radius: 8px; margin-bottom: 8px;
               font-size: 13px; flex-wrap: wrap; align-items: center; }
   .meta-bar .m { display: flex; gap: 6px; align-items: baseline; }
-  .meta-bar .k { color: #6b7280; font-size: 11px; text-transform: uppercase; }
-  .meta-bar .v { font-weight: 700; font-family: monospace; font-size: 14px; }
-  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+  .meta-bar .k { color: #a1a1aa; font-size: 11px; text-transform: uppercase;
+                 letter-spacing: 0.5px; }
+  .meta-bar .v { font-weight: 700; font-family: monospace; font-size: 14px;
+                 color: #fafafa; }
+  .card { background: #18181b; border: 1px solid #27272a; border-radius: 8px;
           overflow-x: auto; }
   table.chain { width: 100%; border-collapse: collapse; font-size: 13px; }
-  table.chain th { text-align: center; padding: 10px 8px; background: #f9fafb;
-       color: #6b7280; font-weight: 600; font-size: 11px;
-       text-transform: uppercase; border-bottom: 1px solid #e5e7eb; }
-  table.chain th.ce-grp { background: #065f46; color: #fff; }
-  table.chain th.pe-grp { background: #991b1b; color: #fff; }
-  table.chain th.strike-col { background: #1f2937; color: #fff; }
-  table.chain td { padding: 10px 8px; border-bottom: 1px solid #f3f4f6;
-       color: #1f2937; text-align: center;
+  table.chain th { text-align: center; padding: 10px 8px; background: #27272a;
+       color: #a1a1aa; font-weight: 600; font-size: 11px;
+       text-transform: uppercase; letter-spacing: 0.5px;
+       border-bottom: 1px solid #3f3f46; }
+  table.chain th.ce-grp     { background: #166534; color: #d1fae5; }
+  table.chain th.pe-grp     { background: #7f1d1d; color: #fecaca; }
+  table.chain th.strike-col { background: #1e293b; color: #fafafa; }
+  table.chain td { padding: 10px 8px; border-bottom: 1px solid #27272a;
+       color: #d4d4d8; text-align: center;
        font-variant-numeric: tabular-nums; }
-  table.chain td.strike { font-weight: 700; background: #f3f4f6;
-                          font-family: monospace; font-size: 14px; }
+  table.chain td.strike { font-weight: 700; background: #27272a;
+                          font-family: monospace; font-size: 14px;
+                          color: #fafafa; }
   table.chain td.ltp-ce, table.chain td.ltp-pe {
        font-weight: 700; font-size: 14px; }
-  table.chain td.ltp-ce { background: #d1fae5; color: #065f46; }
-  table.chain td.ltp-pe { background: #fee2e2; color: #991b1b; }
-  table.chain tr.atm td { background: #fffbeb !important; }
-  table.chain tr.atm td.strike { background: #f59e0b !important; color: #fff; }
-  table.chain td.chg-pos { color: #16a34a; font-weight: 600; }
-  table.chain td.chg-neg { color: #dc2626; font-weight: 600; }
-  .err { background: #fee2e2; color: #991b1b; padding: 8px 12px;
-         border-radius: 6px; font-size: 12px; margin-bottom: 10px;
-         display: none; }
+  table.chain td.ltp-ce { background: #052e16; color: #4ade80; }
+  table.chain td.ltp-pe { background: #450a0a; color: #f87171; }
+  /* ATM row uses subtle amber tint that reads on dark bg without screaming */
+  table.chain tr.atm td        { background: #422006 !important; }
+  table.chain tr.atm td.strike { background: #f59e0b !important; color: #1c1917; }
+  table.chain td.chg-pos { color: #4ade80; font-weight: 600; }
+  table.chain td.chg-neg { color: #f87171; font-weight: 600; }
+  /* F.3 — Δ inline next to LTP for ATM±2 strikes only.
+     Muted + smaller so it reads as annotation, not as price data. */
+  table.chain td .delta {
+    display: inline-block; margin-left: 6px;
+    font-size: 11px; color: #71717a; font-weight: 500;
+  }
+  .err { background: #450a0a; color: #fca5a5; padding: 8px 12px;
+         border: 1px solid #7f1d1d; border-radius: 6px; font-size: 12px;
+         margin-bottom: 10px; display: none; }
   .err.show { display: block; }
-  .hint { color: #6b7280; font-size: 11px; padding: 10px 16px; }
-  .loading { padding: 60px; text-align: center; color: #6b7280; font-size: 13px; }
+  .hint { color: #71717a; font-size: 11px; padding: 10px 16px; }
+  .loading { padding: 60px; text-align: center; color: #71717a; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -71,9 +83,7 @@
     <span id="live" class="live">● live</span>
   </div>
   <div style="display:flex;gap:10px;align-items:center;">
-    {% include "_safety_header.html" %}
-    <span class="clock" id="clock">00:00:00 IST</span>
-    {% if ucc %}<span class="ucc">UCC: {{ ucc }}</span>{% endif %}
+    {% include "_safety_header.html" %}{# B.2 — clock + UCC live here now. #}
   </div>
 </header>
 
@@ -120,12 +130,12 @@
 
 <div style="margin-top:24px;">
   <h3 style="margin:0 0 8px 0; font-size:15px;">Auto Option Trades (paper) — today</h3>
-  <div style="font-size:12px; color:#666; margin-bottom:8px;">
+  <div style="font-size:12px; color:#a1a1aa; margin-bottom:8px;">
     Strategy auto-buys ATM CE when index spot crosses Gann BUY level up, or ATM PE when spot crosses SELL level down. Exits at T1/S1 target or opposite-level SL. Squares off at 15:15.
   </div>
   <table style="width:100%; border-collapse:collapse; font-size:13px;">
     <thead>
-      <tr style="background:#f5f5f5; text-align:left;">
+      <tr style="background:#27272a; color:#a1a1aa; text-align:left;">
         <th style="padding:6px;">Time</th>
         <th style="padding:6px;">Underlying</th>
         <th style="padding:6px;">Contract</th>
@@ -137,7 +147,7 @@
       </tr>
     </thead>
     <tbody id="tradesBody">
-      <tr><td colspan="8" style="padding:12px; text-align:center; color:#888;">Monitoring index spot crossings…</td></tr>
+      <tr><td colspan="8" style="padding:12px; text-align:center; color:#71717a;">Monitoring index spot crossings…</td></tr>
     </tbody>
   </table>
 </div>
@@ -199,11 +209,17 @@ function render(d) {
     const pe = r.pe || {};
     const ceChg = fmtChg(ce.change_pct);
     const peChg = fmtChg(pe.change_pct);
+    // F.3 — Δ is only attached server-side for ATM±2 strikes; everywhere
+    // else `delta` is undefined and we render nothing.
+    const ceDelta = (ce.delta !== null && ce.delta !== undefined)
+      ? `<span class="delta">Δ ${ce.delta.toFixed(2)}</span>` : '';
+    const peDelta = (pe.delta !== null && pe.delta !== undefined)
+      ? `<span class="delta">Δ ${pe.delta.toFixed(2)}</span>` : '';
     return `<tr class="${r.is_atm ? 'atm' : ''}">
-      <td class="ltp-ce">${fmt(ce.ltp)}</td>
+      <td class="ltp-ce">${fmt(ce.ltp)}${ceDelta}</td>
       <td class="${ceChg.cls}">${ceChg.text}</td>
       <td class="strike">${r.strike}</td>
-      <td class="ltp-pe">${fmt(pe.ltp)}</td>
+      <td class="ltp-pe">${fmt(pe.ltp)}${peDelta}</td>
       <td class="${peChg.cls}">${peChg.text}</td>
     </tr>`;
   }).join('');
@@ -214,7 +230,7 @@ function renderTrades(trades) {
   const tb = document.getElementById('tradesBody');
   if (!tb) return;
   if (!trades.length) {
-    tb.innerHTML = '<tr><td colspan="8" style="padding:12px; text-align:center; color:#888;">Monitoring index spot crossings…</td></tr>';
+    tb.innerHTML = '<tr><td colspan="8" style="padding:12px; text-align:center; color:#71717a;">Monitoring index spot crossings…</td></tr>';
     return;
   }
   tb.innerHTML = trades.map(t => {
@@ -225,13 +241,13 @@ function renderTrades(trades) {
     const reason = isOpen ? '—' : (t.exit_reason || '');
     const contract = `${t.strike} ${t.option_type}`;
     const statusHtml = isOpen
-      ? '<span style="color:#1976d2; font-weight:600;">OPEN</span>'
-      : `<span style="color:#666;">CLOSED</span> <span style="font-size:11px; color:#888;">(${reason})</span>`;
+      ? '<span style="color:#60a5fa; font-weight:600;">OPEN</span>'
+      : `<span style="color:#a1a1aa;">CLOSED</span> <span style="font-size:11px; color:#71717a;">(${reason})</span>`;
     return `<tr>
       <td style="padding:6px;">${t.entry_time}${!isOpen && t.exit_time ? ' → ' + t.exit_time : ''}</td>
       <td style="padding:6px;">${t.underlying}</td>
       <td style="padding:6px;">${contract}</td>
-      <td style="padding:6px; font-size:11px; color:#666;">${t.trigger_level || ''} @ ${fmt(t.trigger_spot)}</td>
+      <td style="padding:6px; font-size:11px; color:#a1a1aa;">${t.trigger_level || ''} @ ${fmt(t.trigger_spot)}</td>
       <td style="padding:6px; text-align:right;">${fmt(t.entry_price)}</td>
       <td style="padding:6px; text-align:right;">${fmt(cur)}</td>
       <td style="padding:6px; text-align:right;" class="${pnlCls}">${fmt(pnl)}</td>
@@ -256,13 +272,7 @@ async function refresh() {
     live.textContent = '● stale'; live.className = 'stale';
   }
 }
-function tickClock() {
-  const now = new Date();
-  const ist = new Date(now.getTime() + (now.getTimezoneOffset() + 330) * 60000);
-  document.getElementById('clock').textContent =
-    ist.toTimeString().slice(0, 8) + ' IST';
-}
-setInterval(tickClock, 1000); tickClock();
+// B.2 — tickClock moved into _safety_header.html.
 // If the server already gave us data, paint it instantly (no flash of
 // "Loading…") and let the 3s poller take over for live updates. If the
 // server couldn't (cold universe), fall back to fetching immediately.

@@ -2,46 +2,49 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Gann Trader - Kotak Neo</title>
 <style>
+  /* B.1 — dark theme matching base.html palette. Gann level heatmap colours
+     (lvl-S5..S1, T1..T5, SELL/BUY) are kept saturated since they're the
+     core signal — only the surrounding chrome (cards, tabs, modal) was
+     converted from light to dark. */
   * { box-sizing: border-box; }
   body { font-family: -apple-system, 'Segoe UI', sans-serif;
-         background: #f5f6f8; color: #1f2937; margin: 0; padding: 16px; }
+         background: #0f1419; color: #d4d4d8; margin: 0; padding: 20px; }
   header { display: flex; justify-content: space-between; align-items: center;
-           background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+           background: #18181b; border: 1px solid #27272a; border-radius: 8px;
            padding: 12px 16px; margin-bottom: 12px; }
-  .title { font-weight: 700; font-size: 18px; }
-  .live { color: #16a34a; font-size: 12px; margin-left: 8px; }
-  .stale { color: #dc2626; font-size: 12px; margin-left: 8px; }
-  .clock { font-family: monospace; background: #f3f4f6; padding: 6px 10px;
-           border-radius: 6px; font-size: 14px; }
-  .ucc { background: #f3f4f6; padding: 6px 10px; border-radius: 6px;
-         font-size: 13px; color: #374151; }
-  .tabs { display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap; }
-  .tabs a { padding: 6px 12px; background: #fff; color: #6b7280;
-            text-decoration: none; border-radius: 6px; font-size: 13px;
-            border: 1px solid #e5e7eb; }
+  .title { font-weight: 700; font-size: 18px; color: #fafafa; }
+  .live  { color: #4ade80; font-size: 12px; margin-left: 8px; }
+  .stale { color: #f87171; font-size: 12px; margin-left: 8px; }
+  /* B.2 — .clock + .ucc styles moved into _safety_header.html. */
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; flex-wrap: wrap; }
+  .tabs a { padding: 8px 16px; background: #18181b; color: #a1a1aa;
+            text-decoration: none; border-radius: 6px; font-size: 14px;
+            border: 1px solid #27272a; }
   .tabs a.active { background: #2563eb; color: white; border-color: #2563eb; }
-  .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+  .tabs a:hover:not(.active) { background: #27272a; color: #fafafa; }
+  .card { background: #18181b; border: 1px solid #27272a; border-radius: 8px;
           overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; min-width: 1400px; }
-  th { text-align: center; padding: 8px 6px; background: #f9fafb;
-       color: #6b7280; font-weight: 600; font-size: 10px;
-       text-transform: uppercase; border-bottom: 1px solid #e5e7eb;
-       position: sticky; top: 0; }
-  td { padding: 8px 6px; border-bottom: 1px solid #f3f4f6;
-       color: #1f2937; text-align: center; font-variant-numeric: tabular-nums; }
-  td.scrip { text-align: left; font-weight: 600; }
-  td.pnl { background: #dcfce7; color: #166534; font-weight: 600; }
-  td.pnl.neg { background: #fee2e2; color: #991b1b; }
-  th.group-sell { background: #6b7280; color: #fff; }
-  th.group-buy  { background: #6b7280; color: #fff; }
-  th.group-ltp  { background: #1f2937; color: #fff; }
+  th { text-align: center; padding: 8px 6px; background: #27272a;
+       color: #a1a1aa; font-weight: 600; font-size: 10px;
+       text-transform: uppercase; letter-spacing: 0.5px;
+       border-bottom: 1px solid #3f3f46; position: sticky; top: 0; }
+  td { padding: 8px 6px; border-bottom: 1px solid #27272a;
+       color: #d4d4d8; text-align: center; font-variant-numeric: tabular-nums; }
+  td.scrip { text-align: left; font-weight: 600; color: #fafafa; }
+  td.pnl { background: #052e16; color: #4ade80; font-weight: 600; }
+  td.pnl.neg { background: #450a0a; color: #f87171; }
+  th.group-sell { background: #475569; color: #f1f5f9; }
+  th.group-buy  { background: #475569; color: #f1f5f9; }
+  th.group-ltp  { background: #1e293b; color: #fafafa; }
   /* LTP cell + matching level cells share the same colour palette.
      Selectors are unprefixed so level <td>s pick them up too — the JS
      adds .lvl-* on a level cell once LTP has crossed that level
      (sell-side: LTP <= level price; buy-side: LTP >= level price). */
-  td.ltp { font-weight: 700; background: #f9fafb; font-size: 13px; }
+  td.ltp { font-weight: 700; background: #27272a; font-size: 13px; color: #fafafa; }
   td[data-col].lvl-on, td.ltp[class*="lvl-"] { transition: background 0.3s, color 0.3s; }
   td.lvl-S5      { background: #7F0000; color: #fff; }
   td.lvl-S4      { background: #8E1818; color: #fff; }
@@ -69,39 +72,39 @@
   }
   /* Header counter + toggle */
   .counter { display: inline-flex; gap: 10px; align-items: center;
-             background: #f3f4f6; padding: 6px 12px; border-radius: 6px;
-             font-size: 12px; }
+             background: #27272a; padding: 6px 12px; border-radius: 6px;
+             font-size: 12px; color: #d4d4d8; }
   .counter b { font-family: monospace; font-size: 13px; }
-  .counter .c-active { color: #2563eb; }
-  .counter .c-closed { color: #6b7280; }
-  .counter .c-pnl-pos { color: #16a34a; }
-  .counter .c-pnl-neg { color: #dc2626; }
+  .counter .c-active { color: #60a5fa; }
+  .counter .c-closed { color: #a1a1aa; }
+  .counter .c-pnl-pos { color: #4ade80; }
+  .counter .c-pnl-neg { color: #f87171; }
   .paper-toggle { display: inline-flex; align-items: center; gap: 8px;
-                  background: #16a34a; color: #fff; padding: 6px 10px;
+                  background: #166534; color: #d1fae5; padding: 6px 10px;
                   border-radius: 16px; font-size: 12px; font-weight: 600; }
-  .dot-on  { width:10px; height:10px; border-radius:50%; background:#fff; }
-  .open-pos-bar { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+  .dot-on  { width:10px; height:10px; border-radius:50%; background:#d1fae5; }
+  .open-pos-bar { background: #18181b; border: 1px solid #27272a; border-radius: 8px;
                   padding: 10px 12px; margin-bottom: 12px; font-size: 12px; }
-  .open-pos-bar .head { font-weight: 600; color: #374151; margin-bottom: 6px; }
+  .open-pos-bar .head { font-weight: 600; color: #fafafa; margin-bottom: 6px; }
   .open-pos-row { display: grid;
                   grid-template-columns: 90px 50px 70px 100px 100px 100px 80px 80px;
                   gap: 8px; align-items: center; padding: 4px 0;
-                  border-bottom: 1px solid #f3f4f6; }
+                  border-bottom: 1px solid #27272a; }
   .open-pos-row:last-child { border-bottom: none; }
-  .open-pos-row .scr { font-weight: 700; }
+  .open-pos-row .scr { font-weight: 700; color: #fafafa; }
   .pill-sm { padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 700;
              display: inline-block; }
-  .pill-sm.BUY  { background: #dcfce7; color: #166534; }
-  .pill-sm.SELL { background: #fee2e2; color: #991b1b; }
-  .pnl-pos { color: #16a34a; font-weight: 600; }
-  .pnl-neg { color: #dc2626; font-weight: 600; }
-  .btn-close { background: #1f2937; color: #fff; border: none; border-radius: 4px;
+  .pill-sm.BUY  { background: #166534; color: #d1fae5; }
+  .pill-sm.SELL { background: #7f1d1d; color: #fecaca; }
+  .pnl-pos { color: #4ade80; font-weight: 600; }
+  .pnl-neg { color: #f87171; font-weight: 600; }
+  .btn-close { background: #475569; color: #f1f5f9; border: none; border-radius: 4px;
                padding: 4px 10px; font-size: 11px; cursor: pointer; }
-  .btn-close:hover { background: #374151; }
-  .err-banner { background: #fef3c7; border: 1px solid #fbbf24; color: #78350f;
+  .btn-close:hover { background: #64748b; }
+  .err-banner { background: #1c1917; border: 1px solid #f59e0b; color: #fbbf24;
                 padding: 10px 14px; border-radius: 8px; margin-bottom: 12px;
                 font-size: 13px; }
-  .ok-banner  { background: #dcfce7; border: 1px solid #16a34a; color: #14532d;
+  .ok-banner  { background: #052e16; border: 1px solid #16a34a; color: #86efac;
                 padding: 10px 14px; border-radius: 8px; margin-bottom: 12px;
                 font-size: 13px; }
   .btn-buy  { background:#16a34a; color:#fff; border:none; border-radius:4px;
@@ -113,49 +116,52 @@
               cursor:pointer; }
   .btn-sell:hover { background:#b91c1c; }
   /* modal */
-  .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,0.5);
+  .modal-bg { position:fixed; inset:0; background:rgba(0,0,0,0.7);
               display:none; align-items:center; justify-content:center;
               z-index:1000; }
   .modal-bg.show { display:flex; }
-  .modal { background:#fff; border-radius:10px; padding:0; width:420px;
-           max-width:95vw; box-shadow:0 20px 50px rgba(0,0,0,0.3); }
-  .modal-head { padding:14px 18px; border-bottom:1px solid #e5e7eb;
+  .modal { background:#18181b; border:1px solid #3f3f46; border-radius:10px;
+           padding:0; width:420px; max-width:95vw;
+           box-shadow:0 20px 50px rgba(0,0,0,0.7); color:#d4d4d8; }
+  .modal-head { padding:14px 18px; border-bottom:1px solid #27272a;
                 display:flex; justify-content:space-between; align-items:center; }
-  .modal-head .sym { font-weight:700; font-size:16px; }
-  .modal-head .ltp { font-family:monospace; color:#6b7280; }
+  .modal-head .sym { font-weight:700; font-size:16px; color:#fafafa; }
+  .modal-head .ltp { font-family:monospace; color:#a1a1aa; }
   .modal-head .pill { padding:3px 10px; border-radius:12px; color:#fff;
                       font-size:11px; font-weight:700; }
   .pill-B { background:#16a34a; } .pill-S { background:#dc2626; }
   .modal-body { padding:14px 18px; }
   .row { display:flex; gap:10px; margin-bottom:10px; align-items:center; }
-  .row label { width:90px; font-size:12px; color:#374151; }
+  .row label { width:90px; font-size:12px; color:#a1a1aa; }
   .row input[type=number], .row input[type=password] {
-    flex:1; padding:6px 10px; border:1px solid #d1d5db; border-radius:6px;
+    flex:1; padding:6px 10px; border:1px solid #3f3f46; border-radius:6px;
+    background:#0f1419; color:#fafafa;
     font-size:14px; font-family:monospace; }
   .seg { display:flex; gap:4px; flex:1; }
-  .seg label { width:auto; flex:1; padding:6px 10px; border:1px solid #d1d5db;
+  .seg label { width:auto; flex:1; padding:6px 10px; border:1px solid #3f3f46;
                border-radius:6px; text-align:center; font-size:12px;
-               cursor:pointer; background:#fff; }
+               cursor:pointer; background:#27272a; color:#d4d4d8; }
   .seg input { display:none; }
   .seg input:checked + span { font-weight:700; }
-  .seg label:has(input:checked) { background:#dbeafe; border-color:#2563eb; color:#1e40af; }
-  .summary { background:#f9fafb; padding:10px 14px; border-radius:6px;
-             margin-top:8px; font-size:13px; }
-  .summary .total { font-size:16px; font-weight:700; color:#1f2937; }
-  .summary .avail { font-size:12px; color:#6b7280; margin-top:4px; }
-  .summary .insuf { color:#dc2626; font-weight:600; }
-  .modal-foot { padding:12px 18px; border-top:1px solid #e5e7eb;
+  .seg label:has(input:checked) { background:#1e293b; border-color:#2563eb; color:#fafafa; }
+  .summary { background:#0f1419; border:1px solid #27272a; padding:10px 14px;
+             border-radius:6px; margin-top:8px; font-size:13px; }
+  .summary .total { font-size:16px; font-weight:700; color:#fafafa; }
+  .summary .avail { font-size:12px; color:#a1a1aa; margin-top:4px; }
+  .summary .insuf { color:#f87171; font-weight:600; }
+  .modal-foot { padding:12px 18px; border-top:1px solid #27272a;
                 display:flex; gap:10px; justify-content:flex-end; }
-  .btn-cancel { padding:8px 16px; background:#f3f4f6; color:#374151;
-                border:none; border-radius:6px; cursor:pointer; font-size:13px; }
+  .btn-cancel { padding:8px 16px; background:#27272a; color:#d4d4d8;
+                border:1px solid #3f3f46; border-radius:6px;
+                cursor:pointer; font-size:13px; }
   .btn-confirm { padding:8px 18px; color:#fff; border:none; border-radius:6px;
                  cursor:pointer; font-size:13px; font-weight:700; }
   .btn-confirm.B { background:#16a34a; } .btn-confirm.B:hover { background:#15803d; }
   .btn-confirm.S { background:#dc2626; } .btn-confirm.S:hover { background:#b91c1c; }
   .modal-msg { padding:10px 14px; margin-top:8px; border-radius:6px;
                font-size:13px; display:none; }
-  .modal-msg.ok  { background:#dcfce7; color:#14532d; display:block; }
-  .modal-msg.err { background:#fee2e2; color:#7f1d1d; display:block; }
+  .modal-msg.ok  { background:#052e16; color:#86efac; display:block; }
+  .modal-msg.err { background:#450a0a; color:#fca5a5; display:block; }
 </style>
 </head>
 <body>
@@ -170,9 +176,7 @@
       <span>Closed: <b class="c-closed" id="statClosed">0</b></span>
       <span>P&amp;L: <b id="statPnl">+0.00</b></span>
     </span>
-    <span class="clock" id="clock">--:--:--</span>
-    <span class="ucc">UCC: {{ ucc }}</span>
-    {% include "_safety_header.html" %}
+    {% include "_safety_header.html" %}{# B.2 — clock + UCC live here now. #}
     <form method="post" action="/refresh" style="margin:0">
       <button style="padding:6px 12px;background:#16a34a;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px;">Refresh Login</button>
     </form>
@@ -365,14 +369,7 @@ async function refresh() {
   }
 }
 
-function tickClock() {
-  const now = new Date();
-  const ist = new Date(now.getTime() + (now.getTimezoneOffset() + 330) * 60000);
-  const hh = String(ist.getHours()).padStart(2,'0');
-  const mm = String(ist.getMinutes()).padStart(2,'0');
-  const ss = String(ist.getSeconds()).padStart(2,'0');
-  document.getElementById("clock").textContent = hh+":"+mm+":"+ss + " IST";
-}
+// B.2 — tickClock moved into _safety_header.html.
 
 // ---- Order ticket ----
 let _ticketSide = "B";
@@ -470,7 +467,6 @@ async function liveTick() {
   } catch (e) { /* swallow — refresh() will surface errors */ }
 }
 
-setInterval(tickClock, 1000); tickClock();
 setInterval(refresh, 2500); refresh();
 setInterval(liveTick, 500); liveTick();
 </script>

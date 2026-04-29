@@ -49,6 +49,10 @@ Schema (UNIFIED — one config drives BOTH options + futures strategies):
   lots.{NIFTY|BANKNIFTY|SENSEX}        int >= 1   (multiplier on broker lot)
   per_day_cap.{NIFTY|BANKNIFTY|SENSEX} null or int > 0
 
+  risk.max_daily_drawdown   null or int > 0   # ₹ loss; halts when
+                                              # today's combined P&L
+                                              # ≤ -threshold (H.2).
+
   futures_round_step.{NIFTY|BANKNIFTY|SENSEX}  step for futures limit price
 
 Everything is intentionally defensive: a missing file, an unparseable
@@ -125,6 +129,13 @@ DEFAULTS = {
         "NIFTY":     None,                     # None = unlimited
         "BANKNIFTY": None,
         "SENSEX":    None,
+    },
+
+    # H.2 — auto-halt the kill switch if today's combined (real + paper)
+    # P&L drops below -max_daily_drawdown rupees. None disables the check.
+    # Configured as a positive number representing the worst loss tolerated.
+    "risk": {
+        "max_daily_drawdown": None,
     },
 
     # Futures-only retained: round step for the limit price.
@@ -316,6 +327,20 @@ def _coerce(raw):
         except (TypeError, ValueError):
             merged["futures_round_step"][idx] = DEFAULTS["futures_round_step"][idx]
 
+    # H.2 — risk.max_daily_drawdown: None or positive int. Same shape as
+    # per_day_cap above; same lenient coercion (empty/zero/negative -> None).
+    risk = merged.get("risk") or {}
+    v = risk.get("max_daily_drawdown")
+    if v is None or v == "" or v == "null":
+        risk["max_daily_drawdown"] = None
+    else:
+        try:
+            n = int(v)
+            risk["max_daily_drawdown"] = n if n > 0 else None
+        except (TypeError, ValueError):
+            risk["max_daily_drawdown"] = None
+    merged["risk"] = risk
+
     return merged
 
 
@@ -495,6 +520,11 @@ def lot_multiplier(idx_name):
 
 def per_day_cap(idx_name):
     return get()["per_day_cap"].get(idx_name)
+
+
+def max_daily_drawdown():
+    """H.2 — ₹ loss threshold or None. None disables the auto-halt."""
+    return (get().get("risk") or {}).get("max_daily_drawdown")
 
 
 def _engine(name):

@@ -72,6 +72,22 @@ class QuoteFeed:
         self._client = None
 
     # ---------- public subscription setters ----------
+    @staticmethod
+    def _sub_key(s):
+        """D.4 — collapse a sub-dict to its identity tuple so set comparison
+        ignores caller-side dict ordering, extra keys, and list ordering.
+        The producer rebuilds the futures sub-list every tick from a Python
+        dict iteration; even when logically identical, that triggered a full
+        WS resubscribe every 2s ('future subs changed (3 -> 3)') and
+        periodic socket churn. Comparing as frozenset of identity tuples
+        makes equality genuinely set-equal."""
+        return (str(s.get("instrument_token", "")),
+                str(s.get("exchange_segment", "")))
+
+    @classmethod
+    def _subs_set(cls, subs):
+        return frozenset(cls._sub_key(s) for s in (subs or []))
+
     def set_index_subs(self, subs):
         with self._subs_lock:
             self._index_subs = list(subs or [])
@@ -84,7 +100,8 @@ class QuoteFeed:
         """Replace option subscriptions wholesale; resubscribe on next loop tick."""
         with self._subs_lock:
             new = list(subs or [])
-            if new == self._option_subs:
+            # D.4 — compare as frozenset, not list==list.
+            if self._subs_set(new) == self._subs_set(self._option_subs):
                 return False
             self._option_subs = new
             return True
@@ -96,7 +113,8 @@ class QuoteFeed:
         the (rarely-changing) futures set."""
         with self._subs_lock:
             new = list(subs or [])
-            if new == self._future_subs:
+            # D.4 — compare as frozenset, not list==list.
+            if self._subs_set(new) == self._subs_set(self._future_subs):
                 return False
             self._future_subs = new
             return True
@@ -273,18 +291,30 @@ class QuoteFeed:
 
         last_opt_subs = list(self._option_subs)
         last_fut_subs = list(self._future_subs)
+        # D.4 — track previous as frozenset alongside list so the per-tick
+        # equality check is order-insensitive. Avoids the every-2s socket
+        # churn that was visible as 'future subs changed (3 -> 3)' in
+        # data/app.log.
+        last_opt_set = self._subs_set(last_opt_subs)
+        last_fut_set = self._subs_set(last_fut_subs)
         while not self._stop.is_set():
             self._stop.wait(2.0)
             with self._subs_lock:
                 cur_opts = list(self._option_subs)
                 cur_futs = list(self._future_subs)
-            if cur_opts != last_opt_subs:
+            cur_opt_set = self._subs_set(cur_opts)
+            cur_fut_set = self._subs_set(cur_futs)
+            if cur_opt_set != last_opt_set:
                 self._log(f"[quote_feed] option subs changed "
                           f"({len(last_opt_subs)} -> {len(cur_opts)}), "
                           "resubscribing")
                 try:
                     # Subscribe only the new (delta) — SDK accumulates subs.
-                    new_set = [s for s in cur_opts if s not in last_opt_subs]
+                    # Set-difference on identity tuples avoids dict-equality
+                    # quirks that leaked through the earlier 'in list' test.
+                    new_keys = cur_opt_set - last_opt_set
+                    new_set = [s for s in cur_opts
+                               if self._sub_key(s) in new_keys]
                     if new_set:
                         try:
                             self._client.subscribe(instrument_tokens=new_set,
@@ -294,12 +324,15 @@ class QuoteFeed:
                 except Exception as e:
                     self._record_error("resubscribe", e)
                 last_opt_subs = cur_opts
-            if cur_futs != last_fut_subs:
+                last_opt_set = cur_opt_set
+            if cur_fut_set != last_fut_set:
                 self._log(f"[quote_feed] future subs changed "
                           f"({len(last_fut_subs)} -> {len(cur_futs)}), "
                           "resubscribing")
                 try:
-                    new_set = [s for s in cur_futs if s not in last_fut_subs]
+                    new_keys = cur_fut_set - last_fut_set
+                    new_set = [s for s in cur_futs
+                               if self._sub_key(s) in new_keys]
                     if new_set:
                         try:
                             self._client.subscribe(instrument_tokens=new_set,
@@ -309,3 +342,4 @@ class QuoteFeed:
                 except Exception as e:
                     self._record_error("resubscribe(future)", e)
                 last_fut_subs = cur_futs
+                last_fut_set = cur_fut_set

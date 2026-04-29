@@ -74,12 +74,17 @@ def read_audit_tail(n=100):
         return []
 
 
-def read_audit_page(page=1, page_size=50, date=None):
+def read_audit_page(page=1, page_size=50, date=None, event=None):
     """Return one page of audit events, newest first.
 
     Same shape/semantics as storage.blocked.read_blocked_page — see that
     docstring for the rationale. Kept inline (not factored into a shared
     helper) because the two stores are independent and might diverge.
+
+    F.4: optional `event` filter narrows to a single event type
+    (e.g. PLACE_ORDER_OK). The response also carries `distinct_events`
+    — every event type seen in the date-filtered slice — so the template
+    can populate its dropdown without re-reading the file.
     """
     try:
         page = max(1, int(page))
@@ -90,17 +95,22 @@ def read_audit_page(page=1, page_size=50, date=None):
     except (TypeError, ValueError):
         page_size = 50
     date_prefix = (date or "").strip()[:10] or None
+    event_filter = (event or "").strip() or None
 
+    empty = {"items": [], "total": 0, "page": 1,
+             "page_size": page_size, "pages": 1, "distinct_events": []}
     if not os.path.exists(AUDIT_FILE):
-        return {"items": [], "total": 0, "page": 1,
-                "page_size": page_size, "pages": 1}
+        return empty
     try:
         with open(AUDIT_FILE, "r") as f:
             lines = f.readlines()
     except Exception:
-        return {"items": [], "total": 0, "page": 1,
-                "page_size": page_size, "pages": 1}
+        return empty
+    # Two-pass walk: distinct event types come from the date-filtered slice
+    # (so the dropdown only offers values that actually exist for the day),
+    # then the event filter is applied to produce the page slice.
     parsed = []
+    distinct = set()
     for line in lines:
         line = line.strip()
         if not line:
@@ -111,6 +121,11 @@ def read_audit_page(page=1, page_size=50, date=None):
             r = {"raw": line}
         if date_prefix and not str(r.get("ts", ""))[:10] == date_prefix:
             continue
+        ev = r.get("event")
+        if ev:
+            distinct.add(ev)
+        if event_filter and ev != event_filter:
+            continue
         parsed.append(r)
     parsed.reverse()  # newest first
     total = len(parsed)
@@ -119,4 +134,5 @@ def read_audit_page(page=1, page_size=50, date=None):
     start = (page - 1) * page_size
     items = parsed[start:start + page_size]
     return {"items": items, "total": total, "page": page,
-            "page_size": page_size, "pages": pages}
+            "page_size": page_size, "pages": pages,
+            "distinct_events": sorted(distinct)}

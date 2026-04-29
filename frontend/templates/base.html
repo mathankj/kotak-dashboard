@@ -2,6 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Kotak Neo Dashboard</title>
 <style>
   * { box-sizing: border-box; }
@@ -119,7 +120,22 @@
       </tbody>
     </table>
   {% else %}
-    <div class="empty">No records found.</div>
+    {# Page-aware empty-state copy. Generic "No records found." was unhelpful —
+       each tab now explains *why* it might be empty so the user isn't left
+       wondering whether the SDK call failed or there's genuinely nothing. #}
+    {% if active == 'holdings' %}
+      <div class="empty">No holdings yet. Delivery (CNC) buys appear here after T+1 settlement; intraday positions show on the Positions tab.</div>
+    {% elif active == 'positions' %}
+      <div class="empty">No open positions right now. Once an intraday order fills (manual or auto-strategy), it'll appear here until square-off.</div>
+    {% elif active == 'orders' %}
+      <div class="empty">No orders today. Place a manual order or wait for the auto-strategy ticker to fire.</div>
+    {% elif active == 'trade-book' %}
+      <div class="empty">No executed trades on the broker side today. Compare with the internal Trade Log under the Books tab.</div>
+    {% elif active == 'limits' %}
+      <div class="empty">Limits data unavailable. The broker may not have returned a payload — try Refresh Login.</div>
+    {% else %}
+      <div class="empty">No records found.</div>
+    {% endif %}
   {% endif %}
 </div>
 

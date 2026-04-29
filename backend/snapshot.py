@@ -56,6 +56,7 @@ def _build_options_payload():
         INDEX_OPTIONS_CONFIG, _option_universe,
     )
     from backend.storage.trades import read_trade_ledger
+    from backend.strategy.greeks import compute_delta  # F.3
 
     today = now_ist().strftime("%Y-%m-%d")
     universe_ready = (
@@ -71,7 +72,9 @@ def _build_options_payload():
             "option_trades": [],
             "ts": now_ist().strftime("%H:%M:%S IST"),
         }
-    data, meta, err = fetch_option_quotes()
+    # D.7 — force=True so the producer always refreshes on its 2 s tick.
+    # The strategy ticker on its own 3 s tick reads the now-fresh cache.
+    data, meta, err = fetch_option_quotes(force=True)
     chains = {}
     for idx_name, m in meta.items():
         chains[idx_name] = {
@@ -89,17 +92,34 @@ def _build_options_payload():
     for idx_name, per_strike in by_idx_strike.items():
         cfg = INDEX_OPTIONS_CONFIG[idx_name]
         atm = chains[idx_name]["atm"]
+        spot = chains[idx_name]["spot"]
+        expiry = chains[idx_name]["expiry"]
         step = cfg["strike_step"]
         win = cfg["atm_window"]
         strikes = ([atm + i * step for i in range(-win, win + 1)]
                    if atm else sorted(per_strike.keys()))
         for s in strikes:
             legs = per_strike.get(s, {})
+            ce = legs.get("CE")
+            pe = legs.get("PE")
+            # F.3 — annotate ATM±2 strikes with Black-Scholes Δ. We only
+            # compute for ±2 (5 strikes total per chain) so the IV solver
+            # cost is bounded regardless of chain width. Outside the
+            # window the column header reads "—" in the template.
+            if atm is not None and abs(s - atm) <= 2 * step:
+                if ce and ce.get("ltp") is not None:
+                    ce = dict(ce)  # don't mutate the cached quote dict
+                    ce["delta"] = compute_delta(
+                        spot, s, expiry, ce.get("ltp"), "CE")
+                if pe and pe.get("ltp") is not None:
+                    pe = dict(pe)
+                    pe["delta"] = compute_delta(
+                        spot, s, expiry, pe.get("ltp"), "PE")
             chains[idx_name]["rows"].append({
                 "strike": s,
                 "is_atm": atm is not None and s == atm,
-                "ce": legs.get("CE"),
-                "pe": legs.get("PE"),
+                "ce": ce,
+                "pe": pe,
             })
     all_trades = read_trade_ledger()
     option_trades = [
@@ -133,7 +153,7 @@ def _build_gann_payload():
     # producer only starts after app.py has finished importing.
     from app import compute_stats
 
-    data, err = fetch_quotes()
+    data, err = fetch_quotes(force=True)  # D.7 — see _build_options_payload.
     try:
         update_open_trades_mfe(data)
     except Exception:
@@ -164,7 +184,11 @@ def _build_futures_payload():
     from backend.storage.trades import read_trade_ledger
     from backend import config_loader
 
-    fut_data, err = fetch_future_quotes()
+    # D.7 — force=True so the producer always refreshes on its 2 s tick.
+    # gann_quotes is force=False here because the gann payload builder above
+    # already forced a fresh fetch on this same tick — that one populated
+    # _quote_cache so this read is a guaranteed cache hit.
+    fut_data, err = fetch_future_quotes(force=True)
     gann_quotes, _ = fetch_quotes()
     today = now_ist().strftime("%Y-%m-%d")
 

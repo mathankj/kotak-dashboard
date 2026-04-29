@@ -87,3 +87,118 @@
   setInterval(poll, 3000);
 })();
 </script>
+
+<!--
+  F.1 — global keyboard shortcuts + ? cheatsheet.
+  Two-key chord: press `g` then a navigation letter within 1s. Plain `?`
+  opens the cheatsheet modal. Skipped while focus is in an input/textarea/
+  contenteditable so it never fights with form typing. Escape closes the modal.
+-->
+<style>
+  #kbCheat {
+    position: fixed; inset: 0; z-index: 10000;
+    background: rgba(0,0,0,0.65);
+    display: none; align-items: center; justify-content: center;
+    font-family: -apple-system, 'Segoe UI', sans-serif;
+  }
+  #kbCheat.open { display: flex; }
+  #kbCheatBox {
+    background: #18181b; border: 1px solid #3f3f46; border-radius: 10px;
+    padding: 22px 26px; min-width: 340px; max-width: 480px;
+    color: #d4d4d8; box-shadow: 0 12px 36px rgba(0,0,0,0.7);
+  }
+  #kbCheatBox h3 { margin: 0 0 14px 0; color: #fafafa; font-size: 16px; }
+  #kbCheatBox table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  #kbCheatBox td { padding: 6px 8px; border-bottom: 1px solid #27272a; }
+  #kbCheatBox td:first-child { width: 92px; }
+  #kbCheatBox kbd {
+    background: #27272a; color: #fafafa; border: 1px solid #3f3f46;
+    border-bottom-width: 2px; border-radius: 4px; padding: 2px 7px;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+  }
+  #kbCheatBox .hint { color: #71717a; font-size: 11px; margin-top: 12px; }
+  #kbCheatBox .close { float: right; color: #a1a1aa; cursor: pointer;
+                       font-size: 18px; line-height: 1; user-select: none; }
+</style>
+<div id="kbCheat" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+  <div id="kbCheatBox">
+    <span class="close" id="kbCheatClose">&times;</span>
+    <h3>Keyboard Shortcuts</h3>
+    <table>
+      <tr><td><kbd>g</kbd> <kbd>g</kbd></td><td>Gann dashboard</td></tr>
+      <tr><td><kbd>g</kbd> <kbd>o</kbd></td><td>Options</td></tr>
+      <tr><td><kbd>g</kbd> <kbd>f</kbd></td><td>Futures</td></tr>
+      <tr><td><kbd>g</kbd> <kbd>t</kbd></td><td>Trade Log</td></tr>
+      <tr><td><kbd>g</kbd> <kbd>p</kbd></td><td>Paper Log</td></tr>
+      <tr><td><kbd>g</kbd> <kbd>b</kbd></td><td>Blockers</td></tr>
+      <tr><td><kbd>g</kbd> <kbd>a</kbd></td><td>Audit</td></tr>
+      <tr><td><kbd>g</kbd> <kbd>c</kbd></td><td>Config</td></tr>
+      <tr><td><kbd>g</kbd> <kbd>h</kbd></td><td>Login History</td></tr>
+      <tr><td><kbd>g</kbd> <kbd>s</kbd></td><td>STOP &mdash; kill switch</td></tr>
+      <tr><td><kbd>?</kbd></td><td>This cheatsheet</td></tr>
+      <tr><td><kbd>Esc</kbd></td><td>Close cheatsheet</td></tr>
+    </table>
+    <div class="hint">Shortcuts ignore typing inside form fields.</div>
+  </div>
+</div>
+<script>
+(function() {
+  // Map of g-prefixed routes. Keys correspond to pressed letter after `g`.
+  const NAV = {
+    g: '/gann', o: '/options', f: '/futures',
+    t: '/trades', p: '/paper-trades',
+    b: '/blockers', a: '/audit', c: '/config', h: '/history',
+    s: '/STOP',
+  };
+  const cheat = document.getElementById('kbCheat');
+  const closeBtn = document.getElementById('kbCheatClose');
+  let waitingG = false;
+  let gTimer = null;
+
+  function inEditable() {
+    const a = document.activeElement;
+    if (!a) return false;
+    const tag = a.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    if (a.isContentEditable) return true;
+    return false;
+  }
+  function openCheat() { cheat.classList.add('open'); }
+  function closeCheat() { cheat.classList.remove('open'); }
+  closeBtn.addEventListener('click', closeCheat);
+  cheat.addEventListener('click', function(e) { if (e.target === cheat) closeCheat(); });
+
+  document.addEventListener('keydown', function(e) {
+    // Esc closes modal regardless of focus.
+    if (e.key === 'Escape' && cheat.classList.contains('open')) {
+      closeCheat();
+      return;
+    }
+    if (inEditable()) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    // ? cheatsheet
+    if (e.key === '?') {
+      e.preventDefault();
+      openCheat();
+      return;
+    }
+    if (waitingG) {
+      const k = e.key.toLowerCase();
+      waitingG = false;
+      clearTimeout(gTimer);
+      const dest = NAV[k];
+      if (dest) {
+        e.preventDefault();
+        window.location.href = dest;
+      }
+      return;
+    }
+    if (e.key === 'g' || e.key === 'G') {
+      waitingG = true;
+      // 1s window for the second key — long enough to be forgiving,
+      // short enough that a stray `g` won't hijack later typing.
+      gTimer = setTimeout(function() { waitingG = false; }, 1000);
+    }
+  });
+})();
+</script>

@@ -2,6 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Audit Log - Kotak Neo Dashboard</title>
 <style>
   * { box-sizing: border-box; }
@@ -84,18 +85,28 @@
 <div class="card">
   <div class="head">
     <h2>Audit Log
-      ({{ pagination.total }} total, page {{ pagination.page }} of {{ pagination.pages }})</h2>
+      ({{ pagination.total }} total, page {{ pagination.page }} of {{ pagination.pages }}{% if log_size_hint %} &middot; <span style="color:#a1a1aa;font-size:13px;font-weight:500;">file {{ log_size_hint }}</span>{% endif %})</h2>
   </div>
   <div class="help">
     Newest at top. Every order intent, block, kill-switch toggle, and
     LIVE/PAPER mode change is recorded here AND in <code>data/audit.log</code>
     (one JSON line per event). The full log is never auto-deleted.
   </div>
+  {# F.4 — date + event-type filter. Event dropdown is built from the
+     distinct_events the server saw in the date-filtered slice, so the
+     menu only ever contains values that actually exist for that day. #}
   <form class="filterbar" method="get" action="/audit">
     <label style="font-size:12px;color:#a1a1aa;">Date:</label>
     <input type="date" name="date" value="{{ date_filter }}">
+    <label style="font-size:12px;color:#a1a1aa;margin-left:8px;">Event:</label>
+    <select name="event" style="background:#0f1419;color:#fafafa;border:1px solid #27272a;border-radius:6px;padding:6px 10px;font-size:13px;">
+      <option value="">all</option>
+      {% for ev in distinct_events %}
+        <option value="{{ ev }}" {% if ev == event_filter %}selected{% endif %}>{{ ev }}</option>
+      {% endfor %}
+    </select>
     <button type="submit">Filter</button>
-    {% if date_filter %}<a class="clear" href="/audit">clear</a>{% endif %}
+    {% if date_filter or event_filter %}<a class="clear" href="/audit">clear</a>{% endif %}
   </form>
   {% if events %}
     <table>
@@ -119,7 +130,9 @@
       </tbody>
     </table>
     <div class="pager">
-      {% set base = '/audit?' ~ ('date=' ~ date_filter ~ '&' if date_filter else '') %}
+      {# Pager carries date + event filters through page changes so the
+         user keeps their filter context when paginating. #}
+      {% set base = '/audit?' ~ ('date=' ~ date_filter ~ '&' if date_filter else '') ~ ('event=' ~ event_filter ~ '&' if event_filter else '') %}
       <a href="{{ base }}page={{ pagination.page - 1 }}"
          class="{% if pagination.page <= 1 %}disabled{% endif %}">← Prev</a>
       <span>Page {{ pagination.page }} of {{ pagination.pages }}

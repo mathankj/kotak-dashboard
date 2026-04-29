@@ -2,6 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Paper Book - Kotak Neo Dashboard</title>
 <style>
   * { box-sizing: border-box; }
@@ -82,6 +83,12 @@
   PAPER BOOK — These trades are virtual. The kill switch does NOT freeze the paper book.
 </div>
 
+{# Date range strip: Today/Yesterday/Week/Month/All/Custom. Stats tile and
+   table below both reflect the filtered slice; Excel link below carries
+   the same params through. #}
+{% with base_url='/paper-trades' %}{% include "_date_range_strip.html" %}{% endwith %}
+{% set _xlsx_query = '?range=' ~ (range_key or 'today') ~ ('&date=' ~ custom_date if custom_date else '') %}
+
 {% if stats %}
 <div class="stats">
   <div class="stat"><div class="lbl">Total Trades</div><div class="val">{{ stats.get('total', 0) }}</div></div>
@@ -89,9 +96,13 @@
   <div class="stat"><div class="lbl">Closed</div><div class="val">{{ stats.get('closed', 0) }}</div></div>
   <div class="stat"><div class="lbl">Wins</div><div class="val pos">{{ stats.get('wins', 0) }}</div></div>
   <div class="stat"><div class="lbl">Losses</div><div class="val neg">{{ stats.get('losses', 0) }}</div></div>
-  <div class="stat"><div class="lbl">Net P&amp;L (pts)</div>
-    <div class="val {% if stats.get('total_pnl_points', 0) >= 0 %}pos{% else %}neg{% endif %}">
-      {{ '%+.2f'|format(stats.get('total_pnl_points', 0) or 0) }}
+  {# Net P&L is points × qty in compute_stats(), so the value is rupees, not points.
+     Header label fixed to ₹ to match the math. Uses the inr filter for thousand
+     separators. Per-row P&L pts column below remains per-unit, which is correct. #}
+  <div class="stat"><div class="lbl">Net P&amp;L (₹)</div>
+    {% set _pnl = stats.get('total_pnl_points', 0) or 0 %}
+    <div class="val {% if _pnl >= 0 %}pos{% else %}neg{% endif %}">
+      {{ _pnl | inr(signed=True) }}
     </div>
   </div>
 </div>
@@ -100,7 +111,7 @@
 <div class="card">
   <div class="card-head">
     <h2>Paper Book ({{ trades|length }})</h2>
-    <a class="download" href="/paper-trades.xlsx">Download as Excel</a>
+    <a class="download" href="/paper-trades.xlsx{{ _xlsx_query }}">Download as Excel</a>
   </div>
   {% if trades %}
     <table>
@@ -123,6 +134,7 @@
           <th class="num">Exit Spot</th>
           <th>Exit Reason</th>
           <th class="num">P&amp;L pts</th>
+          <th class="num">Profit ₹</th>
           <th class="num">P&amp;L %</th>
           {% if cfg and cfg.stoploss.active == 'D' %}
             <th class="num">Trail SL</th>
@@ -187,6 +199,15 @@
                 data-col="pnl_points">
               {% if pl is not none %}{{ '%+.2f'|format(pl) }}{% elif is_open %}…{% else %}—{% endif %}
             </td>
+            {# Profit ₹ = pnl_points × qty. CLOSED rows render server-side;
+               OPEN rows get live updates from paperLiveTick(). qty is stamped
+               at entry (lot_size × multiplier) so it's available for both. #}
+            {% set qty = t.get('qty') %}
+            {% set profit_rs = (pl * qty) if (pl is not none and qty) else None %}
+            <td class="num {% if profit_rs is not none and profit_rs >= 0 %}pos{% elif profit_rs is not none %}neg{% endif %}"
+                data-col="profit_rs" data-qty="{{ qty or '' }}">
+              {% if profit_rs is not none %}{{ '%+.2f'|format(profit_rs) }}{% elif is_open %}…{% else %}—{% endif %}
+            </td>
             {% set plp = t.get('pnl_pct') %}
             <td class="num {% if plp is not none and plp >= 0 %}pos{% elif plp is not none %}neg{% endif %}"
                 data-col="pnl_pct">
@@ -204,7 +225,18 @@
       </tbody>
     </table>
   {% else %}
-    <div class="empty">No paper trades yet. Once the strategy ticker fires, paper rows will appear here in parallel with live trades.</div>
+    {# Empty-state copy depends on whether a filter is active. Without a
+       filter we coach the user about the strategy ticker; with a filter
+       we just say the slice is empty. #}
+    {% if range_key in (none, '', 'all') %}
+      <div class="empty">No paper trades yet. Once the strategy ticker fires, paper rows will appear here in parallel with live trades.</div>
+    {% elif range_key == 'today' %}
+      <div class="empty">No paper trades for today yet. Try <a href="/paper-trades?range=yesterday" style="color:#fb923c;">Yesterday</a>, <a href="/paper-trades?range=week" style="color:#fb923c;">This week</a>, or <a href="/paper-trades?range=all" style="color:#fb923c;">All</a>.</div>
+    {% elif range_key == 'custom' and custom_date %}
+      <div class="empty">No paper trades on {{ custom_date }}. Try a different date or <a href="/paper-trades?range=all" style="color:#fb923c;">All</a>.</div>
+    {% else %}
+      <div class="empty">No paper trades for the selected range. Try <a href="/paper-trades?range=all" style="color:#fb923c;">All</a>.</div>
+    {% endif %}
   {% endif %}
 </div>
 {% include "_blocker_toaster.html" %}
@@ -235,6 +267,20 @@ async function paperLiveTick() {
         plCell.classList.remove("pos", "neg");
         if (t.pnl_points !== null && t.pnl_points !== undefined) {
           plCell.classList.add(t.pnl_points >= 0 ? "pos" : "neg");
+        }
+      }
+      // Profit ₹ = pnl_points × qty. qty is stamped on the cell at render
+      // (data-qty) so the poller doesn't need it from the API; we just
+      // multiply the freshest pnl_points by the row's stored lot count.
+      const profitCell = tr.querySelector('[data-col="profit_rs"]');
+      if (profitCell) {
+        const qty = parseFloat(profitCell.dataset.qty);
+        const profit = (t.pnl_points !== null && t.pnl_points !== undefined && qty)
+          ? t.pnl_points * qty : null;
+        profitCell.textContent = fmt(profit, true);
+        profitCell.classList.remove("pos", "neg");
+        if (profit !== null && profit !== undefined && isFinite(profit)) {
+          profitCell.classList.add(profit >= 0 ? "pos" : "neg");
         }
       }
       const plpCell = tr.querySelector('[data-col="pnl_pct"]');

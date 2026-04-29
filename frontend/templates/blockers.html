@@ -2,6 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Blockers - Kotak Neo Dashboard</title>
 <style>
   * { box-sizing: border-box; }
@@ -31,6 +32,11 @@
   td { padding: 10px 12px; border-bottom: 1px solid #27272a; color: #d4d4d8;
        white-space: nowrap; vertical-align: top; }
   td.msg { white-space: normal; max-width: 480px; color: #fbbf24; }
+  /* H.3 — small grey detail line under Scrip showing underlying/strike/expiry
+     for option attempts and trigger context for both. Helps tell apart
+     two NIFTY-CE blocks at different strikes without opening the JSONL. */
+  .detail { color: #71717a; font-size: 11px; margin-top: 2px;
+            font-family: ui-monospace, monospace; }
   .num { text-align: right; font-variant-numeric: tabular-nums; }
   .pill { padding: 2px 8px; border-radius: 4px; font-size: 10px;
           font-weight: 700; letter-spacing: 0.5px; display: inline-block; }
@@ -93,11 +99,28 @@
      (anchor tags) — keeps URL shareable. The live poller stays on the
      current page only; opening a date filter pauses live-update implicitly
      since the user is now investigating a past day, not today. #}
+  {# F.4 — date + kind + source filters. kind/source dropdowns come from
+     the date-filtered slice's distinct values so the menu mirrors what
+     actually exists for the chosen day. #}
   <form class="filterbar" method="get" action="/blockers">
     <label style="font-size:12px;color:#a1a1aa;">Date:</label>
     <input type="date" name="date" value="{{ date_filter }}">
+    <label style="font-size:12px;color:#a1a1aa;margin-left:8px;">Kind:</label>
+    <select name="kind" style="background:#0f1419;color:#fafafa;border:1px solid #27272a;border-radius:6px;padding:6px 10px;font-size:13px;">
+      <option value="">all</option>
+      {% for k in distinct_kinds %}
+        <option value="{{ k }}" {% if k == kind_filter %}selected{% endif %}>{{ k }}</option>
+      {% endfor %}
+    </select>
+    <label style="font-size:12px;color:#a1a1aa;margin-left:8px;">Source:</label>
+    <select name="source" style="background:#0f1419;color:#fafafa;border:1px solid #27272a;border-radius:6px;padding:6px 10px;font-size:13px;">
+      <option value="">all</option>
+      {% for s in distinct_sources %}
+        <option value="{{ s }}" {% if s == source_filter %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
     <button type="submit" class="refresh" style="background:#2563eb;padding:6px 14px;font-size:13px;">Filter</button>
-    {% if date_filter %}<a class="clear" href="/blockers">clear</a>{% endif %}
+    {% if date_filter or kind_filter or source_filter %}<a class="clear" href="/blockers">clear</a>{% endif %}
   </form>
   {# Always render the table (even when empty) so the JS poller can fill it
      in live as the autonomous ticker writes new blocked-attempt entries.
@@ -126,7 +149,24 @@
             <td>{{ b.get('ts', '')[11:19] }}<br><span style="color:#71717a;font-size:11px">{{ b.get('ts', '')[:10] }}</span></td>
             <td><span class="pill pill-blocked">BLOCKED</span></td>
             <td><span class="pill pill-kind">{{ b.get('kind', '-') }}</span></td>
-            <td>{{ b.get('scrip', '') }}</td>
+            <td>
+              {{ b.get('scrip', '') }}
+              {# H.3 — detail line: underlying·strike·option_type for options,
+                 plus trigger-spot/level when known. Hidden when no extras. #}
+              {% set _u = b.get('underlying') %}
+              {% set _k = b.get('strike') %}
+              {% set _ot = b.get('option_type') %}
+              {% set _ts = b.get('trigger_spot') %}
+              {% set _tl = b.get('trigger_level') %}
+              {% if _u or _k or _ot or _ts or _tl %}
+                <div class="detail">
+                  {% if _u %}{{ _u }}{% endif %}
+                  {% if _k %} · {{ _k }}{% if _ot %}{{ _ot }}{% endif %}{% endif %}
+                  {% if _ts is not none %} · spot {{ '%.2f'|format(_ts) }}{% endif %}
+                  {% if _tl %} ({{ _tl }}){% endif %}
+                </div>
+              {% endif %}
+            </td>
             <td>
               {% if b.get('side') %}
                 <span class="pill pill-side-{{ b.get('side') }}">{{ 'BUY' if b.get('side') == 'B' else 'SELL' }}</span>
@@ -145,7 +185,9 @@
      wants a different page they click a link and the page reloads with
      ?page=N. Keeps the implementation dead simple. #}
   <div class="pager">
-    {% set base = '/blockers?' ~ ('date=' ~ date_filter ~ '&' if date_filter else '') %}
+    {# Pager carries date + kind + source filters through page changes
+       so the user keeps their filter context when paginating. #}
+    {% set base = '/blockers?' ~ ('date=' ~ date_filter ~ '&' if date_filter else '') ~ ('kind=' ~ kind_filter ~ '&' if kind_filter else '') ~ ('source=' ~ source_filter ~ '&' if source_filter else '') %}
     <a href="{{ base }}page={{ pagination.page - 1 }}"
        class="{% if pagination.page <= 1 %}disabled{% endif %}">← Prev</a>
     <span>Page {{ pagination.page }} of {{ pagination.pages }}
@@ -160,6 +202,10 @@
 // it sees only the slice the user cares about, never the full file.
 const BLK_PAGE = {{ pagination.page }};
 const BLK_DATE = {{ (date_filter or '')|tojson }};
+// F.4 — pass kind/source filters through to the poll so the live table
+// keeps showing only what the user filtered to.
+const BLK_KIND = {{ (kind_filter or '')|tojson }};
+const BLK_SOURCE = {{ (source_filter or '')|tojson }};
 // Live-refresh the blocked-attempts table every 3s so the count and rows
 // update on their own as the autonomous ticker writes new entries — no
 // manual page refresh required. The toaster (_blocker_toaster.html) handles
@@ -182,11 +228,22 @@ function rowHtml(b) {
   const priceHtml = (b.price != null && b.price !== '')
     ? Number(b.price).toFixed(2)
     : '-';
+  // H.3 — detail line: underlying·strike·option_type + trigger spot/level
+  // (only emitted when at least one extra is present). Mirrors the server-
+  // rendered template so live-updated rows look identical to refreshed ones.
+  const detailParts = [];
+  if (b.underlying) detailParts.push(escHtml(b.underlying));
+  if (b.strike) detailParts.push(escHtml(b.strike) + (b.option_type ? escHtml(b.option_type) : ''));
+  if (b.trigger_spot != null) detailParts.push('spot ' + Number(b.trigger_spot).toFixed(2));
+  if (b.trigger_level) detailParts.push('(' + escHtml(b.trigger_level) + ')');
+  const detailHtml = detailParts.length
+    ? `<div class="detail">${detailParts.join(' · ')}</div>`
+    : '';
   return `<tr>
     <td>${escHtml(time)}<br><span style="color:#71717a;font-size:11px">${escHtml(date)}</span></td>
     <td><span class="pill pill-blocked">BLOCKED</span></td>
     <td><span class="pill pill-kind">${escHtml(b.kind || '-')}</span></td>
-    <td>${escHtml(b.scrip || '')}</td>
+    <td>${escHtml(b.scrip || '')}${detailHtml}</td>
     <td>${sideHtml}</td>
     <td class="num">${escHtml(b.qty || '-')}</td>
     <td class="num">${priceHtml}</td>
@@ -204,6 +261,8 @@ async function refreshBlockers() {
     // the count climb in real time even while parked on page 1.
     const params = new URLSearchParams({page: BLK_PAGE});
     if (BLK_DATE) params.set('date', BLK_DATE);
+    if (BLK_KIND) params.set('kind', BLK_KIND);
+    if (BLK_SOURCE) params.set('source', BLK_SOURCE);
     const r = await fetch('/api/blocked-list?' + params.toString(),
                           {cache: 'no-store'});
     const d = await r.json();

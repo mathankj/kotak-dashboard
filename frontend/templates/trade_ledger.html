@@ -2,6 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Trade Log - Kotak Neo Dashboard</title>
 <style>
   * { box-sizing: border-box; }
@@ -49,6 +50,14 @@
                font-weight: 700; letter-spacing: 0.5px; }
   .mode-LIVE  { background: #166534; color: #d1fae5; }
   .mode-PAPER { background: #475569; color: #f1f5f9; }
+  .mode-PAPER_BOOK { background: #6d28d9; color: #ede9fe; }
+  .asset-pill { padding: 2px 8px; border-radius: 4px; font-size: 10px;
+                font-weight: 700; letter-spacing: 0.5px; }
+  .asset-OPT { background: #1e3a8a; color: #dbeafe; }
+  .asset-FUT { background: #b45309; color: #fef3c7; }
+  .expiry-tag { padding: 1px 6px; margin-left: 4px; border-radius: 3px;
+                font-size: 10px; font-weight: 600;
+                background: #334155; color: #cbd5e1; }
 </style>
 </head>
 <body>
@@ -67,6 +76,12 @@
   {% endfor %}
 </div>
 
+{# Date range strip: Today/Yesterday/Week/Month/All/Custom. Stats tile and
+   table below both reflect the filtered slice; Excel link below carries
+   the same params through. #}
+{% with base_url='/trades' %}{% include "_date_range_strip.html" %}{% endwith %}
+{% set _xlsx_query = '?range=' ~ (range_key or 'today') ~ ('&date=' ~ custom_date if custom_date else '') %}
+
 {% if stats %}
 <div class="stats">
   <div class="stat"><div class="lbl">Total Trades</div><div class="val">{{ stats.get('total', 0) }}</div></div>
@@ -74,9 +89,13 @@
   <div class="stat"><div class="lbl">Closed</div><div class="val">{{ stats.get('closed', 0) }}</div></div>
   <div class="stat"><div class="lbl">Wins</div><div class="val pos">{{ stats.get('wins', 0) }}</div></div>
   <div class="stat"><div class="lbl">Losses</div><div class="val neg">{{ stats.get('losses', 0) }}</div></div>
-  <div class="stat"><div class="lbl">Net P&amp;L (pts)</div>
-    <div class="val {% if stats.get('total_pnl_points', 0) >= 0 %}pos{% else %}neg{% endif %}">
-      {{ '%+.2f'|format(stats.get('total_pnl_points', 0) or 0) }}
+  {# Net P&L is points × qty in compute_stats(), so the value is rupees, not points.
+     Header label fixed to ₹ to match the math. Uses the inr filter for thousand
+     separators. Per-row P&L pts column below remains per-unit, which is correct. #}
+  <div class="stat"><div class="lbl">Net P&amp;L (₹)</div>
+    {% set _pnl = stats.get('total_pnl_points', 0) or 0 %}
+    <div class="val {% if _pnl >= 0 %}pos{% else %}neg{% endif %}">
+      {{ _pnl | inr(signed=True) }}
     </div>
   </div>
 </div>
@@ -85,19 +104,27 @@
 <div class="card">
   <div class="card-head">
     <h2>Trade Log ({{ trades|length }})</h2>
-    <a class="download" href="/trades.xlsx">Download as Excel</a>
+    <a class="download" href="/trades.xlsx{{ _xlsx_query }}">Download as Excel</a>
   </div>
   {% if trades %}
     <table>
       <thead>
         <tr>
           <th>Mode</th>
-          <th>Date</th><th>Scrip</th><th>Side</th>
+          <th>Date</th>
+          {# Mirror columns added so /trades shows the same context as
+             /paper-trades. Older rows pre-date these fields and render as —. #}
+          <th>Asset</th>
+          <th>Scrip</th>
+          <th>Side</th>
+          <th>Entry Reason</th>
+          <th>Trigger Lvl</th>
+          <th class="num">Trigger Spot</th>
           <th>Entry Time</th><th class="num">Entry</th>
           <th>Exit Time</th><th class="num">Exit</th>
           <th class="num">Exit Spot</th>
           <th>Exit Reason</th>
-          <th class="num">P&amp;L pts</th><th class="num">P&amp;L %</th>
+          <th class="num">P&amp;L pts</th><th class="num">Profit ₹</th><th class="num">P&amp;L %</th>
           {% if cfg and cfg.stoploss.active == 'D' %}
             <th class="num">Trail SL</th>
           {% endif %}
@@ -111,9 +138,29 @@
           <tr>
             <td><span class="mode-pill mode-{{ mode }}">{{ mode }}</span></td>
             <td>{{ t.get('date', '') }}</td>
-            <td>{{ t.get('scrip', '') }}</td>
+            {# Asset pill — OPT CE / OPT PE / FUT. Older rows w/o asset_type show —. #}
+            <td>
+              {% set at = t.get('asset_type') %}
+              {% if at == 'option' %}
+                <span class="asset-pill asset-OPT">OPT {{ t.get('option_type','') }}</span>
+              {% elif at == 'future' %}
+                <span class="asset-pill asset-FUT">FUT</span>
+              {% else %}—{% endif %}
+            </td>
+            <td>
+              {{ t.get('scrip', '') }}
+              {% if t.get('expiry') %}
+                <span class="expiry-tag">{{ t.get('expiry') }}</span>
+              {% endif %}
+            </td>
             <td class="{% if t.get('order_type') == 'BUY' %}buy{% else %}sell{% endif %}">
               {{ t.get('order_type', '') }}
+            </td>
+            <td>{{ t.get('entry_reason', '') or '—' }}</td>
+            <td>{{ t.get('trigger_level', '') or '—' }}</td>
+            <td class="num">
+              {% set ts = t.get('trigger_spot') %}
+              {% if ts is not none %}{{ '%.2f'|format(ts) }}{% else %}—{% endif %}
             </td>
             <td>{{ t.get('entry_time', '') }}</td>
             <td class="num">{{ t.get('entry_price', '') }}</td>
@@ -132,6 +179,14 @@
             <td class="num {% if pl is not none and pl >= 0 %}pos{% elif pl is not none %}neg{% endif %}">
               {% if pl is not none %}{{ '%+.2f'|format(pl) }}{% else %}—{% endif %}
             </td>
+            {# Profit ₹ = pnl_points × qty. qty is already lot_size × multiplier
+               (set at entry in backend/strategy/options.py & futures.py) so
+               this is the rupee P&L for the whole position, not per-share. #}
+            {% set qty = t.get('qty') %}
+            {% set profit_rs = (pl * qty) if (pl is not none and qty) else None %}
+            <td class="num {% if profit_rs is not none and profit_rs >= 0 %}pos{% elif profit_rs is not none %}neg{% endif %}">
+              {% if profit_rs is not none %}{{ '%+.2f'|format(profit_rs) }}{% else %}—{% endif %}
+            </td>
             {% set plp = t.get('pnl_pct') %}
             <td class="num {% if plp is not none and plp >= 0 %}pos{% elif plp is not none %}neg{% endif %}">
               {% if plp is not none %}{{ '%+.2f'|format(plp) }}%{% else %}—{% endif %}
@@ -148,7 +203,16 @@
       </tbody>
     </table>
   {% else %}
-    <div class="empty">No trades yet. Once the auto-strategy fires (or manual orders execute), they'll appear here.</div>
+    {# Empty-state copy depends on whether a filter is active. #}
+    {% if range_key in (none, '', 'all') %}
+      <div class="empty">No trades yet. Once the auto-strategy fires (or manual orders execute), they'll appear here.</div>
+    {% elif range_key == 'today' %}
+      <div class="empty">No trades for today yet. Try <a href="/trades?range=yesterday" style="color:#fb923c;">Yesterday</a>, <a href="/trades?range=week" style="color:#fb923c;">This week</a>, or <a href="/trades?range=all" style="color:#fb923c;">All</a>.</div>
+    {% elif range_key == 'custom' and custom_date %}
+      <div class="empty">No trades on {{ custom_date }}. Try a different date or <a href="/trades?range=all" style="color:#fb923c;">All</a>.</div>
+    {% else %}
+      <div class="empty">No trades for the selected range. Try <a href="/trades?range=all" style="color:#fb923c;">All</a>.</div>
+    {% endif %}
   {% endif %}
 </div>
 {% include "_blocker_toaster.html" %}

@@ -50,6 +50,10 @@ from backend.storage.trades import (
 from backend.strategy.common import (
     _auto_at_or_after_squareoff, _auto_in_hours, _derive_exit_level,
 )
+# Reuse the same entry-reason derivation the paper book uses, so the
+# live ledger and the paper book label entries identically (e.g.
+# OPEN_ABOVE_BUY_WA, CROSS_UP_BUY_WA, OPEN_BELOW_SELL, CROSS_DOWN_SELL_WA).
+from backend.strategy.paper_book import _derive_option_entry_reason
 from backend.utils import now_ist
 
 
@@ -448,10 +452,17 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
                         # Kotak error). Either way we tried — don't burn the
                         # slot earlier when LTP might still be missing.
                         _option_auto_state["open_evaluated"][idx_name] = today_str
+                        # Same entry_reason derivation as the paper book —
+                        # feeds the new "Entry Reason" column on /trades.
+                        entry_reason = _derive_option_entry_reason(
+                            option_type, already_evaluated_open, entry_cfg,
+                        )
                         placed = _execute_entry(
                             idx_name, atm, option_type, opt_key,
                             float(opt_ltp), float(spot),
                             m.get("expiry"), client,
+                            entry_reason=entry_reason,
+                            option_quote=opt_q,
                         )
                         if placed:
                             counts[idx_name] = counts.get(idx_name, 0) + 1
@@ -460,7 +471,8 @@ def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
 
 
 def _execute_entry(idx_name, atm, option_type, opt_key,
-                   opt_ltp, spot, expiry, client):
+                   opt_ltp, spot, expiry, client,
+                   entry_reason=None, option_quote=None):
     """Place a real BUY order via place_order_safe and write trade ledger row.
 
     Returns True if the order was PLACED (LIVE) or recorded (PAPER), False
@@ -541,6 +553,11 @@ def _execute_entry(idx_name, atm, option_type, opt_key,
         "option_type": option_type,
         "expiry": str(expiry) if expiry else None,
         "trading_symbol": trading_symbol,
+        # A.1 — persist the instrument identity so /trades, exits, and any
+        # downstream re-subscription can resolve the leg without re-deriving
+        # it from option_key. Mirrors the paper-book row shape.
+        "instrument_token":   (option_quote or {}).get("token"),
+        "exchange_segment":   cfg.get("exchange_segment"),
         "order_type": "BUY",
         "entry_time": now.strftime("%H:%M:%S"),
         "entry_ts": now.timestamp(),
@@ -548,6 +565,9 @@ def _execute_entry(idx_name, atm, option_type, opt_key,
         "qty": qty,
         "trigger_spot": round(spot, 2),
         "trigger_level": "BUY" if option_type == "CE" else "SELL",
+        # entry_reason mirrors the paper-book convention so /trades and
+        # /paper-trades label the WHY identically.
+        "entry_reason": entry_reason,
         "max_min_target_price": round(opt_ltp, 2),
         "target_level_reached": None,
         "exit_time": None, "exit_ts": None,

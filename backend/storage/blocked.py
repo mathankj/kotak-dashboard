@@ -33,12 +33,30 @@ Format of each line:
 """
 import json
 import os
+import threading
 from datetime import datetime
 
 from backend.utils import now_ist
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BLOCKED_FILE = os.path.join(_REPO_ROOT, "data", "blocked_attempts.jsonl")
+
+# D.3 — in-process memo for read_recent_blocked. The /api/recent-blocks
+# toaster polls every 3s on every open page, and a 200-page-deep tail-read
+# was the dominant tail-latency source (p95 180ms). Invalidated when this
+# process calls append_blocked OR when the underlying file's mtime/size
+# changes (handles other writers — e.g. a manual edit or a separate
+# script). Only memoizes the last-N read since that's all the toaster
+# uses; pagination still re-parses for the /blockers page.
+_RECENT_CACHE = {"key": None, "rows": []}
+_RECENT_CACHE_LOCK = threading.Lock()
+
+
+def _bump_recent_cache():
+    """Forced invalidation hook — called from append_blocked so the next
+    read_recent_blocked call re-parses without waiting for mtime to flip."""
+    with _RECENT_CACHE_LOCK:
+        _RECENT_CACHE["key"] = None
 
 
 def append_blocked(*, kind, scrip, side, qty, price, result, message,
@@ -67,6 +85,7 @@ def append_blocked(*, kind, scrip, side, qty, price, result, message,
         os.makedirs(os.path.dirname(BLOCKED_FILE), exist_ok=True)
         with open(BLOCKED_FILE, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, default=str) + "\n")
+        _bump_recent_cache()  # D.3 — force next toaster read to re-parse.
     except Exception:
         pass
     return record
@@ -75,9 +94,25 @@ def append_blocked(*, kind, scrip, side, qty, price, result, message,
 def read_recent_blocked(n=200):
     """Return the last `n` blocked-attempt records, newest first.
     Returns [] if the file doesn't exist yet.
+
+    D.3 — memoized on (mtime, size, n). The /api/recent-blocks toaster
+    polls every 3s; without this cache each call re-read the full
+    JSONL even when nothing had changed.
     """
     if not os.path.exists(BLOCKED_FILE):
         return []
+    try:
+        st = os.stat(BLOCKED_FILE)
+        cache_key = (st.st_mtime_ns, st.st_size, n)
+    except OSError:
+        cache_key = None
+    if cache_key is not None:
+        with _RECENT_CACHE_LOCK:
+            if _RECENT_CACHE["key"] == cache_key:
+                # Return a shallow copy of the cached list — the rows
+                # themselves are fresh dicts from json.loads so mutating
+                # the returned list slice can't corrupt the cache.
+                return list(_RECENT_CACHE["rows"])
     try:
         with open(BLOCKED_FILE, "r", encoding="utf-8") as f:
             lines = f.readlines()
@@ -93,6 +128,10 @@ def read_recent_blocked(n=200):
         except Exception:
             continue
     out.reverse()
+    if cache_key is not None:
+        with _RECENT_CACHE_LOCK:
+            _RECENT_CACHE["key"] = cache_key
+            _RECENT_CACHE["rows"] = list(out)
     return out
 
 
@@ -114,7 +153,7 @@ def _parse_iso(ts):
         return None
 
 
-def read_blocked_page(page=1, page_size=50, date=None):
+def read_blocked_page(page=1, page_size=50, date=None, kind=None, source=None):
     """Return one page of blocked-attempt records, newest first.
 
     page:      1-based page number (clamped to 1..pages).
@@ -144,17 +183,24 @@ def read_blocked_page(page=1, page_size=50, date=None):
     except (TypeError, ValueError):
         page_size = 50
     date_prefix = (date or "").strip()[:10] or None
+    kind_filter = (kind or "").strip() or None
+    source_filter = (source or "").strip() or None
 
+    empty = {"items": [], "total": 0, "page": 1,
+             "page_size": page_size, "pages": 1,
+             "distinct_kinds": [], "distinct_sources": []}
     if not os.path.exists(BLOCKED_FILE):
-        return {"items": [], "total": 0, "page": 1,
-                "page_size": page_size, "pages": 1}
+        return empty
     try:
         with open(BLOCKED_FILE, "r", encoding="utf-8") as f:
             lines = f.readlines()
     except Exception:
-        return {"items": [], "total": 0, "page": 1,
-                "page_size": page_size, "pages": 1}
+        return empty
+    # Distinct kind/source values are gathered from the date-filtered slice
+    # so the dropdowns only offer choices that exist for the chosen day.
     parsed = []
+    kinds = set()
+    sources = set()
     for line in lines:
         line = line.strip()
         if not line:
@@ -165,6 +211,16 @@ def read_blocked_page(page=1, page_size=50, date=None):
             continue
         if date_prefix and not str(r.get("ts", ""))[:10] == date_prefix:
             continue
+        k = r.get("kind")
+        s = r.get("source")
+        if k:
+            kinds.add(k)
+        if s:
+            sources.add(s)
+        if kind_filter and k != kind_filter:
+            continue
+        if source_filter and s != source_filter:
+            continue
         parsed.append(r)
     parsed.reverse()  # newest first
     total = len(parsed)
@@ -173,7 +229,9 @@ def read_blocked_page(page=1, page_size=50, date=None):
     start = (page - 1) * page_size
     items = parsed[start:start + page_size]
     return {"items": items, "total": total, "page": page,
-            "page_size": page_size, "pages": pages}
+            "page_size": page_size, "pages": pages,
+            "distinct_kinds": sorted(kinds),
+            "distinct_sources": sorted(sources)}
 
 
 def read_blocked_since(since_ts):

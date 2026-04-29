@@ -1,0 +1,41 @@
+{# Date range strip: Today | Yesterday | This week | This month | All | Custom.
+   Shared by /paper-trades and /trades — caller passes `base_url` and the
+   active `range_key` + `custom_date` from the request. Same template + same
+   columns are rendered on every range, so a custom-date view shows the
+   exact same schema as Today; the Excel link below picks up the same params
+   so downloads only contain the filtered rows. #}
+{% set rk = range_key or 'today' %}
+<style>
+  .rng-strip { display: flex; gap: 6px; align-items: center;
+               margin-bottom: 12px; flex-wrap: wrap; }
+  .rng-strip .rng { padding: 6px 12px; background: #18181b; color: #a1a1aa;
+                    text-decoration: none; border-radius: 6px;
+                    font-size: 13px; border: 1px solid #27272a;
+                    line-height: 1; }
+  .rng-strip .rng.active { background: #2563eb; color: white;
+                           border-color: #2563eb; }
+  .rng-strip .rng:hover:not(.active) { background: #27272a; color: #fafafa; }
+  .rng-strip form { display: inline-flex; gap: 6px; align-items: center;
+                    margin: 0; }
+  .rng-strip input[type=date] { background: #0f1419; color: #fafafa;
+                    border: 1px solid #27272a; border-radius: 6px;
+                    padding: 6px 10px; font-size: 13px; }
+  .rng-strip .rng-go { padding: 6px 12px; background: #2563eb; color: white;
+                       border: none; border-radius: 6px; cursor: pointer;
+                       font-size: 13px; }
+  .rng-strip .rng-label { font-size: 12px; color: #71717a;
+                          margin-right: 4px; }
+</style>
+<div class="rng-strip">
+  <a href="{{ base_url }}?range=today"     class="rng {% if rk == 'today' %}active{% endif %}">Today</a>
+  <a href="{{ base_url }}?range=yesterday" class="rng {% if rk == 'yesterday' %}active{% endif %}">Yesterday</a>
+  <a href="{{ base_url }}?range=week"      class="rng {% if rk == 'week' %}active{% endif %}">This week</a>
+  <a href="{{ base_url }}?range=month"     class="rng {% if rk == 'month' %}active{% endif %}">This month</a>
+  <a href="{{ base_url }}?range=all"       class="rng {% if rk == 'all' %}active{% endif %}">All</a>
+  <form method="get" action="{{ base_url }}">
+    <span class="rng-label">Custom:</span>
+    <input type="hidden" name="range" value="custom">
+    <input type="date" name="date" value="{{ custom_date or '' }}">
+    <button type="submit" class="rng-go">Go</button>
+  </form>
+</div>

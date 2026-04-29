@@ -8,10 +8,11 @@ Open: http://localhost:5000
 """
 import os
 import json
+import re
 import threading
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, render_template, jsonify, redirect, url_for, request, Response
 
 from backend.utils import IST, now_ist
@@ -68,6 +69,22 @@ app = Flask(__name__,
             static_folder="frontend/static")
 
 
+# Jinja filter — render numbers as Indian rupees with thousand separators.
+# Used by tile P&L, broker columns, anywhere a numeric ₹ value is shown.
+# `value | inr`           -> "₹12,345.68"
+# `value | inr(signed=True)` -> "+₹12,345.68" / "-₹1,234.56"
+@app.template_filter("inr")
+def _jinja_inr(value, signed=False):
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if signed:
+        sign = "+" if n >= 0 else "-"
+        return f"{sign}\u20B9{abs(n):,.2f}"
+    return f"\u20B9{n:,.2f}"
+
+
 def compute_stats(trades):
     open_n   = sum(1 for t in trades if t.get("status") == "OPEN")
     closed_n = sum(1 for t in trades if t.get("status") == "CLOSED")
@@ -91,6 +108,69 @@ def compute_stats(trades):
     }
 
 
+# Date-range filter for the ledger pages (paper + real). Both ledgers store
+# `date` as 'YYYY-MM-DD'. The filter is a closed interval on that field,
+# computed in IST (now_ist().date()) so weekends / late-night browsing still
+# show the trader's intuitive "today". Trades-with-no-date are dropped.
+#
+# Used by /paper-trades, /trades, /paper-trades.xlsx, /trades.xlsx so the
+# table view, the stats tile, and the Excel export all see the same slice.
+def _filter_trades_by_range(trades, range_key, custom_date):
+    """Return rows whose `date` falls in the requested range.
+
+    range_key: 'today' | 'yesterday' | 'week' | 'month' | 'all' | 'custom'
+    custom_date: 'YYYY-MM-DD' string (only honoured when range_key=='custom')
+    """
+    if not range_key or range_key == "all":
+        return list(trades)
+    today = now_ist().date()
+    if range_key == "today":
+        start = end = today
+    elif range_key == "yesterday":
+        start = end = today - timedelta(days=1)
+    elif range_key == "week":
+        # Monday-of-this-week through today, inclusive. weekday(): Mon=0..Sun=6.
+        start = today - timedelta(days=today.weekday())
+        end = today
+    elif range_key == "month":
+        start = today.replace(day=1)
+        end = today
+    elif range_key == "custom":
+        try:
+            start = end = datetime.strptime(
+                (custom_date or "")[:10], "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            # Bad/missing date — fall back to unfiltered so the user can still
+            # see something rather than an empty page.
+            return list(trades)
+    else:
+        return list(trades)
+    out = []
+    for t in trades:
+        d = t.get("date") or ""
+        if not d:
+            continue
+        try:
+            td = datetime.strptime(d[:10], "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            continue
+        if start <= td <= end:
+            out.append(t)
+    return out
+
+
+def _resolve_date_range(args):
+    """Pull (range_key, custom_date) from a request.args.
+    Default = 'today'. If a `date=` param is present without an explicit
+    `range=`, treat it as a custom-date filter (so the audit/blockers
+    legacy single-date links keep working unchanged)."""
+    range_key   = (args.get("range") or "").strip().lower()
+    custom_date = (args.get("date")  or "").strip()
+    if not range_key:
+        range_key = "custom" if custom_date else "today"
+    return range_key, custom_date
+
+
 def fmt_duration(seconds):
     if seconds is None or seconds < 0:
         return ""
@@ -100,19 +180,26 @@ def fmt_duration(seconds):
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-# ---------- HTML template (single-file, dark theme) ----------
+# Tabs are grouped left-to-right by purpose: Live (what's trading right now),
+# Books (ledgers), Risk (safety/forensics), Account (broker passthrough +
+# config). Order matches Ganesh's daily workflow — live screens first, then
+# books to review, then risk + account at the end.
 TABS = [
-    {"key": "gann", "url": "/gann", "label": "Gann Trader"},
-    {"key": "options", "url": "/options", "label": "Options"},
-    {"key": "futures", "url": "/futures", "label": "Futures"},
-    {"key": "holdings", "url": "/", "label": "Holdings"},
-    {"key": "positions", "url": "/positions", "label": "Positions"},
-    {"key": "trades", "url": "/trades", "label": "Trade Log"},
+    # Live — what the bot is trading right now
+    {"key": "gann",         "url": "/gann",         "label": "Gann Trader"},
+    {"key": "options",      "url": "/options",      "label": "Options"},
+    {"key": "futures",      "url": "/futures",      "label": "Futures"},
+    # Books — ledgers (paper next to real, real first)
+    {"key": "trades",       "url": "/trades",       "label": "Trade Log"},
     {"key": "paper_trades", "url": "/paper-trades", "label": "Paper Log"},
-    {"key": "blockers", "url": "/blockers", "label": "Blockers"},
-    {"key": "config", "url": "/config", "label": "Config"},
-    {"key": "audit", "url": "/audit", "label": "Audit"},
-    {"key": "history", "url": "/history", "label": "Login History"},
+    # Risk — safety / forensics
+    {"key": "blockers",     "url": "/blockers",     "label": "Blockers"},
+    {"key": "audit",        "url": "/audit",        "label": "Audit"},
+    # Account — broker passthrough + config + login history
+    {"key": "holdings",     "url": "/",             "label": "Holdings"},
+    {"key": "positions",    "url": "/positions",    "label": "Positions"},
+    {"key": "config",       "url": "/config",       "label": "Config"},
+    {"key": "history",      "url": "/history",      "label": "Login History"},
 ]
 
 
@@ -120,9 +207,132 @@ TABS = [
 
 
 
+# C.1 — curated column maps for broker passthrough pages. The Kotak SDK
+# returns rows with mixed casing (trdSym vs tradingSymbol vs tSym, prc vs
+# price, etc.) and dozens of fields per row, most of them noise. The
+# auto-column path (used previously) dumped 30+ columns and made the table
+# unreadable on a laptop.
+#
+# Each entry is (Label, [field-name aliases]) — render() picks the first
+# alias that has a non-empty value in each row. Aliases compiled from
+# Kotak's REST docs and existing code in backend/safety/positions.py +
+# backend/safety/orders.py. If the SDK adds or renames a field, only this
+# table needs an update.
+BROKER_COLUMN_MAPS = {
+    "holdings": [
+        # Bug 3 — alias list expanded to cover the additional field names
+        # the Kotak Neo SDK has been seen to return for holdings rows.
+        # Aliases are evaluated first-non-empty, so adding fallbacks is
+        # always safe — they only matter when earlier ones are missing.
+        ("Symbol",   ["displaySymbol", "tradingSymbol", "trdSym",
+                      "tSym", "symbol", "instrumentName"]),
+        ("Exchange", ["exchangeSegment", "exSeg", "exchange", "exch"]),
+        ("Qty",      ["quantity", "qty", "totalQty", "displayQty",
+                      "holdingsQty", "holdQty", "sellableQty"]),
+        ("Avg Price",["averagePrice", "avgPrice", "avgPrc", "buyAvg",
+                      "costAvg"]),
+        ("LTP",      ["closingPrice", "lastPrice", "ltp", "lstPrc",
+                      "mktPrice"]),
+        ("P&L",      ["unRealizedPnL", "pnl", "dayChange", "mtm",
+                      "dayPnL", "pnL"]),
+    ],
+    "positions": [
+        ("Symbol",   ["trdSym", "tradingSymbol", "tSym", "symbol"]),
+        ("Product",  ["product", "prdt", "prod"]),
+        ("Net Qty",  ["netQty", "netTrdQty", "netTrdQtyLot",
+                      "flBuyQty"]),
+        ("Avg Price",["averagePrice", "avgPrice", "avgPrc", "netAvg"]),
+        ("LTP",      ["lastPrice", "ltp", "lstPrc"]),
+        ("MTM P&L",  ["mtmPnl", "pnl", "rpnl", "urpnl"]),
+    ],
+    "orders": [
+        ("Time",     ["orderTime", "ordEntTm", "exchTime", "ordEntryTm"]),
+        ("Symbol",   ["trdSym", "tradingSymbol", "tSym", "symbol"]),
+        ("Side",     ["transactionType", "trnsTp", "buyOrSell"]),
+        ("Qty",      ["quantity", "qty", "ordQty"]),
+        ("Price",    ["price", "prc", "limitPrice"]),
+        ("Status",   ["status", "ordSt", "orderStatus"]),
+        ("Order ID", ["orderId", "nOrdNo", "exchOrderId"]),
+    ],
+    "trade-book": [
+        ("Time",     ["tradeTime", "trdTm", "exchTime", "fillTime"]),
+        ("Symbol",   ["trdSym", "tradingSymbol", "tSym", "symbol"]),
+        ("Side",     ["transactionType", "trnsTp", "buyOrSell"]),
+        ("Qty",      ["filledQty", "trdQty", "qty", "fillQty"]),
+        ("Price",    ["tradePrice", "trdPrc", "fillPrice", "avgPrc"]),
+        ("Order ID", ["orderId", "nOrdNo", "exchOrderId"]),
+    ],
+    # /limits is a single flat dict, not a list. We still keep a curated
+    # field list and let render() flatten it into a one-row table. Field
+    # names verified against a live Kotak Neo response: keys are mixed
+    # camel/Pascal case with `Prsnt` suffix (American spelling — Kotak's
+    # API uses "Realized" / "Unrealized", not the British forms).
+    "limits": [
+        ("Notional Cash",    ["NotionalCash", "AuxNotionalCash"]),
+        ("Collateral",       ["Collateral", "CollateralValue", "RmsCollateral"]),
+        ("Margin Used",      ["MarginUsedPrsnt", "MarginUsed", "AmountUtilizedPrsnt"]),
+        ("Net",              ["Net", "netAvailable"]),
+        ("Realised P&L",     ["RealizedMtomPrsnt", "CashRlsMtomPrsnt", "FoRlsMtomPrsnt"]),
+        ("Unrealised P&L",   ["UnrealizedMtomPrsnt", "CashUnRlsMtomPrsnt", "FoUnRlsMtomPrsnt"]),
+    ],
+}
+
+
+# Kotak's REST endpoints return an error envelope when the request fails
+# (auth not yet ready, market closed, scrip mismatch, etc.) instead of
+# the expected list/dict shape. The envelope shape is {stat, stCode, desc,
+# errMsg}. The render() path used to project this through the column map
+# and produce an empty row — visually indistinguishable from "no data" —
+# so the user couldn't tell whether the broker rejected the call. Treat
+# any row whose key set is a subset of this envelope as an error and
+# surface errMsg/desc as the view-error banner instead.
+_KOTAK_ERROR_ENVELOPE_KEYS = {"stat", "stCode", "desc", "errMsg"}
+
+
+def _is_kotak_error_envelope(row):
+    if not isinstance(row, dict) or not row:
+        return False
+    keys = set(row.keys())
+    # All keys must come from the envelope set; allow partials like
+    # {stat, errMsg} too. A real data row always has at least one key
+    # outside this set.
+    return keys.issubset(_KOTAK_ERROR_ENVELOPE_KEYS)
+
+
+def _pick(row, aliases):
+    """Return the first non-empty value among `aliases` in `row`. Empty
+    strings and None count as missing; 0 / 0.0 / False are kept (so a zero
+    qty or a false flag still renders)."""
+    if not isinstance(row, dict):
+        return ""
+    for k in aliases:
+        if k in row:
+            v = row[k]
+            if v is None or v == "":
+                continue
+            return v
+    return ""
+
+
+# C.2 — extract the underlying ticker from a trading symbol so we can group
+# all legs of the same name on /positions. Kotak symbols look like
+# `NIFTY01MAY2625500CE`, `BANKNIFTY24APR26FUT`, `RELIANCE-EQ` — the
+# underlying is always the leading alpha run (everything before the first
+# digit or hyphen). Returns "" for blanks; the caller's sort puts those last.
+_UNDERLYING_RE = re.compile(r"^([A-Z]+)")
+
+
+def _extract_underlying(symbol):
+    if not symbol:
+        return ""
+    m = _UNDERLYING_RE.match(str(symbol).upper())
+    return m.group(1) if m else ""
+
+
 def render(active, heading, data, error):
     rows = []
     cols = []
+    col_map = BROKER_COLUMN_MAPS.get(active)
     if data:
         # Normalise: SDK returns list of dicts (each row) or a dict-of-scalars
         if isinstance(data, list):
@@ -130,8 +340,41 @@ def render(active, heading, data, error):
         elif isinstance(data, dict):
             # Some endpoints (limits) return a single flat dict - show as one row
             rows = [data]
-        if rows and isinstance(rows[0], dict):
-            # Collect all keys across rows, preserve first-row order
+
+        # C.1 — promote a Kotak error envelope to view_error so the user
+        # sees "scrip not found" / "session expired" instead of a blank
+        # table. Single-row case only; if a real list happens to contain
+        # one error row we still want to skip it (treat as no data).
+        if rows and len(rows) == 1 and _is_kotak_error_envelope(rows[0]):
+            env = rows[0]
+            error = (env.get("errMsg") or env.get("desc")
+                     or f"Kotak API error (stCode={env.get('stCode')})")
+            rows = []
+
+        if col_map:
+            # C.1 — curated path. Project each broker row into a dict with
+            # exactly the labels in the column map, looking up via aliases.
+            # This collapses 30+ raw fields into ~6 readable columns.
+            cols = [label for (label, _aliases) in col_map]
+            projected = []
+            for r in rows:
+                projected.append({label: _pick(r, aliases)
+                                  for (label, aliases) in col_map})
+            rows = projected
+            # C.2 — group positions by underlying so all NIFTY legs (and all
+            # BANKNIFTY legs, etc.) cluster together. Kite shows a combined
+            # group header; we settle for an explicit column + sort, which
+            # gives the same scannability without rebuilding the table layout.
+            if active == "positions":
+                for r in rows:
+                    r["Underlying"] = _extract_underlying(r.get("Symbol", ""))
+                rows.sort(key=lambda r: (r.get("Underlying") or "~",
+                                         str(r.get("Symbol", ""))))
+                cols = ["Underlying"] + cols
+        elif rows and isinstance(rows[0], dict):
+            # Fallback (no curated map for this page): legacy auto-column
+            # behaviour. Collect all keys across rows, preserve first-row
+            # order. Only used for unknown `active` values.
             seen = []
             for r in rows:
                 for k in r.keys():
@@ -153,11 +396,39 @@ def render(active, heading, data, error):
     )
 
 
+# D.1 — broker passthrough cache. Each Kotak REST round-trip is 200–700 ms
+# p95 (see docs/PERF_REPORT.md), and these pages are commonly tab-rotated
+# every few seconds. A small per-method 5 s TTL collapses the burst-refresh
+# pattern to one REST hit every 5 s while the auto-strategy still sees fresh
+# data on its own tick (it doesn't read these endpoints).
+_BROKER_CACHE = {}      # name -> (ts, data, err)
+_BROKER_CACHE_LOCK = threading.Lock()
+_BROKER_CACHE_TTL = 5.0
+
+
+def _cached_safe_call(name, fn, *args, **kwargs):
+    """safe_call with a per-name 5 s TTL cache. Cache key includes kwargs
+    so different argument sets don't collide (e.g. /limits could ask for
+    different product slices). Errors are cached too — that's intentional;
+    a downstream 5 s burst of identical errors avoids hammering Kotak when
+    the breaker has just opened."""
+    key = (name, tuple(sorted(kwargs.items())), args)
+    now = time.time()
+    with _BROKER_CACHE_LOCK:
+        ent = _BROKER_CACHE.get(key)
+        if ent and (now - ent[0]) < _BROKER_CACHE_TTL:
+            return ent[1], ent[2]
+    data, err = safe_call(fn, *args, **kwargs)
+    with _BROKER_CACHE_LOCK:
+        _BROKER_CACHE[key] = (now, data, err)
+    return data, err
+
+
 @app.route("/")
 def holdings_view():
     try:
         client = ensure_client()
-        data, err = safe_call(client.holdings)
+        data, err = _cached_safe_call("holdings", client.holdings)
         return render("holdings", "Portfolio Holdings", data, err)
     except Exception as e:
         return render("holdings", "Portfolio Holdings", None, traceback.format_exc())
@@ -167,7 +438,7 @@ def holdings_view():
 def positions_view():
     try:
         client = ensure_client()
-        data, err = safe_call(client.positions)
+        data, err = _cached_safe_call("positions", client.positions)
         return render("positions", "Open Positions", data, err)
     except Exception as e:
         return render("positions", "Open Positions", None, traceback.format_exc())
@@ -177,7 +448,7 @@ def positions_view():
 def orders_view():
     try:
         client = ensure_client()
-        data, err = safe_call(client.order_report)
+        data, err = _cached_safe_call("orders", client.order_report)
         return render("orders", "Order Book", data, err)
     except Exception as e:
         return render("orders", "Order Book", None, traceback.format_exc())
@@ -189,7 +460,7 @@ def trade_book_view():
     trade ledger (/trades) which records every signal we acted on."""
     try:
         client = ensure_client()
-        data, err = safe_call(client.trade_report)
+        data, err = _cached_safe_call("trade_book", client.trade_report)
         return render("trade-book", "Trade Book", data, err)
     except Exception as e:
         return render("trade-book", "Trade Book", None, traceback.format_exc())
@@ -199,7 +470,9 @@ def trade_book_view():
 def limits_view():
     try:
         client = ensure_client()
-        data, err = safe_call(client.limits, segment="ALL", exchange="ALL", product="ALL")
+        data, err = _cached_safe_call(
+            "limits", client.limits,
+            segment="ALL", exchange="ALL", product="ALL")
         return render("limits", "Funds & Limits", data, err)
     except Exception as e:
         return render("limits", "Funds & Limits", None, traceback.format_exc())
@@ -410,11 +683,16 @@ def trades_api():
 @app.route("/trades")
 def trades_view():
     """Trade Log page: every signal acted on, with a 'Download as Excel' button.
-    Includes both LIVE rows (real Kotak orders) and any legacy paper rows."""
+    Includes both LIVE rows (real Kotak orders) and any legacy paper rows.
+
+    Date strip (Today/Yesterday/Week/Month/All/Custom) is applied server-side.
+    Default = Today. Stats tile + table + Excel link all reflect the same
+    filtered slice. Independent of /paper-trades — different ledger file."""
     trades = read_trade_ledger()
-    # Newest first; attach a human-readable duration for the template.
+    range_key, custom_date = _resolve_date_range(request.args)
+    trades_filtered = _filter_trades_by_range(trades, range_key, custom_date)
     trades_sorted = sorted(
-        trades,
+        trades_filtered,
         key=lambda t: (t.get("date") or "", t.get("entry_time") or ""),
         reverse=True,
     )
@@ -425,8 +703,10 @@ def trades_view():
         tabs=TABS,
         active="trades",
         trades=trades_sorted,
-        stats=compute_stats(trades),
+        stats=compute_stats(trades_filtered),
         cfg=config_loader.get(),
+        range_key=range_key,
+        custom_date=custom_date,
     )
 
 
@@ -510,11 +790,17 @@ def paper_trades_live_api():
 
 @app.route("/paper-trades")
 def paper_trades_view():
-    """Paper Book page — independent ledger of virtual paper trades."""
+    """Paper Book page — independent ledger of virtual paper trades.
+
+    Date strip (Today/Yesterday/Week/Month/All/Custom) is applied
+    server-side. Default = Today. Stats tile + table + Excel link all
+    reflect the same filtered slice."""
     from backend.storage.paper_ledger import read_paper_ledger
     rows = read_paper_ledger()
+    range_key, custom_date = _resolve_date_range(request.args)
+    rows_filtered = _filter_trades_by_range(rows, range_key, custom_date)
     rows_sorted = sorted(
-        rows,
+        rows_filtered,
         key=lambda t: (t.get("date") or "", t.get("entry_time") or ""),
         reverse=True,
     )
@@ -525,8 +811,10 @@ def paper_trades_view():
         tabs=TABS,
         active="paper_trades",
         trades=rows_sorted,
-        stats=compute_stats(rows),
+        stats=compute_stats(rows_filtered),
         cfg=config_loader.get(),
+        range_key=range_key,
+        custom_date=custom_date,
     )
 
 
@@ -554,7 +842,12 @@ def paper_trades_xlsx():
     buy_fill  = PatternFill("solid", fgColor="C6EFCE")
     pos_font  = Font(color="006100")
     neg_font  = Font(color="9C0006")
-    for t in read_paper_ledger():
+    # Honour the same date-range filter as the /paper-trades page so the
+    # Excel download contains exactly the rows the user is currently viewing.
+    range_key, custom_date = _resolve_date_range(request.args)
+    _paper_rows = _filter_trades_by_range(read_paper_ledger(),
+                                          range_key, custom_date)
+    for t in _paper_rows:
         ws.append([
             t.get("date", ""),
             t.get("scrip", ""),
@@ -592,12 +885,22 @@ def paper_trades_xlsx():
     wb.save(out)
     with open(out, "rb") as f:
         data = f.read()
+    # Filename includes the range so users can tell which slice they downloaded.
+    # 'today_20260429.xlsx' / 'week.xlsx' / 'custom_20260415.xlsx' / 'all.xlsx'
     today = now_ist().strftime("%Y%m%d")
+    if range_key == "custom" and custom_date:
+        suffix = f"custom_{custom_date.replace('-', '')}"
+    elif range_key == "today":
+        suffix = f"today_{today}"
+    elif range_key in ("yesterday", "week", "month", "all"):
+        suffix = range_key
+    else:
+        suffix = today
     return Response(
         data,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition":
-                 f"attachment; filename=paper_ledger_{today}.xlsx"},
+                 f"attachment; filename=paper_ledger_{suffix}.xlsx"},
     )
 
 
@@ -624,7 +927,12 @@ def trades_xlsx():
     buy_fill  = PatternFill("solid", fgColor="C6EFCE")
     pos_font  = Font(color="006100")
     neg_font  = Font(color="9C0006")
-    for t in read_trade_ledger():
+    # Honour the same date-range filter as the /trades page so the Excel
+    # download contains exactly the rows the user is currently viewing.
+    range_key, custom_date = _resolve_date_range(request.args)
+    _real_rows = _filter_trades_by_range(read_trade_ledger(),
+                                         range_key, custom_date)
+    for t in _real_rows:
         ws.append([
             t.get("date", ""),
             t.get("scrip", ""),
@@ -667,10 +975,21 @@ def trades_xlsx():
     wb.save(out)
     with open(out, "rb") as f:
         data = f.read()
+    # Filename includes the range so users can tell which slice they downloaded.
+    today = now_ist().strftime("%Y%m%d")
+    if range_key == "custom" and custom_date:
+        suffix = f"custom_{custom_date.replace('-', '')}"
+    elif range_key == "today":
+        suffix = f"today_{today}"
+    elif range_key in ("yesterday", "week", "month", "all"):
+        suffix = range_key
+    else:
+        suffix = today
     return Response(
         data,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=trade_ledger.xlsx"},
+        headers={"Content-Disposition":
+                 f"attachment; filename=trade_ledger_{suffix}.xlsx"},
     )
 
 
@@ -679,10 +998,14 @@ def trades_xlsx():
 def blockers_view():
     """Page showing every order the safety wrapper refused. Paginated
     server-side to keep the response small even when the JSONL store has
-    grown to thousands of rows. Query params: page=N, date=YYYY-MM-DD."""
+    grown to thousands of rows. Query params: page=N, date=YYYY-MM-DD,
+    kind=ENTRY|EXIT, source=auto_options|auto_futures|... (F.4 filters)."""
     page = request.args.get("page", 1)
     date = request.args.get("date") or ""
-    p = read_blocked_page(page=page, page_size=50, date=date)
+    kind = request.args.get("kind") or ""
+    source = request.args.get("source") or ""
+    p = read_blocked_page(page=page, page_size=50, date=date,
+                          kind=kind, source=source)
     return render_template(
         "blockers.html",
         tabs=TABS,
@@ -690,6 +1013,10 @@ def blockers_view():
         blocks=p["items"],
         pagination=p,
         date_filter=date,
+        kind_filter=kind,
+        source_filter=source,
+        distinct_kinds=p.get("distinct_kinds", []),
+        distinct_sources=p.get("distinct_sources", []),
     )
 
 
@@ -710,10 +1037,15 @@ def blocked_list_api():
     """Live-table feed for the /blockers page. Returns ONE PAGE of records
     (newest first) plus pagination metadata. The page poller asks for the
     page the user is currently viewing — it never pulls the full file
-    again. That's the whole pagination win: small payload + bounded DOM."""
+    again. That's the whole pagination win: small payload + bounded DOM.
+    Honours the same kind/source filter params as /blockers so the live
+    poll stays consistent with what the user is currently looking at."""
     page = request.args.get("page", 1)
     date = request.args.get("date") or ""
-    p = read_blocked_page(page=page, page_size=50, date=date)
+    kind = request.args.get("kind") or ""
+    source = request.args.get("source") or ""
+    p = read_blocked_page(page=page, page_size=50, date=date,
+                          kind=kind, source=source)
     return jsonify({
         "blocks": p["items"],
         "page": p["page"],
@@ -943,18 +1275,37 @@ def orderlog_csv():
 @app.route("/audit")
 def audit_view():
     """Audit events — paginated newest-first. Useful for forensics after
-    a halt or unexpected behaviour. Query params: page=N, date=YYYY-MM-DD.
+    a halt or unexpected behaviour. Query params: page=N, date=YYYY-MM-DD,
+    event=PLACE_ORDER_OK (F.4 — narrows to a single event type).
     Server-side paginated so the response stays small even when audit.log
     has grown to thousands of lines."""
     page = request.args.get("page", 1)
     date = request.args.get("date") or ""
-    p = read_audit_page(page=page, page_size=50, date=date)
+    event = request.args.get("event") or ""
+    p = read_audit_page(page=page, page_size=50, date=date, event=event)
+    # I.2 — surface the on-disk audit.log size so Ganesh can spot when the
+    # file is approaching rotate-territory (it's never auto-deleted). Cheap
+    # os.stat — no log content read.
+    try:
+        from backend.safety.audit import AUDIT_FILE as _AUDIT_FILE
+        _bytes = os.path.getsize(_AUDIT_FILE)
+        if _bytes >= 1024 * 1024:
+            log_size_hint = f"{_bytes / (1024 * 1024):.1f} MB"
+        elif _bytes >= 1024:
+            log_size_hint = f"{_bytes / 1024:.1f} KB"
+        else:
+            log_size_hint = f"{_bytes} B"
+    except OSError:
+        log_size_hint = None
     return render_template(
         "audit.html",
         tabs=TABS, active="audit",
         events=p["items"],
         pagination=p,
         date_filter=date,
+        event_filter=event,
+        distinct_events=p.get("distinct_events", []),
+        log_size_hint=log_size_hint,
     )
 
 
@@ -980,10 +1331,56 @@ def stop_confirm():
     return redirect(url_for("stop_view"))
 
 
-# Make LIVE_MODE + halt state available to every template (header button)
+# Make LIVE_MODE + halt state + UCC + today's combined P&L available to every
+# template. The safety header partial uses these so the LIVE pill, clock, UCC
+# label and "today P&L" tile show on every page (B.2).
+
+# Bug 4 — cache today_pnl for 5 s. The context processor runs on every page
+# render; with many tabs open this adds up even after the D.2 ledger memo
+# made the underlying reads cheap. The filter+sum still walks both ledgers
+# in Python — collapsing repeated calls during a 5 s window cuts CPU on the
+# request thread without losing freshness (the tile already updates on the
+# next page nav, and a closed-position P&L change is not real-time anyway).
+_TODAY_PNL_CACHE = {"ts": 0.0, "value": None}
+_TODAY_PNL_LOCK = threading.Lock()
+_TODAY_PNL_TTL = 5.0
+
+
+def _today_pnl_cached():
+    now = time.time()
+    with _TODAY_PNL_LOCK:
+        if (now - _TODAY_PNL_CACHE["ts"]) < _TODAY_PNL_TTL:
+            return _TODAY_PNL_CACHE["value"]
+    try:
+        from backend.storage.paper_ledger import read_paper_ledger
+        real_today  = _filter_trades_by_range(read_trade_ledger(),  "today", "")
+        paper_today = _filter_trades_by_range(read_paper_ledger(),  "today", "")
+        s = 0.0
+        for t in (real_today + paper_today):
+            if t.get("status") == "CLOSED" and t.get("pnl_points") is not None:
+                try:
+                    s += float(t["pnl_points"]) * int(t.get("qty", 1))
+                except (TypeError, ValueError):
+                    pass
+        value = round(s, 2)
+    except Exception:
+        value = None
+    with _TODAY_PNL_LOCK:
+        _TODAY_PNL_CACHE["ts"] = now
+        _TODAY_PNL_CACHE["value"] = value
+    return value
+
+
 @app.context_processor
 def _inject_safety_state():
-    return {"live_mode": LIVE_MODE, "halted": is_halted()}
+    # B.2 — today's combined P&L (real ledger + paper book), summed in points
+    # × qty so it matches the per-page Trade Log "Net P&L (₹)" totals.
+    return {
+        "live_mode": LIVE_MODE,
+        "halted": is_halted(),
+        "ucc": os.getenv("KOTAK_UCC", ""),
+        "today_pnl": _today_pnl_cached(),
+    }
 
 
 @app.route("/refresh", methods=["POST", "GET"])
@@ -1015,6 +1412,45 @@ TICKER_INTERVAL_SECONDS = 3
 _ticker_state = {"started": False}
 
 
+def _check_drawdown_halt():
+    """H.2 — auto-engage the kill switch if today's combined P&L breaches
+    the configured drawdown threshold. Idempotent: a no-op when already
+    halted, when the threshold is unset, or when P&L is healthy.
+
+    Runs once per ticker iteration so the same threshold isn't tripped
+    repeatedly within a single tick. Audit + halt-flag write happen
+    exactly once per breach because is_halted() flips True after the
+    first call and short-circuits subsequent ticks.
+    """
+    try:
+        if is_halted():
+            return
+        threshold = config_loader.max_daily_drawdown()
+        if not threshold:
+            return
+        pnl = _today_pnl_cached()
+        if pnl is None:
+            return
+        if pnl <= -float(threshold):
+            # Reason string is ASCII-only — halt() opens the flag file
+            # without an explicit encoding, and on Windows that's cp1252
+            # which would crash on the rupee glyph. "Rs." matches the
+            # convention already used in safety/orders.py messages.
+            reason = (f"auto-drawdown: today P&L Rs.{pnl:.2f} <= "
+                      f"-Rs.{int(threshold)} threshold")
+            halt(reason=reason)
+            try:
+                audit("AUTO_HALT_DRAWDOWN", today_pnl=pnl,
+                      threshold=int(threshold))
+            except Exception:
+                pass
+            print(f"[ticker] {reason} — kill switch engaged")
+    except Exception as e:
+        # Best-effort guard. A drawdown-check failure must NOT kill the
+        # ticker — strategy logic still needs to run for stoploss/exit.
+        print(f"[ticker] drawdown check failed: {type(e).__name__}: {e}")
+
+
 def _strategy_ticker_loop():
     """Daemon thread body. Sleep / check hours / tick / repeat. Errors are
     swallowed and logged so a single bad tick can't kill the loop."""
@@ -1024,6 +1460,7 @@ def _strategy_ticker_loop():
         try:
             now = now_ist()
             if _auto_in_hours(now):
+                _check_drawdown_halt()  # H.2 — before each tick.
                 try:
                     data, meta, _err = fetch_option_quotes()
                     if meta:
@@ -1113,6 +1550,25 @@ if __name__ == "__main__":
         print("!! KILL SWITCH IS ENGAGED — new live orders will be refused.")
     print("Open http://localhost:5000 in your browser")
     print("=" * 60)
+    # Bug 6 — fail fast if another process is already bound to :5000.
+    # Otherwise we'd start the strategy ticker + snapshot producer threads,
+    # then crash inside app.run() leaving the user confused (and on Windows
+    # leaking those daemon threads into the orphaned process). Probe the
+    # port FIRST so the operator sees a clear "kill the old process" message
+    # before any background work spins up.
+    import socket as _socket
+    _probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    try:
+        _probe.settimeout(0.5)
+        if _probe.connect_ex(("127.0.0.1", 5000)) == 0:
+            print("!! Port 5000 is already in use.")
+            print("   Another Kotak Neo Dashboard process is already running,")
+            print("   or a previous run did not shut down cleanly.")
+            print("   On Windows: taskkill /F /IM python.exe   (kills ALL python)")
+            print("   Then start this app again. Aborting.")
+            raise SystemExit(1)
+    finally:
+        _probe.close()
     audit("MODE_STARTUP", live_mode=LIVE_MODE, halted=is_halted())
     # Kick off the autonomous strategy ticker BEFORE app.run blocks. Daemon
     # thread, dies with the process on shutdown.

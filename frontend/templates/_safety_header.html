@@ -1,6 +1,8 @@
-{# Safety status pill + kill switch button. Included from every template's
-   <header>. Shows nothing in paper mode (LIVE_MODE=False) so the dashboard
-   stays unchanged for Ganesh until Phase 3. #}
+{# Safety status pill + kill switch button + clock + UCC + today's P&L tile.
+   Included from every template's <header>. The page-chrome strip (clock,
+   UCC, P&L) renders on every page since B.2 — was previously inlined into
+   gann/options/futures only. The kill-switch shows nothing in paper mode
+   (LIVE_MODE=False) so the dashboard stays unchanged until Phase 3. #}
 <style>
   .safety-pill {
     display: inline-block; padding: 6px 12px; border-radius: 6px;
@@ -20,7 +22,70 @@
     text-decoration: none; border-radius: 6px; font-size: 13px;
     font-weight: 700; margin-right: 8px;
   }
+  /* E.1 — data-freshness pill. Shows the worst (max) age across the
+     producer's payloads. Green = on schedule, yellow = a tick behind,
+     red = stale. Visible on every page so a stuck producer is obvious. */
+  #freshPill {
+    padding: 6px 10px; border-radius: 6px; margin-right: 8px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.4px;
+    text-transform: uppercase; font-family: ui-monospace, Menlo, monospace;
+    background: #27272a; color: #a1a1aa; cursor: default;
+  }
+  #freshPill.ok    { background: #052e16; color: #86efac; }
+  #freshPill.warn  { background: #422006; color: #fcd34d; }
+  #freshPill.stale { background: #450a0a; color: #fecaca; }
+  /* E.2 — WS feed pill. Independent of producer freshness: tells you the
+     UPSTREAM Kotak WebSocket is alive. If the WS reconnects (5–10s during
+     a network blip) /api/snapshot-stats can still look "ok" because the
+     producer keeps reusing last-known LTPs — this pill is what surfaces
+     the underlying outage to Ganesh. */
+  #wsPill {
+    padding: 6px 10px; border-radius: 6px; margin-right: 8px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.4px;
+    text-transform: uppercase; font-family: ui-monospace, Menlo, monospace;
+    background: #27272a; color: #a1a1aa; cursor: default;
+  }
+  #wsPill.ok    { background: #052e16; color: #86efac; }
+  #wsPill.warn  { background: #422006; color: #fcd34d; }
+  #wsPill.stale { background: #450a0a; color: #fecaca; }
+  /* B.2 — page-chrome strip. The clock and UCC label used to live inline
+     in the gann/options/futures headers; today-P&L was missing entirely.
+     Hoisted here so every page (paper logs, blockers, audit, holdings,
+     positions, config, history, order log) shows the same status row. */
+  #safety_clock {
+    font-family: ui-monospace, Menlo, monospace;
+    background: #27272a; padding: 6px 10px; border-radius: 6px;
+    font-size: 13px; color: #fafafa; margin-right: 8px;
+  }
+  #safety_ucc {
+    background: #27272a; padding: 6px 10px; border-radius: 6px;
+    font-size: 13px; color: #d4d4d8; margin-right: 8px;
+  }
+  #safety_today_pnl {
+    padding: 6px 10px; border-radius: 6px; margin-right: 8px;
+    font-size: 13px; font-weight: 700; font-family: ui-monospace, Menlo, monospace;
+    background: #27272a; color: #d4d4d8;
+  }
+  #safety_today_pnl.pos { background: #052e16; color: #86efac; }
+  #safety_today_pnl.neg { background: #450a0a; color: #fecaca; }
 </style>
+{# Freshness pill is always shown (paper or live). It's a producer-health
+   signal independent of safety state — Ganesh wants to know if data is
+   stale even on the paper-only dashboard. #}
+<span id="freshPill" title="Producer payload age (max across endpoints)">data …</span>
+<span id="wsPill" title="Kotak WebSocket feed age (last tick received)">ws …</span>
+{# B.2 — clock + UCC + today P&L. today_pnl is computed in the
+   _inject_safety_state context processor (real ledger + paper book, today
+   only, sums pnl_points × qty for CLOSED rows). #}
+<span id="safety_clock" title="Wall clock (IST)">--:--:-- IST</span>
+{% if ucc %}<span id="safety_ucc" title="Kotak Unique Client Code">UCC: {{ ucc }}</span>{% endif %}
+{% if today_pnl is not none %}
+  <span id="safety_today_pnl"
+        class="{% if today_pnl > 0 %}pos{% elif today_pnl < 0 %}neg{% endif %}"
+        title="Today's combined P&amp;L (real ledger + paper book, CLOSED rows only)">
+    Today: {% if today_pnl > 0 %}+{% endif %}&#x20B9;{{ '%.2f'|format(today_pnl) }}
+  </span>
+{% endif %}
 {% if live_mode %}
   {% if halted %}
     <a class="halted-link" href="/STOP" title="Kill switch is engaged">
@@ -33,3 +98,97 @@
     </a>
   {% endif %}
 {% endif %}
+<script>
+(function() {
+  // E.1 — poll /api/snapshot-stats every 5s and show the worst payload age.
+  // Light: only fetches a small JSON, runs once per page (header is included
+  // on every template). Quietly fails — never lets a fetch error break UI.
+  const pill = document.getElementById('freshPill');
+  if (!pill) return;
+  async function refresh() {
+    try {
+      const r = await fetch('/api/snapshot-stats', {cache: 'no-store'});
+      const d = await r.json();
+      const interval = Number(d.refresh_interval_s || 0);
+      let maxAge = null;
+      Object.values(d.payloads || {}).forEach(function(p) {
+        if (p.age_s != null && (maxAge == null || p.age_s > maxAge)) {
+          maxAge = p.age_s;
+        }
+      });
+      if (maxAge == null) {
+        pill.textContent = 'data ?'; pill.className = '';
+        return;
+      }
+      // Thresholds: ok = ≤1.5×, warn = ≤3×, stale = beyond.
+      const ratio = interval > 0 ? maxAge / interval : 0;
+      let cls = 'ok';
+      if (ratio > 3) cls = 'stale';
+      else if (ratio > 1.5) cls = 'warn';
+      pill.textContent = 'data ' + maxAge.toFixed(1) + 's';
+      pill.className = cls;
+      pill.title = 'Worst payload age across producer endpoints. '
+                 + 'Refresh interval: ' + interval + 's. '
+                 + 'Refreshes: ' + (d.refresh_count ?? '?') + '.';
+    } catch (e) {
+      pill.textContent = 'data ?'; pill.className = 'stale';
+    }
+  }
+  refresh();
+  setInterval(refresh, 5000);
+})();
+// E.2 — independent WS-feed staleness pill. Polls /api/feed-status. If
+// connected=false OR last_tick_age > fresh_threshold_seconds, shows red
+// so Ganesh sees a live LTP that's actually frozen.
+(function() {
+  const pill = document.getElementById('wsPill');
+  if (!pill) return;
+  async function refresh() {
+    try {
+      const r = await fetch('/api/feed-status', {cache: 'no-store'});
+      const d = await r.json();
+      const threshold = Number(d.fresh_threshold_seconds || 5);
+      const age = d.last_tick_age;
+      const connected = !!d.connected;
+      if (!connected) {
+        pill.textContent = 'ws DOWN';
+        pill.className = 'stale';
+        pill.title = 'Kotak WebSocket is disconnected. Reconnect in progress.';
+        return;
+      }
+      if (age == null) {
+        pill.textContent = 'ws ?';
+        pill.className = 'warn';
+        pill.title = 'WebSocket connected but no ticks received yet.';
+        return;
+      }
+      pill.textContent = 'ws ' + age.toFixed(1) + 's';
+      if (age > threshold * 3)      pill.className = 'stale';
+      else if (age > threshold)     pill.className = 'warn';
+      else                          pill.className = 'ok';
+      pill.title = 'WS last tick: ' + age.toFixed(1) + 's ago. '
+                 + 'Fresh threshold: ' + threshold + 's. '
+                 + 'Reconnects: ' + (d.reconnects ?? 0) + '.';
+    } catch (e) {
+      pill.textContent = 'ws ?';
+      pill.className = 'stale';
+    }
+  }
+  refresh();
+  setInterval(refresh, 5000);
+})();
+// B.2 — tick the IST wall clock every second. Hoisted here from
+// gann/options/futures so every page now shows the clock. Skips silently
+// if the partial isn't on this page (defensive, shouldn't happen).
+(function() {
+  const el = document.getElementById('safety_clock');
+  if (!el) return;
+  function tick() {
+    const now = new Date();
+    const ist = new Date(now.getTime() + (now.getTimezoneOffset() + 330) * 60000);
+    el.textContent = ist.toTimeString().slice(0, 8) + ' IST';
+  }
+  tick();
+  setInterval(tick, 1000);
+})();
+</script>

@@ -56,6 +56,9 @@ from backend.storage.trades import (
 from backend.strategy.common import (
     _auto_at_or_after_squareoff, _auto_in_hours, _derive_exit_level,
 )
+# Reuse the same entry-reason derivation the paper book uses, so the
+# live ledger and the paper book label entries identically.
+from backend.strategy.paper_book import _derive_futures_entry_reason
 # Reuse the SAME LIVE_MODE master switch as options. One source of truth —
 # flipping options live also flips futures live (and vice versa). That's
 # intentional: avoids the foot-gun of "I thought I was paper-only on futures".
@@ -359,9 +362,14 @@ def future_auto_strategy_tick(future_data, gann_quotes, client=None):
 
                 if side and fut_ltp is not None:
                     _future_auto_state["open_evaluated"][idx_name] = today
+                    # Same entry_reason derivation as the paper book —
+                    # feeds the new "Entry Reason" column on /trades.
+                    entry_reason = _derive_futures_entry_reason(
+                        side, already_evaluated_open, entry_cfg,
+                    )
                     placed = _execute_futures_entry(
                         idx_name, side, fut, float(fut_ltp), float(spot),
-                        client,
+                        client, entry_reason=entry_reason,
                     )
                     if placed:
                         counts[idx_name] = counts.get(idx_name, 0) + 1
@@ -370,7 +378,8 @@ def future_auto_strategy_tick(future_data, gann_quotes, client=None):
 
 
 # ---------- entry / exit order placement ----------
-def _execute_futures_entry(idx_name, side, fut, fut_ltp, spot, client):
+def _execute_futures_entry(idx_name, side, fut, fut_ltp, spot, client,
+                           entry_reason=None):
     """Place a real BUY (long) or SELL (short) future order.
 
     `side` is "BUY" or "SELL" (full word — matches ledger order_type
@@ -449,6 +458,11 @@ def _execute_futures_entry(idx_name, side, fut, fut_ltp, spot, client):
         "option_type": None,
         "expiry": str(expiry) if expiry else None,
         "trading_symbol": trading_symbol,
+        # A.1 — persist the instrument identity so /trades, exits, and any
+        # downstream re-subscription can resolve the contract without
+        # re-deriving it. Mirrors the paper-book row shape.
+        "instrument_token":   fut.get("token"),
+        "exchange_segment":   exchange,
         "order_type": side,    # "BUY" (long) or "SELL" (short)
         "entry_time": now.strftime("%H:%M:%S"),
         "entry_ts": now.timestamp(),
@@ -456,6 +470,9 @@ def _execute_futures_entry(idx_name, side, fut, fut_ltp, spot, client):
         "qty": qty,
         "trigger_spot": round(spot, 2),
         "trigger_level": "BUY" if side == "BUY" else "SELL",
+        # entry_reason mirrors the paper-book convention so /trades and
+        # /paper-trades label the WHY identically.
+        "entry_reason": entry_reason,
         "max_min_target_price": round(float(limit_price), 2),
         "target_level_reached": None,
         "exit_time": None, "exit_ts": None,

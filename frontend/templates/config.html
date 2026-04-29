@@ -2,6 +2,7 @@
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Config - Kotak Neo Dashboard</title>
 <style>
   * { box-sizing: border-box; }
@@ -494,6 +495,23 @@
 </div>
 </form>
 
+<!-- I.3 Snapshot stats — read-only diagnostic. Producer-thread health.
+     Polls /api/snapshot-stats every 5s. If age_s ever climbs past
+     ~2× refresh_interval the producer is falling behind and live tabs
+     will be stale. -->
+<div class="card" id="snapStatsCard" style="margin-top:24px">
+  <h2>Snapshot Producer (diagnostic)</h2>
+  <div class="sub">Background thread builds JSON payloads for /gann, /options, /futures
+    every {{ '~' }}<span id="snapInterval">…</span>s so requests don't pay the build cost.
+    If <em>age</em> grows much beyond the refresh interval, the producer is starved.</div>
+  <div id="snapStatsBody" style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.6;color:#d4d4d8">
+    Loading…
+  </div>
+  <div class="hint" style="margin-top:8px">
+    Refreshes every 5s. JSON: <code>/api/snapshot-stats</code>.
+  </div>
+</div>
+
 <script>
 // Build a nested object from form fields with dotted names like "stoploss.active".
 function gather() {
@@ -541,6 +559,53 @@ document.querySelectorAll('.engine-applyto input[type=radio]').forEach(r => {
     r.closest('.applyto-pill').classList.add('sel');
   });
 });
+
+// I.3 — poll the snapshot-stats endpoint every 5s and render a tiny table.
+// Read-only: no side effects, just shows producer health. Colour-codes
+// `age_s` against `refresh_interval_s` so a stalling producer is visible.
+async function refreshSnapStats() {
+  const body = document.getElementById('snapStatsBody');
+  if (!body) return;
+  try {
+    const r = await fetch('/api/snapshot-stats', {cache: 'no-store'});
+    const d = await r.json();
+    const intvSpan = document.getElementById('snapInterval');
+    if (intvSpan) intvSpan.textContent = d.refresh_interval_s ?? '?';
+    const interval = Number(d.refresh_interval_s || 0);
+    const errs = d.errors || {};
+    const errStr = Object.keys(errs).length
+      ? Object.entries(errs).map(([k, v]) => k + '=' + v).join(', ')
+      : 'none';
+    let html = '<div>refreshes: <strong>' + (d.refresh_count ?? '?') +
+               '</strong> | errors: ' + errStr + '</div>';
+    html += '<table style="width:auto;margin-top:8px;border-collapse:collapse">' +
+            '<tr style="color:#71717a">' +
+            '<th style="text-align:left;padding:4px 12px 4px 0">payload</th>' +
+            '<th style="text-align:right;padding:4px 12px">age (s)</th>' +
+            '<th style="text-align:right;padding:4px 12px">build (ms)</th>' +
+            '<th style="text-align:right;padding:4px 0">size (KB)</th></tr>';
+    Object.entries(d.payloads || {}).forEach(([k, p]) => {
+      const age = p.age_s;
+      const stale = (interval > 0 && age != null && age > interval * 2);
+      const ageColor = stale ? '#f87171' : '#4ade80';
+      const kb = p.bytes != null ? (p.bytes / 1024).toFixed(1) : '?';
+      html += '<tr>' +
+              '<td style="padding:2px 12px 2px 0">' + k + '</td>' +
+              '<td style="text-align:right;padding:2px 12px;color:' + ageColor + '">' +
+                (age != null ? age.toFixed(2) : '—') + '</td>' +
+              '<td style="text-align:right;padding:2px 12px">' +
+                (p.build_ms != null ? p.build_ms : '—') + '</td>' +
+              '<td style="text-align:right;padding:2px 0">' + kb + '</td>' +
+              '</tr>';
+    });
+    html += '</table>';
+    body.innerHTML = html;
+  } catch (err) {
+    body.textContent = 'Error fetching /api/snapshot-stats: ' + err;
+  }
+}
+refreshSnapStats();
+setInterval(refreshSnapStats, 5000);
 
 document.getElementById('cfgForm').addEventListener('submit', async (e) => {
   e.preventDefault();

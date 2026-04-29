@@ -25,7 +25,13 @@ from backend.utils import now_ist
 
 # ---- TTL cache ----
 _quote_cache = {"data": {}, "ts": 0, "error": None}
-QUOTE_TTL = 2.0  # seconds
+# D.7 — TTL is intentionally larger than the snapshot producer's refresh
+# interval (2 s). The snapshot always fetches with force=True so it ALWAYS
+# refreshes on its 2 s tick; the strategy ticker (3 s tick) and any ad-hoc
+# request-time fetch then ride on the cache and avoid duplicating the REST
+# round-trip. Earlier value of 2.0 left a gap where a tick falling between
+# snapshot refreshes did its own REST fetch (~30% duplicated work).
+QUOTE_TTL = 3.5  # seconds
 
 # ---- WebSocket QuoteFeed ----
 # REST polling stays as fallback; WS overlays fresher LTP when available.
