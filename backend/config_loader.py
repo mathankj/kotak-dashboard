@@ -55,6 +55,22 @@ Schema (UNIFIED — one config drives BOTH options + futures strategies):
 
   futures_round_step.{NIFTY|BANKNIFTY|SENSEX}  step for futures limit price
 
+  current_logic.enabled   bool   # master flag — run the current (open-anchored)
+                                 # logic engine. Default: true. Drives the
+                                 # existing top-level entry/stoploss/target/...
+  reverse_logic.enabled   bool   # master flag — run the reverse (anchored to
+                                 # running intraday low/high) logic engine.
+                                 # Default: false. Drives the `reverse_engine`
+                                 # block below.
+
+  reverse_engine.entry / .stoploss / .target / .indices / .lots /
+                .per_day_cap / .risk
+                                 # Same shape as the top-level current-logic
+                                 # blocks. Lets the reverse engine have its
+                                 # own level pickers, lot sizes, day cap, and
+                                 # drawdown threshold without sharing state
+                                 # with the current engine. Off by default.
+
 Everything is intentionally defensive: a missing file, an unparseable
 file, or a malformed key falls back to the documented DEFAULTS rather
 than crashing the strategy.
@@ -144,6 +160,63 @@ DEFAULTS = {
         "NIFTY":     50,
         "BANKNIFTY": 100,
         "SENSEX":    100,
+    },
+
+    # ---- Phase 2: parallel logic engines ----
+    # current_logic drives the legacy open-anchored entry/stoploss/target
+    # blocks above. reverse_logic drives the `reverse_engine` block below
+    # — anchored to today's running intraday low/high (see strategy/gann.py
+    # reverse_buy_levels / reverse_sell_levels). Both can run in parallel;
+    # each writes its own ledger rows tagged with `engine: current|reverse`.
+    "current_logic": {"enabled": True},
+    "reverse_logic": {"enabled": False},
+
+    # Mirror of the top-level current-logic schema so the reverse engine
+    # can pick its own levels / lots / caps / drawdown without contention.
+    # Keep defaults conservative (lot=1, no cap, no drawdown) — Ganesh tunes
+    # these from the /config UI once Phase 2e ships.
+    "reverse_engine": {
+        "entry": {
+            "market_open_path":        True,
+            "market_open_buy_level":   "BUY",
+            "market_open_sell_level":  "SELL",
+            "crossing_path":           True,
+            "crossing_buy_level":      "BUY",
+            "crossing_sell_level":     "SELL",
+        },
+        "stoploss": {
+            "active": "C",
+            "variant_a_drop_rs":     5,
+            "variant_a_buy_level":   "BUY",
+            "variant_a_sell_level":  "SELL",
+            "variant_b_drop_pct":    30,
+            "variant_b_buy_level":   "BUY",
+            "variant_b_sell_level":  "SELL",
+            "variant_c_buy_level":   "BUY",
+            "variant_c_sell_level":  "SELL",
+        },
+        "target": {
+            "ce_level": "T1",
+            "pe_level": "S1",
+        },
+        "indices": {
+            "NIFTY":     {"paper": True, "real": True},
+            "BANKNIFTY": {"paper": True, "real": True},
+            "SENSEX":    {"paper": True, "real": True},
+        },
+        "lots": {
+            "NIFTY":     1,
+            "BANKNIFTY": 1,
+            "SENSEX":    1,
+        },
+        "per_day_cap": {
+            "NIFTY":     None,
+            "BANKNIFTY": None,
+            "SENSEX":    None,
+        },
+        "risk": {
+            "max_daily_drawdown": None,
+        },
     },
 }
 
@@ -341,7 +414,134 @@ def _coerce(raw):
             risk["max_daily_drawdown"] = None
     merged["risk"] = risk
 
+    # ---- Phase 2: master flags + reverse_engine block ----
+    cl = merged.get("current_logic") or {}
+    cl["enabled"] = bool(cl.get("enabled", True))
+    merged["current_logic"] = cl
+
+    rl = merged.get("reverse_logic") or {}
+    rl["enabled"] = bool(rl.get("enabled", False))
+    merged["reverse_logic"] = rl
+
+    # reverse_engine block — coerce same way as the top-level current blocks.
+    # Reuse helpers below by treating the sub-dict as if it were `merged`.
+    rev = merged.get("reverse_engine") or {}
+    _coerce_engine_block(rev)
+    merged["reverse_engine"] = rev
+
     return merged
+
+
+def _coerce_engine_block(blk):
+    """In-place coerce of a reverse_engine-shaped sub-dict.
+
+    Same rules as the top-level entry/stoploss/target/indices/lots/
+    per_day_cap/risk coercion above — pulled into a helper so the reverse
+    engine can reuse the validation without copy-pasting. Blank/missing
+    keys are filled in from DEFAULTS["reverse_engine"]. Defensive:
+    never raises.
+    """
+    re_def = DEFAULTS["reverse_engine"]
+
+    # entry
+    e = blk.get("entry") or {}
+    e_def = re_def["entry"]
+    e["market_open_path"] = bool(e.get("market_open_path", True))
+    e["crossing_path"]    = bool(e.get("crossing_path", True))
+    for k, valid in (
+        ("market_open_buy_level",  VALID_BUY_LEVELS),
+        ("market_open_sell_level", VALID_SELL_LEVELS),
+        ("crossing_buy_level",     VALID_BUY_LEVELS),
+        ("crossing_sell_level",    VALID_SELL_LEVELS),
+    ):
+        v = str(e.get(k, "")).upper()
+        e[k] = v if v in valid else e_def[k]
+    blk["entry"] = e
+
+    # stoploss
+    sl = blk.get("stoploss") or {}
+    sl_def = re_def["stoploss"]
+    sl["active"] = str(sl.get("active", "C")).upper()
+    if sl["active"] not in VALID_STOPLOSS:
+        sl["active"] = sl_def["active"]
+    try:
+        sl["variant_a_drop_rs"] = max(0.0, float(sl.get("variant_a_drop_rs", 5)))
+    except (TypeError, ValueError):
+        sl["variant_a_drop_rs"] = 5.0
+    try:
+        sl["variant_b_drop_pct"] = max(0.0, float(sl.get("variant_b_drop_pct", 30)))
+    except (TypeError, ValueError):
+        sl["variant_b_drop_pct"] = 30.0
+    for k, valid in (
+        ("variant_a_buy_level",  VALID_BUY_LEVELS),
+        ("variant_a_sell_level", VALID_SELL_LEVELS),
+        ("variant_b_buy_level",  VALID_BUY_LEVELS),
+        ("variant_b_sell_level", VALID_SELL_LEVELS),
+        ("variant_c_buy_level",  VALID_BUY_LEVELS),
+        ("variant_c_sell_level", VALID_SELL_LEVELS),
+    ):
+        v = str(sl.get(k, "")).upper()
+        sl[k] = v if v in valid else sl_def[k]
+    blk["stoploss"] = sl
+
+    # target
+    tgt = blk.get("target") or {}
+    tgt_def = re_def["target"]
+    tgt["ce_level"] = str(tgt.get("ce_level", "T1")).upper()
+    if tgt["ce_level"] not in VALID_CE_TARGETS:
+        tgt["ce_level"] = tgt_def["ce_level"]
+    tgt["pe_level"] = str(tgt.get("pe_level", "S1")).upper()
+    if tgt["pe_level"] not in VALID_PE_TARGETS:
+        tgt["pe_level"] = tgt_def["pe_level"]
+    blk["target"] = tgt
+
+    # indices — per-engine bools, same shape as top-level.
+    idxs = blk.get("indices") or {}
+    for idx in INDEX_NAMES:
+        cur = idxs.get(idx) or {}
+        for engname in ENGINE_NAMES:
+            v = cur.get(engname, True)
+            cur[engname] = bool(v) if not isinstance(v, str) \
+                else v.strip().lower() in ("1", "true", "yes", "on")
+        idxs[idx] = cur
+    blk["indices"] = idxs
+
+    # lots
+    lots = blk.get("lots") or {}
+    for idx in INDEX_NAMES:
+        try:
+            n = int(lots.get(idx, 1))
+            lots[idx] = max(1, n)
+        except (TypeError, ValueError):
+            lots[idx] = 1
+    blk["lots"] = lots
+
+    # per_day_cap
+    cap = blk.get("per_day_cap") or {}
+    for idx in INDEX_NAMES:
+        v = cap.get(idx)
+        if v is None or v == "" or v == "null":
+            cap[idx] = None
+        else:
+            try:
+                n = int(v)
+                cap[idx] = n if n > 0 else None
+            except (TypeError, ValueError):
+                cap[idx] = None
+    blk["per_day_cap"] = cap
+
+    # risk
+    risk = blk.get("risk") or {}
+    v = risk.get("max_daily_drawdown")
+    if v is None or v == "" or v == "null":
+        risk["max_daily_drawdown"] = None
+    else:
+        try:
+            n = int(v)
+            risk["max_daily_drawdown"] = n if n > 0 else None
+        except (TypeError, ValueError):
+            risk["max_daily_drawdown"] = None
+    blk["risk"] = risk
 
 
 def _load_from_disk():
@@ -472,6 +672,101 @@ def validate(new):
         if _parse_hhmm(v) is None:
             errs.append(f"timings.{key} must be HH:MM (24h).")
 
+    # Phase 2: master flags
+    for blk_name in ("current_logic", "reverse_logic"):
+        blk = new.get(blk_name)
+        if blk is None:
+            continue
+        if not isinstance(blk, dict):
+            errs.append(f"{blk_name} must be a dict.")
+            continue
+        if not isinstance(blk.get("enabled", True), bool):
+            errs.append(f"{blk_name}.enabled must be true or false.")
+
+    # Phase 2: reverse_engine block — same checks as top-level.
+    rev = new.get("reverse_engine")
+    if rev is not None:
+        if not isinstance(rev, dict):
+            errs.append("reverse_engine must be a dict.")
+        else:
+            errs.extend(_validate_engine_block(rev, "reverse_engine"))
+
+    return errs
+
+
+def _validate_engine_block(blk, prefix):
+    """Run the same field-level checks as the top-level current-logic
+    config against an engine-shaped sub-dict (used for `reverse_engine`).
+    Returns a list of human-readable error strings."""
+    errs = []
+
+    sl = blk.get("stoploss") or {}
+    if str(sl.get("active", "")).upper() not in VALID_STOPLOSS:
+        errs.append(f"{prefix}.stoploss.active must be one of A, B, C.")
+    for k in ("variant_a_buy_level", "variant_b_buy_level", "variant_c_buy_level"):
+        if str(sl.get(k, "BUY")).upper() not in VALID_BUY_LEVELS:
+            errs.append(f"{prefix}.stoploss.{k} must be BUY or BUY_WA.")
+    for k in ("variant_a_sell_level", "variant_b_sell_level", "variant_c_sell_level"):
+        if str(sl.get(k, "SELL")).upper() not in VALID_SELL_LEVELS:
+            errs.append(f"{prefix}.stoploss.{k} must be SELL or SELL_WA.")
+
+    e = blk.get("entry") or {}
+    for k in ("market_open_buy_level", "crossing_buy_level"):
+        if str(e.get(k, "BUY")).upper() not in VALID_BUY_LEVELS:
+            errs.append(f"{prefix}.entry.{k} must be BUY or BUY_WA.")
+    for k in ("market_open_sell_level", "crossing_sell_level"):
+        if str(e.get(k, "SELL")).upper() not in VALID_SELL_LEVELS:
+            errs.append(f"{prefix}.entry.{k} must be SELL or SELL_WA.")
+
+    tgt = blk.get("target") or {}
+    if str(tgt.get("ce_level", "")).upper() not in VALID_CE_TARGETS:
+        errs.append(f"{prefix}.target.ce_level must be one of "
+                    f"{sorted(VALID_CE_TARGETS)}.")
+    if str(tgt.get("pe_level", "")).upper() not in VALID_PE_TARGETS:
+        errs.append(f"{prefix}.target.pe_level must be one of "
+                    f"{sorted(VALID_PE_TARGETS)}.")
+
+    idxs = blk.get("indices") or {}
+    for idx in INDEX_NAMES:
+        cur = idxs.get(idx)
+        if cur is None:
+            continue
+        if not isinstance(cur, dict):
+            errs.append(f"{prefix}.indices.{idx} must be a dict with paper/real bools.")
+            continue
+        for engname in ENGINE_NAMES:
+            v = cur.get(engname, True)
+            if not isinstance(v, bool):
+                errs.append(f"{prefix}.indices.{idx}.{engname} must be true or false.")
+
+    for idx in INDEX_NAMES:
+        try:
+            n = int((blk.get("lots") or {}).get(idx, 1))
+            if n < 1:
+                errs.append(f"{prefix}.lots.{idx} must be >= 1.")
+        except (TypeError, ValueError):
+            errs.append(f"{prefix}.lots.{idx} must be an integer.")
+
+    for idx in INDEX_NAMES:
+        v = (blk.get("per_day_cap") or {}).get(idx)
+        if v not in (None, "", "null"):
+            try:
+                n = int(v)
+                if n <= 0:
+                    errs.append(f"{prefix}.per_day_cap.{idx} must be positive or empty.")
+            except (TypeError, ValueError):
+                errs.append(f"{prefix}.per_day_cap.{idx} must be an integer or empty.")
+
+    risk = blk.get("risk") or {}
+    v = risk.get("max_daily_drawdown")
+    if v not in (None, "", "null"):
+        try:
+            n = int(v)
+            if n <= 0:
+                errs.append(f"{prefix}.risk.max_daily_drawdown must be positive or empty.")
+        except (TypeError, ValueError):
+            errs.append(f"{prefix}.risk.max_daily_drawdown must be an integer or empty.")
+
     return errs
 
 
@@ -583,3 +878,65 @@ def resolve_buy_level(levels, choice):
 def resolve_sell_level(levels, choice):
     """choice in {SELL, SELL_WA}. Returns numeric level or None."""
     return (levels.get("sell") or {}).get(choice)
+
+
+# ---- Phase 2: engine-aware accessors ----
+# `engine` is "current" or "reverse". For "current", accessors return the
+# top-level entry/stoploss/target/lots/per_day_cap/indices/risk values
+# (preserving the legacy shape). For "reverse", they return the matching
+# slice from the `reverse_engine` block. This lets strategy code be
+# rewritten to take an `engine` argument without branching everywhere.
+
+VALID_ENGINES = ("current", "reverse")
+
+
+def engine_enabled(engine):
+    """True if the named logic engine ('current'|'reverse') should run.
+    Master flag check. Defaults: current=True, reverse=False."""
+    if engine == "current":
+        return bool((get().get("current_logic") or {}).get("enabled", True))
+    if engine == "reverse":
+        return bool((get().get("reverse_logic") or {}).get("enabled", False))
+    return False
+
+
+def engine_block(engine):
+    """Return a dict shaped like {entry, stoploss, target, indices, lots,
+    per_day_cap, risk} for the named engine. For 'current' this assembles
+    the top-level keys; for 'reverse' it returns the `reverse_engine`
+    sub-dict. Always returns a dict (never None)."""
+    cfg = get()
+    if engine == "reverse":
+        return cfg.get("reverse_engine") or {}
+    # current: synthesize from top-level keys.
+    return {
+        "entry":       cfg.get("entry") or {},
+        "stoploss":    cfg.get("stoploss") or {},
+        "target":      cfg.get("target") or {},
+        "indices":     cfg.get("indices") or {},
+        "lots":        cfg.get("lots") or {},
+        "per_day_cap": cfg.get("per_day_cap") or {},
+        "risk":        cfg.get("risk") or {},
+    }
+
+
+def engine_lot_multiplier(engine, idx_name):
+    return (engine_block(engine).get("lots") or {}).get(idx_name, 1)
+
+
+def engine_per_day_cap(engine, idx_name):
+    return (engine_block(engine).get("per_day_cap") or {}).get(idx_name)
+
+
+def engine_max_daily_drawdown(engine):
+    """Per-engine drawdown threshold. None disables the engine-only halt."""
+    return (engine_block(engine).get("risk") or {}).get("max_daily_drawdown")
+
+
+def engine_index_enabled_for(engine, sub_engine, idx_name):
+    """True if `engine` ('current'|'reverse') should fire on `idx_name`
+    for the given paper/real `sub_engine`. Missing entries default True
+    (fail-open, matches the existing index_enabled_for behaviour)."""
+    blk = engine_block(engine)
+    cur = (blk.get("indices") or {}).get(idx_name) or {}
+    return bool(cur.get(sub_engine, True))
