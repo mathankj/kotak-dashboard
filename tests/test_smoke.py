@@ -30,11 +30,17 @@ def test_import_backend_kotak():
 
 
 def test_find_scrip():
-    """find_scrip should return a SCRIPS entry by symbol or None."""
+    """find_scrip should return a SCRIPS entry by symbol or None.
+    SCRIPS was trimmed to the three indices that drive the strategy —
+    RELIANCE/TCS/etc. are no longer tracked, so we exercise lookup +
+    miss against what's actually in the list."""
     from backend.kotak.instruments import find_scrip
-    assert find_scrip("RELIANCE")["token"] == "2885"
     assert find_scrip("NIFTY 50")["exchange"] == "nse_cm"
+    assert find_scrip("BANKNIFTY")["token"] == "Nifty Bank"
+    assert find_scrip("SENSEX")["exchange"] == "bse_cm"
     assert find_scrip("DOES_NOT_EXIST") is None
+    # Equities removed at Ganesh's request — confirm they're absent.
+    assert find_scrip("RELIANCE") is None
 
 
 def test_safe_call_empty_marker():
@@ -126,11 +132,15 @@ def test_import_strategy_modules():
 
 
 def test_gann_levels_math():
-    """gann_levels should produce 7 sell + 7 buy levels symmetric around sqrt-space."""
+    """gann_levels should produce 11 sell + 11 buy levels symmetric around sqrt-space."""
     from backend.strategy.gann import gann_levels
     lv = gann_levels(100.0)
-    assert set(lv["sell"].keys()) == {"S5", "S4", "S3", "S2", "S1", "SELL_WA", "SELL"}
-    assert set(lv["buy"].keys()) == {"BUY", "BUY_WA", "T1", "T2", "T3", "T4", "T5"}
+    assert set(lv["sell"].keys()) == {
+        "S9", "S8", "S7", "S6", "S5", "S4", "S3", "S2", "S1",
+        "SELL_WA", "SELL"}
+    assert set(lv["buy"].keys()) == {
+        "BUY", "BUY_WA",
+        "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"}
     # All sell levels should be <100, all buy levels >100.
     for v in lv["sell"].values():
         assert v < 100
@@ -158,9 +168,9 @@ def test_compute_target_level_reached_buy():
     t1 = lv["buy"]["T1"]; t2 = lv["buy"]["T2"]
     mid = (t1 + t2) / 2
     assert compute_target_level_reached("B", 100.0, mid, lv) == "T1"
-    # Beyond T5 (top of the extended ladder)
-    beyond = lv["buy"]["T5"] + 10
-    assert compute_target_level_reached("B", 100.0, beyond, lv) == "Beyond T5"
+    # Beyond T9 (top of the extended ladder, post S9..T9 expansion)
+    beyond = lv["buy"]["T9"] + 10
+    assert compute_target_level_reached("B", 100.0, beyond, lv) == "Beyond T9"
 
 
 def test_next_trade_id_empty_and_increment():

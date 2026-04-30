@@ -16,16 +16,11 @@ from backend.utils import now_ist
 
 SCRIPS = [
     # Indices: not tradeable as cash; buy/sell buttons hidden in UI.
+    # Cash-equity stocks were removed at Ganesh's request — Gann Trader now
+    # tracks only the three indices that drive the options strategy.
     {"symbol": "NIFTY 50",  "token": "Nifty 50",   "exchange": "nse_cm", "trading_symbol": None,           "tradeable": False, "lot": 1},
     {"symbol": "BANKNIFTY", "token": "Nifty Bank", "exchange": "nse_cm", "trading_symbol": None,           "tradeable": False, "lot": 1},
     {"symbol": "SENSEX",    "token": "SENSEX",     "exchange": "bse_cm", "trading_symbol": None,           "tradeable": False, "lot": 1},
-    # Equities: tradeable. trading_symbol is what Kotak place_order needs.
-    {"symbol": "RELIANCE",  "token": "2885",       "exchange": "nse_cm", "trading_symbol": "RELIANCE-EQ",  "tradeable": True,  "lot": 1},
-    {"symbol": "TCS",       "token": "11536",      "exchange": "nse_cm", "trading_symbol": "TCS-EQ",       "tradeable": True,  "lot": 1},
-    {"symbol": "INFOSYS",   "token": "1594",       "exchange": "nse_cm", "trading_symbol": "INFY-EQ",      "tradeable": True,  "lot": 1},
-    {"symbol": "HDFCBANK",  "token": "1333",       "exchange": "nse_cm", "trading_symbol": "HDFCBANK-EQ",  "tradeable": True,  "lot": 1},
-    {"symbol": "ICICIBANK", "token": "4963",       "exchange": "nse_cm", "trading_symbol": "ICICIBANK-EQ", "tradeable": True,  "lot": 1},
-    {"symbol": "SBIN",      "token": "3045",       "exchange": "nse_cm", "trading_symbol": "SBIN-EQ",      "tradeable": True,  "lot": 1},
 ]
 
 
