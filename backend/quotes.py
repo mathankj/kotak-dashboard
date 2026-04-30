@@ -72,23 +72,32 @@ def _ensure_feed_started():
 
 
 def _ws_overlay(out_dict, key_to_token_exch):
-    """Overlay WS LTP + OHLC onto out_dict in place.
+    """Overlay WS LTP + OHLC + previous-close onto out_dict in place.
 
-    LTP rules:
-      - WS LTP fresher than WS_FRESH_SECONDS  -> always wins over REST
-      - WS LTP stale but REST returned None   -> still use WS (better than
-        nothing, e.g. off-hours snapshot)
-      - WS LTP stale and REST has its own LTP -> keep REST
-
-    OHLC rules (fix for the "yesterday's open" bug):
+    Background (yesterday's-open bug):
       Kotak's REST `quotes(quote_type="ohlc")` returns the PREVIOUS DAY
-      candle until well into the new session, while WS ticks carry
-      today's intraday op/lo/h from the first print. So:
-        - WS fresh -> WS OHLC wins over REST (today's data overrides
-          yesterday's candle). Gann levels are recomputed when 'open'
-          changes; otherwise the BUY/SELL ladder anchors on yesterday's
-          open and the strategy fires on the wrong rungs.
-        - WS stale -> only backfill REST None/0 fields (off-hours).
+      candle until well into the new session. WS ticks carry today's
+      intraday op/lo/h/c from the first print. We used to overlay WS
+      on top of REST OHLC, which inverted on cache hits and showed
+      yesterday's data. Fixed by making WS the SOLE source of OHLC —
+      REST OHLC is no longer fetched at all (see fetch_quotes /
+      fetch_option_quotes / fetch_future_quotes).
+
+    LTP:
+      - WS LTP fresher than WS_FRESH_SECONDS  -> always wins
+      - WS LTP stale but REST LTP is None     -> still use WS (better
+        than nothing during cold-start window)
+      - WS LTP stale and REST LTP populated   -> keep REST LTP
+
+    OHLC + close:
+      - Always copied from WS when present. The `rec` starts with
+        open/low/high/close = None (no REST OHLC anymore), so any WS
+        value wins. If WS has no value (cold-start), the field stays
+        None and the UI renders an empty cell — that is the correct
+        "honest" state, not yesterday's data dressed as today's.
+      - Gann levels recomputed when `open` changes OR when the ladder
+        hasn't been built yet. Without this, a level dict with the
+        wrong anchor survives across requests.
 
     `ws_age` is added for diagnostics. Returns count of overlays applied.
     """
@@ -108,23 +117,13 @@ def _ws_overlay(out_dict, key_to_token_exch):
             rec["ltp"] = tick["ltp"]
             rec["ws_age"] = round(age, 2)
             prev_open = rec.get("open")
-            if is_fresh:
-                # WS is fresh — its OHLC is today's session data.
-                # Override REST values regardless of whether REST had a
-                # number, since REST OHLC is typically previous-day.
-                for src, dst in (("op", "open"), ("lo", "low"), ("h", "high")):
-                    if tick.get(src) is not None:
-                        rec[dst] = tick[src]
-            else:
-                # WS stale — only backfill where REST is empty/0.
-                for src, dst in (("op", "open"), ("lo", "low"), ("h", "high")):
-                    if (rec.get(dst) in (None, 0, 0.0)
-                            and tick.get(src) is not None):
-                        rec[dst] = tick[src]
-            # Recompute Gann levels whenever 'open' changed OR the
-            # ladder hadn't been built yet. Without this, a stale
-            # REST-anchored ladder survives after WS gives us today's
-            # correct open.
+            # WS is the sole OHLC source — copy whatever it has.
+            # `c` is Kotak's previous-day close (used for change% on
+            # options and as off-hours LTP fallback in the UI).
+            for src, dst in (("op", "open"), ("lo", "low"),
+                             ("h", "high"), ("c", "close")):
+                if tick.get(src) is not None:
+                    rec[dst] = tick[src]
             new_open = rec.get("open")
             if new_open and (new_open != prev_open
                              or not rec.get("levels", {}).get("buy")):
@@ -180,9 +179,11 @@ def fetch_quotes(force=False):
                 return [r], None
         return [], None  # unknown shape, but treat as silent no-data
 
-    ohlc_items, e1 = _call("ohlc")
-    ltp_items, e2 = _call("ltp")
-    last_err = e1 or e2
+    # REST `quote_type="ohlc"` is intentionally NOT called: it returns
+    # the PREVIOUS DAY candle until well into the new session, which
+    # caused the yesterday's-open bug. WS is the sole source for
+    # open/low/high/close — see _ws_overlay docstring.
+    ltp_items, last_err = _call("ltp")
 
     # Index responses by (exchange, exchange_token) — Kotak echoes these back.
     def index_by_key(items):
@@ -195,36 +196,28 @@ def fetch_quotes(force=False):
             idx[key] = it
         return idx
 
-    ohlc_idx = index_by_key(ohlc_items)
     ltp_idx = index_by_key(ltp_items)
 
     for s in SCRIPS:
         key = (s["exchange"].lower(), str(s["token"]).lower())
-        ohlc_it = ohlc_idx.get(key, {})
         ltp_it = ltp_idx.get(key, {})
-        ohlc = ohlc_it.get("ohlc") if isinstance(ohlc_it.get("ohlc"), dict) else {}
         ltp_v = None
         try:
             ltp_v = float(ltp_it.get("ltp")) if ltp_it.get("ltp") not in (None, "", "0") else None
         except (TypeError, ValueError):
             pass
-        op = float(ohlc.get("open")) if ohlc.get("open") not in (None, "", "0") else None
-        low = float(ohlc.get("low")) if ohlc.get("low") not in (None, "", "0") else None
-        high = float(ohlc.get("high")) if ohlc.get("high") not in (None, "", "0") else None
-        # If LTP missing (market closed), fall back to ohlc.close
-        if ltp_v is None:
-            try:
-                ltp_v = float(ohlc.get("close")) if ohlc.get("close") not in (None, "", "0") else None
-            except (TypeError, ValueError):
-                pass
+        # OHLC fields start as None — they are filled by _ws_overlay below
+        # from the WS feed (today's session data). If WS has no value
+        # (cold-start), they stay None and the UI shows an empty cell.
         out[s["symbol"]] = {
             "symbol": s["symbol"],
             "token": s["token"],
             "ltp": ltp_v,
-            "open": op,
-            "low": low,
-            "high": high,
-            "levels": gann_levels(op) if op else {"sell": {}, "buy": {}},
+            "open": None,
+            "low": None,
+            "high": None,
+            "close": None,
+            "levels": {"sell": {}, "buy": {}},
         }
 
     # Overlay fresh WS LTPs.
@@ -387,9 +380,9 @@ def fetch_option_quotes(force=False):
                 return [r], None
         return [], None  # unknown shape, but treat as silent no-data
 
-    ohlc_items, e1 = _call("ohlc")
-    ltp_items, e2 = _call("ltp")
-    last_err = e1 or e2
+    # REST OHLC intentionally not called — see fetch_quotes comment.
+    # `close` (previous-day close) comes from WS `c` field via overlay.
+    ltp_items, last_err = _call("ltp")
 
     def index_by_key(items):
         idx = {}
@@ -401,28 +394,16 @@ def fetch_option_quotes(force=False):
             idx[k] = it
         return idx
 
-    ohlc_idx = index_by_key(ohlc_items)
     ltp_idx = index_by_key(ltp_items)
     out = {}
     for i in insts:
         k = (i["exchange"].lower(), str(i["token"]).lower())
-        ohlc_it = ohlc_idx.get(k, {})
         ltp_it = ltp_idx.get(k, {})
-        ohlc = ohlc_it.get("ohlc") if isinstance(ohlc_it.get("ohlc"), dict) else {}
         ltp_v = None
         try:
             ltp_v = float(ltp_it.get("ltp")) if ltp_it.get("ltp") not in (None, "", "0") else None
         except (TypeError, ValueError):
             pass
-        close = float(ohlc.get("close")) if ohlc.get("close") not in (None, "", "0") else None
-        if ltp_v is None and close is not None:
-            ltp_v = close
-        change_pct = None
-        if ltp_v is not None and close not in (None, 0):
-            try:
-                change_pct = round(((ltp_v - close) / close) * 100, 2)
-            except ZeroDivisionError:
-                pass
         out[i["key"]] = {
             "key": i["key"],
             "index": i["index"],
@@ -432,15 +413,15 @@ def fetch_option_quotes(force=False):
             "expiry": i["expiry"],
             "is_atm": i["is_atm"],
             "ltp": ltp_v,
-            "close": close,
-            "change_pct": change_pct,
+            "close": None,         # filled by overlay from WS `c`
+            "change_pct": None,    # computed below after overlay
             # Token+exchange propagated so callers (paper_book entry,
             # /api/paper-trades-live) can read the WS feed directly
             # after a strike drifts out of the ATM window.
             "token":    i["token"],
             "exchange": i["exchange"],
         }
-    # Overlay fresh WS LTPs and refresh option subs if ATM drifted.
+    # Overlay fresh WS LTP/OHLC/close and refresh option subs if ATM drifted.
     try:
         _ensure_feed_started()
         opt_subs = [{"instrument_token": i["token"],
@@ -450,6 +431,21 @@ def fetch_option_quotes(force=False):
         _ws_overlay(out, {i["key"]: (i["exchange"], i["token"]) for i in insts})
     except Exception as e:
         print(f"[quote_feed] overlay (options) failed: {type(e).__name__}: {e}")
+
+    # change_pct relative to previous close — done after overlay so
+    # `close` is populated from WS. If LTP still missing after overlay
+    # (cold start before first WS tick), fall back to previous close.
+    for rec in out.values():
+        ltp_v = rec.get("ltp")
+        close_v = rec.get("close")
+        if ltp_v is None and close_v is not None:
+            rec["ltp"] = close_v
+            ltp_v = close_v
+        if ltp_v is not None and close_v not in (None, 0):
+            try:
+                rec["change_pct"] = round(((ltp_v - close_v) / close_v) * 100, 2)
+            except ZeroDivisionError:
+                pass
 
     _option_quote_cache["data"] = out
     _option_quote_cache["ts"] = now
@@ -533,9 +529,10 @@ def fetch_future_quotes(force=False):
                 return [r], None
         return [], None
 
-    ohlc_items, e1 = _call("ohlc")
+    # REST OHLC intentionally not called — see fetch_quotes comment.
+    # OHLC + close come from WS via _ws_overlay below.
     ltp_items, e2 = _call("ltp")
-    last_err = e1 or e2 or last_err
+    last_err = e2 or last_err
 
     def index_by_key(items):
         idx = {}
@@ -547,26 +544,18 @@ def fetch_future_quotes(force=False):
             idx[k] = it
         return idx
 
-    ohlc_idx = index_by_key(ohlc_items)
     ltp_idx = index_by_key(ltp_items)
     for idx_name, rec in by_idx.items():
         k = (rec["exchange"].lower(), str(rec["token"]).lower())
-        ohlc_it = ohlc_idx.get(k, {})
         ltp_it = ltp_idx.get(k, {})
-        ohlc = ohlc_it.get("ohlc") if isinstance(ohlc_it.get("ohlc"), dict) else {}
         ltp_v = None
         try:
             ltp_v = float(ltp_it.get("ltp")) if ltp_it.get("ltp") not in (None, "", "0") else None
         except (TypeError, ValueError):
             pass
-        close = float(ohlc.get("close")) if ohlc.get("close") not in (None, "", "0") else None
-        if ltp_v is None and close is not None:
-            ltp_v = close
         rec["ltp"] = ltp_v
-        rec["open"] = float(ohlc.get("open")) if ohlc.get("open") not in (None, "", "0") else None
-        rec["low"]  = float(ohlc.get("low"))  if ohlc.get("low")  not in (None, "", "0") else None
-        rec["high"] = float(ohlc.get("high")) if ohlc.get("high") not in (None, "", "0") else None
-        rec["close"] = close
+        rec["close"] = None  # filled by overlay from WS `c`
+        # open/low/high were initialized to None at by_idx setup; overlay fills.
 
     # Overlay fresh WS LTPs and keep the future-subs slot up to date.
     try:
