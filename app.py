@@ -191,7 +191,6 @@ TABS = [
     # Live — what the bot is trading right now
     {"key": "gann",         "url": "/gann",         "label": "Gann Trader"},
     {"key": "options",      "url": "/options",      "label": "Options"},
-    {"key": "futures",      "url": "/futures",      "label": "Futures"},
     # Books — ledgers (paper next to real, real first)
     {"key": "trades",       "url": "/trades",       "label": "Trade Log"},
     {"key": "paper_trades", "url": "/paper-trades", "label": "Paper Log"},
@@ -200,7 +199,6 @@ TABS = [
     {"key": "audit",        "url": "/audit",        "label": "Audit"},
     # Account — broker passthrough + config + login history
     {"key": "holdings",     "url": "/",             "label": "Holdings"},
-    {"key": "positions",    "url": "/positions",    "label": "Positions"},
     {"key": "config",       "url": "/config",       "label": "Config"},
     {"key": "history",      "url": "/history",      "label": "Login History"},
 ]
