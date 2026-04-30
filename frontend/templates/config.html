@@ -120,6 +120,24 @@
   .idx-grid .idx-cell { display: flex; justify-content: center; cursor: pointer; }
   .idx-grid .idx-cell input[type=checkbox] {
       width: 20px; height: 20px; accent-color: #2563eb; cursor: pointer; }
+
+  /* P1.1 — halt-status banner. Red strip at the top of /config when any
+     kill-switch flag (global or per-engine) is engaged. Shows reason +
+     timestamp so the operator doesn't tweak settings while a halt is
+     active and forget that NEW entries are blocked. */
+  .halt-banner { background: #450a0a; border: 1px solid #b91c1c;
+                 color: #fecaca; border-radius: 8px; padding: 14px 18px;
+                 margin-bottom: 16px; }
+  .halt-banner .title { color: #fee2e2; font-weight: 700; font-size: 15px;
+                        text-transform: uppercase; letter-spacing: 0.5px; }
+  .halt-banner ul { margin: 8px 0 0 0; padding-left: 20px; font-size: 13px;
+                    line-height: 1.7; }
+  .halt-banner code { background: #1c1917; color: #fda4af;
+                      padding: 1px 6px; border-radius: 3px;
+                      font-family: ui-monospace, Menlo, Consolas, monospace;
+                      font-size: 12px; }
+  .halt-banner .clear-hint { margin-top: 8px; color: #fda4af; font-size: 12px;
+                             font-style: italic; }
 </style>
 </head>
 <body>
@@ -143,6 +161,49 @@
   next strategy tick (within 3 seconds) picks them up — no restart.
   This is the SHARED config: same rules drive both options and futures.
 </div>
+
+{# P1.1 — halt-status banner. Renders only when one or more kill switches
+   (global or per-engine) is engaged. Reason + timestamp come from the
+   parsed halt-flag files via _inject_safety_state. #}
+{% if halt_global or halt_engines.current or halt_engines.reverse %}
+<div class="halt-banner">
+  <div class="title">&#9888; Trading is HALTED &mdash; new entries blocked</div>
+  <ul>
+    {% if halt_global %}
+      <li><strong>Global kill switch</strong>
+        &mdash; reason: <code>{{ halt_global.reason or 'manual' }}</code>
+        {% if halt_global.halted_at %}
+          &middot; halted at <code>{{ halt_global.halted_at }}</code>
+        {% endif %}
+        &middot; flag: <code>data/HALTED.flag</code>
+      </li>
+    {% endif %}
+    {% if halt_engines.current %}
+      <li><strong>Current engine halted</strong>
+        &mdash; reason: <code>{{ halt_engines.current.reason or 'manual' }}</code>
+        {% if halt_engines.current.halted_at %}
+          &middot; halted at <code>{{ halt_engines.current.halted_at }}</code>
+        {% endif %}
+        &middot; flag: <code>data/HALTED_current.flag</code>
+      </li>
+    {% endif %}
+    {% if halt_engines.reverse %}
+      <li><strong>Reverse engine halted</strong>
+        &mdash; reason: <code>{{ halt_engines.reverse.reason or 'manual' }}</code>
+        {% if halt_engines.reverse.halted_at %}
+          &middot; halted at <code>{{ halt_engines.reverse.halted_at }}</code>
+        {% endif %}
+        &middot; flag: <code>data/HALTED_reverse.flag</code>
+      </li>
+    {% endif %}
+  </ul>
+  <div class="clear-hint">
+    Settings below still save, but new entries from a halted engine stay
+    blocked until you SSH in and remove the flag file
+    (<code>rm data/HALTED*.flag</code>) &mdash; deliberate ceremony.
+  </div>
+</div>
+{% endif %}
 
 <form id="cfgForm">
 

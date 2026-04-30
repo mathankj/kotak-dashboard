@@ -1413,13 +1413,38 @@ def _today_pnl_by_engine_cached():
         return dict(_TODAY_PNL_CACHE["by_engine"] or {})
 
 
+def _parse_halt_info(text):
+    """Parse a halt-flag file body (key=value lines) into a small dict.
+    Returns None for None/empty input. Tolerates missing keys — used by
+    the /config halt banner (P1.1) so reason + timestamp display
+    cleanly instead of as a raw multiline blob."""
+    if not text:
+        return None
+    out = {"halted_at": "", "reason": "", "engine": ""}
+    for line in text.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            k = k.strip()
+            if k in out:
+                out[k] = v.strip()
+    return out
+
+
 @app.context_processor
 def _inject_safety_state():
     # B.2 — today's combined P&L (real ledger + paper book), summed in points
     # × qty so it matches the per-page Trade Log "Net P&L (₹)" totals.
+    # P1.1 — halt_global / halt_engines feed the /config halt banner.
+    # Cheap to compute (3 stat() calls + tiny file reads); fine in the
+    # context processor since every page already pays the is_halted() stat.
     return {
         "live_mode": LIVE_MODE,
         "halted": is_halted(),
+        "halt_global": _parse_halt_info(halt_info()),
+        "halt_engines": {
+            eng: _parse_halt_info(engine_halt_info(eng))
+            for eng in ("current", "reverse")
+        },
         "ucc": os.getenv("KOTAK_UCC", ""),
         "today_pnl": _today_pnl_cached(),
     }
