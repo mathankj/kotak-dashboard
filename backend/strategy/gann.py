@@ -70,7 +70,7 @@ def gann_levels(open_price):
 # can layer on top without renaming.
 def reverse_buy_levels(low_of_day):
     """Buy-side Gann ladder anchored to today's running intraday LOW.
-    Returns dict {BUY..T5}. Used as a bounce-target ladder once price has
+    Returns dict {BUY..T9}. Used as a bounce-target ladder once price has
     dipped below the open. Anchor only moves when a NEW lower low is set
     (stepped — see backend/quotes.py for the running-low tracker)."""
     if not low_of_day or low_of_day <= 0:
@@ -85,7 +85,7 @@ def reverse_buy_levels(low_of_day):
 
 def reverse_sell_levels(high_of_day):
     """Sell-side Gann ladder anchored to today's running intraday HIGH.
-    Returns dict {S5..SELL}. Used as a rejection-target ladder once price
+    Returns dict {S9..SELL}. Used as a rejection-target ladder once price
     has rallied above the open. Anchor only moves when a NEW higher high
     is set (stepped — tracker lives in backend/quotes.py)."""
     if not high_of_day or high_of_day <= 0:
@@ -93,7 +93,7 @@ def reverse_sell_levels(high_of_day):
     sq = math.sqrt(high_of_day)
     out = {}
     for i, name in enumerate(SELL_LEVELS):
-        n = -(8 - i)
+        n = -(12 - i)
         out[name] = round((sq + n * GANN_STEP) ** 2, 2)
     return out
 
