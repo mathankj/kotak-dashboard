@@ -3,46 +3,57 @@
 Pure math + small lookup helpers. No I/O, no network — safe to unit-test.
 
 Levels are computed in sqrt-space stepping by 22.5° = 0.0625:
-  S5=-8, S4=-7, S3=-6, S2=-5, S1=-4, SELL_WA=-3, SELL=-2  (below open)
-  BUY=+2, BUY_WA=+3, T1=+4, T2=+5, T3=+6, T4=+7, T5=+8    (above open)
+  S9..S1, SELL_WA, SELL  =  -12..-2  (below open)
+  BUY, BUY_WA, T1..T9    =  +2..+12  (above open)
+
+The ladder was extended from 5 to 9 target rungs each side at Ganesh's
+request — gives strategy + UI room to stretch farther on trending days
+without changing the underlying 22.5° step.
 """
 import math
 
 
 GANN_STEP = 0.0625
 
-SELL_LEVELS = ["S5", "S4", "S3", "S2", "S1", "SELL_WA", "SELL"]
-BUY_LEVELS  = ["BUY", "BUY_WA", "T1", "T2", "T3", "T4", "T5"]
+SELL_LEVELS = ["S9", "S8", "S7", "S6", "S5", "S4", "S3", "S2", "S1",
+               "SELL_WA", "SELL"]
+BUY_LEVELS  = ["BUY", "BUY_WA",
+               "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"]
 
 # UI presentation only — colors used by the dashboard for level highlighting.
+# S6..S9 deepen the existing red ramp; T6..T9 deepen the green ramp.
 LEVEL_COLORS = {
+    "S9": "#3B0000", "S8": "#580000", "S7": "#6A0000", "S6": "#750000",
     "S5": "#7F0000", "S4": "#8E1818",
     "S3": "#B71C1C", "S2": "#C62828", "S1": "#D32F2F",
     "SELL_WA": "#FF9800", "SELL": "#EF9A9A",
     "BUY": "#A5D6A7", "BUY_WA": "#FF9800",
     "T1": "#81C784", "T2": "#66BB6A", "T3": "#388E3C",
     "T4": "#2E7D32", "T5": "#1B5E20",
+    "T6": "#154A18", "T7": "#103810", "T8": "#0B2A0B", "T9": "#061C06",
 }
 
 # Order used when computing how deep a trade went in its favoured direction.
-BUY_LEVEL_ORDER  = ["BUY", "BUY_WA", "T1", "T2", "T3", "T4", "T5"]
-SELL_LEVEL_ORDER = ["SELL", "SELL_WA", "S1", "S2", "S3", "S4", "S5"]
+BUY_LEVEL_ORDER  = ["BUY", "BUY_WA",
+                    "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"]
+SELL_LEVEL_ORDER = ["SELL", "SELL_WA",
+                    "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"]
 
 
 def gann_levels(open_price):
     """Compute Gann Square of 9 levels from the opening price.
-    Returns dict {sell: {S5..SELL}, buy: {BUY..T5}}."""
+    Returns dict {sell: {S9..SELL}, buy: {BUY..T9}}."""
     if not open_price or open_price <= 0:
         return {"sell": {k: None for k in SELL_LEVELS},
                 "buy":  {k: None for k in BUY_LEVELS}}
     sq = math.sqrt(open_price)
     sell = {}
-    # SELL_LEVELS is ordered S5, S4, ..., S1, SELL_WA, SELL → n = -8..-2.
+    # SELL_LEVELS is ordered S9, S8, ..., S1, SELL_WA, SELL → n = -12..-2.
     for i, name in enumerate(SELL_LEVELS):
-        n = -(8 - i)
+        n = -(12 - i)
         sell[name] = round((sq + n * GANN_STEP) ** 2, 2)
     buy = {}
-    # BUY_LEVELS is ordered BUY, BUY_WA, T1..T5 → n = +2..+8.
+    # BUY_LEVELS is ordered BUY, BUY_WA, T1..T9 → n = +2..+12.
     for i, name in enumerate(BUY_LEVELS):
         n = i + 2
         buy[name] = round((sq + n * GANN_STEP) ** 2, 2)
@@ -124,9 +135,9 @@ def compute_target_level_reached(side, entry_price, max_min_price, levels):
             px = buy.get(name)
             if px is not None and max_min_price >= px:
                 reached = name
-        t5 = buy.get("T5")
-        if t5 is not None and max_min_price > t5:
-            reached = "Beyond T5"
+        t9 = buy.get("T9")
+        if t9 is not None and max_min_price > t9:
+            reached = "Beyond T9"
         return reached
     else:
         reached = None
@@ -134,7 +145,7 @@ def compute_target_level_reached(side, entry_price, max_min_price, levels):
             px = sell.get(name)
             if px is not None and max_min_price <= px:
                 reached = name
-        s5 = sell.get("S5")
-        if s5 is not None and max_min_price < s5:
-            reached = "Beyond S5"
+        s9 = sell.get("S9")
+        if s9 is not None and max_min_price < s9:
+            reached = "Beyond S9"
         return reached

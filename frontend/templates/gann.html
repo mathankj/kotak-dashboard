@@ -46,6 +46,10 @@
      (sell-side: LTP <= level price; buy-side: LTP >= level price). */
   td.ltp { font-weight: 700; background: #27272a; font-size: 13px; color: #fafafa; }
   td[data-col].lvl-on, td.ltp[class*="lvl-"] { transition: background 0.3s, color 0.3s; }
+  td.lvl-S9      { background: #3B0000; color: #fff; }
+  td.lvl-S8      { background: #580000; color: #fff; }
+  td.lvl-S7      { background: #6A0000; color: #fff; }
+  td.lvl-S6      { background: #750000; color: #fff; }
   td.lvl-S5      { background: #7F0000; color: #fff; }
   td.lvl-S4      { background: #8E1818; color: #fff; }
   td.lvl-S3      { background: #B71C1C; color: #fff; }
@@ -60,14 +64,22 @@
   td.lvl-T3      { background: #388E3C; color: #fff; }
   td.lvl-T4      { background: #2E7D32; color: #fff; }
   td.lvl-T5      { background: #1B5E20; color: #fff; }
+  td.lvl-T6      { background: #154A18; color: #fff; }
+  td.lvl-T7      { background: #103810; color: #fff; }
+  td.lvl-T8      { background: #0B2A0B; color: #fff; }
+  td.lvl-T9      { background: #061C06; color: #fff; }
   /* Level cells turn semi-bold once they're "crossed" so the heatmap
      reads at a glance even on dense rows. */
+  td[data-col].lvl-S9,  td[data-col].lvl-S8,
+  td[data-col].lvl-S7,  td[data-col].lvl-S6,
   td[data-col].lvl-S5,  td[data-col].lvl-S4,
   td[data-col].lvl-S3,  td[data-col].lvl-S2,  td[data-col].lvl-S1,
   td[data-col].lvl-SELL_WA, td[data-col].lvl-SELL,
   td[data-col].lvl-BUY, td[data-col].lvl-BUY_WA,
   td[data-col].lvl-T1, td[data-col].lvl-T2, td[data-col].lvl-T3,
-  td[data-col].lvl-T4, td[data-col].lvl-T5 {
+  td[data-col].lvl-T4, td[data-col].lvl-T5,
+  td[data-col].lvl-T6, td[data-col].lvl-T7,
+  td[data-col].lvl-T8, td[data-col].lvl-T9 {
     font-weight: 600;
   }
   /* Reverse Gann table — same layout, slightly different chrome to make
@@ -233,13 +245,13 @@
       <th rowspan="2">OPEN</th>
       <th rowspan="2">LOW</th>
       <th rowspan="2">HIGH</th>
-      <th colspan="7" class="group-sell">SELL LEVELS</th>
+      <th colspan="11" class="group-sell">SELL LEVELS</th>
       <th rowspan="2" class="group-ltp">LTP</th>
-      <th colspan="7" class="group-buy">BUY LEVELS</th>
+      <th colspan="11" class="group-buy">BUY LEVELS</th>
     </tr>
     <tr>
-      <th>S5</th><th>S4</th><th>S3</th><th>S2</th><th>S1</th><th>WA</th><th>SELL</th>
-      <th>BUY</th><th>WA</th><th>T1</th><th>T2</th><th>T3</th><th>T4</th><th>T5</th>
+      <th>S9</th><th>S8</th><th>S7</th><th>S6</th><th>S5</th><th>S4</th><th>S3</th><th>S2</th><th>S1</th><th>WA</th><th>SELL</th>
+      <th>BUY</th><th>WA</th><th>T1</th><th>T2</th><th>T3</th><th>T4</th><th>T5</th><th>T6</th><th>T7</th><th>T8</th><th>T9</th>
     </tr>
   </thead>
   <tbody id="rows">
@@ -252,6 +264,10 @@
       <td data-col="open">-</td>
       <td data-col="low">-</td>
       <td data-col="high">-</td>
+      <td data-col="S9">-</td>
+      <td data-col="S8">-</td>
+      <td data-col="S7">-</td>
+      <td data-col="S6">-</td>
       <td data-col="S5">-</td>
       <td data-col="S4">-</td>
       <td data-col="S3">-</td>
@@ -267,6 +283,10 @@
       <td data-col="T3">-</td>
       <td data-col="T4">-</td>
       <td data-col="T5">-</td>
+      <td data-col="T6">-</td>
+      <td data-col="T7">-</td>
+      <td data-col="T8">-</td>
+      <td data-col="T9">-</td>
     </tr>
     {% endfor %}
   </tbody>
@@ -369,8 +389,8 @@
 
 <script>
 const LEVEL_COLORS = {{ level_colors|tojson }};
-const SELL_LVLS = ["S5","S4","S3","S2","S1","SELL_WA","SELL"];
-const BUY_LVLS  = ["BUY","BUY_WA","T1","T2","T3","T4","T5"];
+const SELL_LVLS = ["S9","S8","S7","S6","S5","S4","S3","S2","S1","SELL_WA","SELL"];
+const BUY_LVLS  = ["BUY","BUY_WA","T1","T2","T3","T4","T5","T6","T7","T8","T9"];
 
 function fmt(v) {
   if (v === null || v === undefined || v === "") return "-";
@@ -380,8 +400,10 @@ function fmt(v) {
 }
 
 const LTP_LEVEL_CLASSES = [
+  "lvl-S9","lvl-S8","lvl-S7","lvl-S6",
   "lvl-S5","lvl-S4","lvl-S3","lvl-S2","lvl-S1","lvl-SELL_WA","lvl-SELL",
   "lvl-BUY","lvl-BUY_WA","lvl-T1","lvl-T2","lvl-T3","lvl-T4","lvl-T5",
+  "lvl-T6","lvl-T7","lvl-T8","lvl-T9",
 ];
 
 // "Crossed" heatmap: a level cell lights up once LTP has reached or moved

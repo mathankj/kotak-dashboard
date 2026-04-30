@@ -1,4 +1,4 @@
-"""Unit tests for the extended Gann ladder (S5..T5)."""
+"""Unit tests for the extended Gann ladder (S9..T9)."""
 import math
 
 from backend.strategy.gann import (
@@ -9,41 +9,40 @@ from backend.strategy.gann import (
 )
 
 
-def test_levels_contain_t4_t5_s4_s5():
-    assert "T4" in BUY_LEVELS
-    assert "T5" in BUY_LEVELS
-    assert "S4" in SELL_LEVELS
-    assert "S5" in SELL_LEVELS
+def test_levels_contain_t9_s9_full_range():
+    for k in ("T1", "T5", "T6", "T7", "T8", "T9"):
+        assert k in BUY_LEVELS, k
+    for k in ("S1", "S5", "S6", "S7", "S8", "S9"):
+        assert k in SELL_LEVELS, k
 
 
 def test_level_orders_extended():
-    assert "T5" in BUY_LEVEL_ORDER
-    assert "S5" in SELL_LEVEL_ORDER
+    assert "T9" in BUY_LEVEL_ORDER
+    assert "S9" in SELL_LEVEL_ORDER
 
 
 def test_colors_cover_new_levels():
-    for k in ("S5", "S4", "T4", "T5"):
-        assert k in LEVEL_COLORS
+    for k in ("S9", "S6", "S5", "T5", "T6", "T9"):
+        assert k in LEVEL_COLORS, k
 
 
-def test_gann_levels_emits_t5_at_correct_price():
-    # T5 corresponds to n=+8: price = (sqrt(open) + 8*0.0625)^2
+def test_gann_levels_emits_t9_at_correct_price():
+    # T9 corresponds to n=+12: price = (sqrt(open) + 12*0.0625)^2
     open_p = 25000.0
     levels = gann_levels(open_p)
-    expected_t5 = round((math.sqrt(open_p) + 8 * 0.0625) ** 2, 2)
-    assert levels["buy"]["T5"] == expected_t5
+    expected_t9 = round((math.sqrt(open_p) + 12 * 0.0625) ** 2, 2)
+    assert levels["buy"]["T9"] == expected_t9
 
 
-def test_gann_levels_emits_s5_at_correct_price():
+def test_gann_levels_emits_s9_at_correct_price():
     open_p = 25000.0
     levels = gann_levels(open_p)
-    expected_s5 = round((math.sqrt(open_p) + (-8) * 0.0625) ** 2, 2)
-    assert levels["sell"]["S5"] == expected_s5
+    expected_s9 = round((math.sqrt(open_p) + (-12) * 0.0625) ** 2, 2)
+    assert levels["sell"]["S9"] == expected_s9
 
 
 def test_compute_target_level_reached_emits_t4():
-    # Price between T3 and T4 should label "T3"; between T4 and T5 should
-    # label "T4". (Highest rung still met.)
+    # Price between T4 and T5 should label "T4". (Highest rung still met.)
     open_p = 25000.0
     levels = gann_levels(open_p)
     px_between_t4_and_t5 = (levels["buy"]["T4"] + levels["buy"]["T5"]) / 2.0
@@ -52,18 +51,19 @@ def test_compute_target_level_reached_emits_t4():
     assert reached == "T4"
 
 
-def test_compute_target_level_reached_beyond_t5_not_t3():
-    # Regression: was "Beyond T3" — must now be "Beyond T5".
+def test_compute_target_level_reached_beyond_t9():
+    # Was "Beyond T5" pre-extension — must now be "Beyond T9" since the
+    # ladder reaches further.
     open_p = 25000.0
     levels = gann_levels(open_p)
-    far_above = levels["buy"]["T5"] + 100.0
+    far_above = levels["buy"]["T9"] + 100.0
     reached = compute_target_level_reached("B", open_p, far_above, levels)
-    assert reached == "Beyond T5"
+    assert reached == "Beyond T9"
 
 
-def test_compute_target_level_reached_beyond_s5_not_s3():
+def test_compute_target_level_reached_beyond_s9():
     open_p = 25000.0
     levels = gann_levels(open_p)
-    far_below = levels["sell"]["S5"] - 100.0
+    far_below = levels["sell"]["S9"] - 100.0
     reached = compute_target_level_reached("S", open_p, far_below, levels)
-    assert reached == "Beyond S5"
+    assert reached == "Beyond S9"

@@ -225,8 +225,10 @@ ENGINE_NAMES = ("paper", "real")
 VALID_STOPLOSS = {"A", "B", "C", "D"}
 VALID_BUY_LEVELS  = {"BUY", "BUY_WA"}
 VALID_SELL_LEVELS = {"SELL", "SELL_WA"}
-VALID_CE_TARGETS = {"T1", "T2", "T3", "T4", "T5", "BUY_WA"}
-VALID_PE_TARGETS = {"S1", "S2", "S3", "S4", "S5", "SELL_WA"}
+VALID_CE_TARGETS = {"T1", "T2", "T3", "T4", "T5",
+                    "T6", "T7", "T8", "T9", "BUY_WA"}
+VALID_PE_TARGETS = {"S1", "S2", "S3", "S4", "S5",
+                    "S6", "S7", "S8", "S9", "SELL_WA"}
 INDEX_NAMES = ("NIFTY", "BANKNIFTY", "SENSEX")
 
 

@@ -517,7 +517,7 @@
       <div class="hint">Above-open levels. Default T1.</div>
     </div>
     <select name="target.ce_level">
-      {% for lvl in ['T1','T2','T3','T4','T5','BUY_WA'] %}
+      {% for lvl in ['T1','T2','T3','T4','T5','T6','T7','T8','T9','BUY_WA'] %}
         <option value="{{ lvl }}" {% if cfg.target.ce_level==lvl %}selected{% endif %}>{{ lvl }}</option>
       {% endfor %}
     </select>
@@ -527,7 +527,7 @@
       <div class="hint">Below-open levels. Default S1.</div>
     </div>
     <select name="target.pe_level">
-      {% for lvl in ['S1','S2','S3','S4','S5','SELL_WA'] %}
+      {% for lvl in ['S1','S2','S3','S4','S5','S6','S7','S8','S9','SELL_WA'] %}
         <option value="{{ lvl }}" {% if cfg.target.pe_level==lvl %}selected{% endif %}>{{ lvl }}</option>
       {% endfor %}
     </select>
