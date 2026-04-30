@@ -1581,16 +1581,25 @@ def _strategy_ticker_loop():
                             if config_loader.engine_enabled(e)
                         ]
                         for _eng in active_engines:
-                            try:
-                                option_auto_strategy_tick(
-                                    data, meta, gann_quotes,
-                                    client=client_for_strategy,
-                                    engine=_eng,
-                                )
-                            except Exception as e:
-                                print(f"[ticker] real options tick "
-                                      f"engine={_eng} failed: "
-                                      f"{type(e).__name__}: {e}")
+                            # REVERSE engine is paper-only by design:
+                            # it exists to validate the reverse-Gann
+                            # ladder logic against today's market
+                            # without risking capital. Only the
+                            # `current` engine routes through the
+                            # real-order path. The reverse engine
+                            # still runs its full strategy logic — but
+                            # only the paper book sees its signals.
+                            if _eng == "current":
+                                try:
+                                    option_auto_strategy_tick(
+                                        data, meta, gann_quotes,
+                                        client=client_for_strategy,
+                                        engine=_eng,
+                                    )
+                                except Exception as e:
+                                    print(f"[ticker] real options tick "
+                                          f"engine={_eng} failed: "
+                                          f"{type(e).__name__}: {e}")
                             # Paper book — runs the same strategy logic
                             # against an independent ledger. Never sends
                             # real orders; not gated by the kill switch.
@@ -1613,17 +1622,23 @@ def _strategy_ticker_loop():
                                 fut_data, _fut_err = fetch_future_quotes()
                                 if fut_data:
                                     for _eng in active_engines:
-                                        try:
-                                            future_auto_strategy_tick(
-                                                fut_data, gann_quotes,
-                                                client=client_for_strategy,
-                                                engine=_eng,
-                                            )
-                                        except Exception as e:
-                                            print(f"[ticker] real futures "
-                                                  f"tick engine={_eng} "
-                                                  f"failed: "
-                                                  f"{type(e).__name__}: {e}")
+                                        # REVERSE engine is paper-only by
+                                        # design — same rationale as the
+                                        # options branch above. Skip the
+                                        # real-order path entirely; the
+                                        # paper tick below still runs.
+                                        if _eng == "current":
+                                            try:
+                                                future_auto_strategy_tick(
+                                                    fut_data, gann_quotes,
+                                                    client=client_for_strategy,
+                                                    engine=_eng,
+                                                )
+                                            except Exception as e:
+                                                print(f"[ticker] real futures "
+                                                      f"tick engine={_eng} "
+                                                      f"failed: "
+                                                      f"{type(e).__name__}: {e}")
                                         try:
                                             paper_futures_tick(
                                                 fut_data, gann_quotes,
