@@ -110,13 +110,24 @@ def _ensure_feed_started():
 
 
 def _ws_overlay(out_dict, key_to_token_exch):
-    """Overlay WS LTP onto out_dict in place.
+    """Overlay WS LTP + OHLC onto out_dict in place.
 
-    Rules:
+    LTP rules:
       - WS LTP fresher than WS_FRESH_SECONDS  -> always wins over REST
       - WS LTP stale but REST returned None   -> still use WS (better than
         nothing, e.g. off-hours snapshot)
       - WS LTP stale and REST has its own LTP -> keep REST
+
+    OHLC rules (fix for the "yesterday's open" bug):
+      Kotak's REST `quotes(quote_type="ohlc")` returns the PREVIOUS DAY
+      candle until well into the new session, while WS ticks carry
+      today's intraday op/lo/h from the first print. So:
+        - WS fresh -> WS OHLC wins over REST (today's data overrides
+          yesterday's candle). Gann levels are recomputed when 'open'
+          changes; otherwise the BUY/SELL ladder anchors on yesterday's
+          open and the strategy fires on the wrong rungs.
+        - WS stale -> only backfill REST None/0 fields (off-hours).
+
     `ws_age` is added for diagnostics. Returns count of overlays applied.
     """
     overlaid = 0
@@ -134,15 +145,28 @@ def _ws_overlay(out_dict, key_to_token_exch):
         if is_fresh or rest_ltp is None:
             rec["ltp"] = tick["ltp"]
             rec["ws_age"] = round(age, 2)
-            # Backfill OHLC if REST didn't have it (off-hours, etc.)
-            # Treat 0.0 as missing — Kotak sometimes returns 0 for closed mkt.
-            for src, dst in (("op", "open"), ("lo", "low"), ("h", "high")):
-                if (rec.get(dst) in (None, 0, 0.0)
-                        and tick.get(src) is not None):
-                    rec[dst] = tick[src]
-            # Recompute Gann levels if we just filled in 'open'
-            if rec.get("open") and not rec.get("levels", {}).get("buy"):
-                rec["levels"] = gann_levels(rec["open"])
+            prev_open = rec.get("open")
+            if is_fresh:
+                # WS is fresh — its OHLC is today's session data.
+                # Override REST values regardless of whether REST had a
+                # number, since REST OHLC is typically previous-day.
+                for src, dst in (("op", "open"), ("lo", "low"), ("h", "high")):
+                    if tick.get(src) is not None:
+                        rec[dst] = tick[src]
+            else:
+                # WS stale — only backfill where REST is empty/0.
+                for src, dst in (("op", "open"), ("lo", "low"), ("h", "high")):
+                    if (rec.get(dst) in (None, 0, 0.0)
+                            and tick.get(src) is not None):
+                        rec[dst] = tick[src]
+            # Recompute Gann levels whenever 'open' changed OR the
+            # ladder hadn't been built yet. Without this, a stale
+            # REST-anchored ladder survives after WS gives us today's
+            # correct open.
+            new_open = rec.get("open")
+            if new_open and (new_open != prev_open
+                             or not rec.get("levels", {}).get("buy")):
+                rec["levels"] = gann_levels(new_open)
             overlaid += 1
     return overlaid
 
