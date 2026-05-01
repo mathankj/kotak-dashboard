@@ -1,0 +1,96 @@
+/* ============================================================
+   Light theme — paper-only review deployment
+   ============================================================
+   Visual differentiator for the reverse-engine review dashboard.
+   Activated when config.yaml has `ui.theme: light`. Injected
+   into every HTML response by app.py after_request hook, so
+   no per-template change is needed. Uses !important across the
+   board because the dark base CSS in base.html / per-page
+   <style> blocks is loaded first; this file rides on top to
+   override regardless of selector order.
+   Color signals (green=profit, red=loss, blue=primary,
+   orange=warning) are deliberately preserved so Ganesh's eye
+   still parses them the same way as on the production dark UI.
+   ============================================================ */
+
+/* Body + headings */
+body { background: #ffffff !important; color: #1f2937 !important; }
+h1, h2, h3 { color: #0f172a !important; }
+
+/* Header strip + status text */
+header { border-bottom-color: #e5e7eb !important; }
+.status { color: #6b7280 !important; }
+.status .ok { color: #16a34a !important; }
+.status .err { color: #dc2626 !important; }
+
+/* Tabs — inactive light gray, active blue stays */
+.tabs a { background: #f3f4f6 !important; color: #4b5563 !important;
+          border-color: #e5e7eb !important; }
+.tabs a.active { background: #2563eb !important; color: #ffffff !important;
+                 border-color: #2563eb !important; }
+.tabs a:hover:not(.active) { background: #e5e7eb !important;
+                              color: #111827 !important; }
+
+/* Cards */
+.card { background: #f9fafb !important; border-color: #e5e7eb !important; }
+.card.rev { border-color: #a78bfa !important; }      /* reverse logic accent */
+
+/* Tables */
+table { color: #1f2937 !important; }
+th { background: #f3f4f6 !important; color: #4b5563 !important;
+     border-bottom-color: #d1d5db !important; }
+td { color: #1f2937 !important; border-bottom-color: #e5e7eb !important; }
+tr:hover td { background: #f9fafb !important; }
+
+/* Empty states + muted text */
+.empty { color: #9ca3af !important; }
+
+/* Error blocks (keep red, lighten background) */
+.error { background: #fef2f2 !important; border-color: #fecaca !important;
+         color: #991b1b !important; }
+
+/* Banners */
+.banner.ok { background: #dcfce7 !important; border-color: #86efac !important;
+             color: #166534 !important; }
+.banner.bad { background: #fee2e2 !important; border-color: #fca5a5 !important;
+              color: #991b1b !important; }
+
+/* Pos/neg pills + badges keep meaning */
+.pos, .badge-ok { color: #16a34a !important; }
+.neg, .badge-bad { color: #dc2626 !important; }
+
+/* Generic fallbacks for any leftover dark hexes used inline in
+   per-page <style> blocks. These map the most common dark-theme
+   shades to their light equivalents at attribute level. */
+[style*="background:#0f1419"], [style*="background: #0f1419"]
+  { background: #ffffff !important; }
+[style*="background:#18181b"], [style*="background: #18181b"]
+  { background: #f9fafb !important; }
+[style*="background:#27272a"], [style*="background: #27272a"]
+  { background: #f3f4f6 !important; }
+[style*="color:#fafafa"], [style*="color: #fafafa"]
+  { color: #0f172a !important; }
+[style*="color:#d4d4d8"], [style*="color: #d4d4d8"]
+  { color: #1f2937 !important; }
+[style*="color:#a1a1aa"], [style*="color: #a1a1aa"]
+  { color: #6b7280 !important; }
+[style*="color:#71717a"], [style*="color: #71717a"]
+  { color: #9ca3af !important; }
+
+/* Scrollbar — light track */
+::-webkit-scrollbar-track { background: #f3f4f6 !important; }
+::-webkit-scrollbar-thumb { background: #d1d5db !important; }
+
+/* Top-of-page review banner — added by base.html when theme=light */
+.review-banner {
+  background: #fef3c7;
+  border: 2px solid #f59e0b;
+  color: #78350f;
+  padding: 10px 16px;
+  border-radius: 8px;
+  margin-bottom: 14px;
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.5px;
+  text-align: center;
+}

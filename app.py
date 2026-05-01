@@ -1445,7 +1445,53 @@ def _inject_safety_state():
         },
         "ucc": os.getenv("KOTAK_UCC", ""),
         "today_pnl": _today_pnl_cached(),
+        "ui_theme": os.getenv("KOTAK_UI_THEME", "dark"),
     }
+
+
+def _ui_theme_is_light():
+    """True when env var KOTAK_UI_THEME=light. Env var instead of
+    config.yaml because config_loader.get() filters out unknown
+    keys via its defaults schema. Env var is also a cleaner
+    per-deployment switch — no risk of one app instance picking
+    up the other's config flag if config.yaml gets shared."""
+    return os.getenv("KOTAK_UI_THEME", "dark").lower() == "light"
+
+
+@app.after_request
+def _inject_light_theme(response):
+    """Visual differentiator for the paper-only review deployment.
+    When config.yaml has ui.theme: light, inject the light-theme
+    stylesheet + a 'PAPER REVIEW' banner into every HTML response.
+    Single point of injection so each page template stays untouched
+    and any new pages we add later automatically pick this up.
+    Skips non-HTML, redirects, and any response without a </head>."""
+    if not _ui_theme_is_light():
+        return response
+    ctype = response.content_type or ""
+    if not ctype.startswith("text/html"):
+        return response
+    if response.status_code >= 300 and response.status_code < 400:
+        return response
+    try:
+        body = response.get_data(as_text=True)
+    except (UnicodeDecodeError, RuntimeError):
+        return response
+    if "</head>" not in body:
+        return response
+    link = ('<link rel="stylesheet" '
+            'href="/static/theme-light.css">')
+    body = body.replace("</head>", link + "</head>", 1)
+    # Insert review banner immediately after <body>. Skip if the
+    # page already added one (so re-injection is idempotent).
+    if "<body>" in body and "review-banner" not in body:
+        banner = ('<div class="review-banner">'
+                  'PAPER REVIEW DASHBOARD - reverse engine, '
+                  'no real orders'
+                  '</div>')
+        body = body.replace("<body>", "<body>" + banner, 1)
+    response.set_data(body)
+    return response
 
 
 @app.route("/refresh", methods=["POST", "GET"])
