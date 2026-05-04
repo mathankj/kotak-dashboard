@@ -9,6 +9,8 @@ This module exposes (added incrementally per the implementation plan):
   - bp: a Flask Blueprint with /login, /logout, /change-password (added in later tasks)
   - install_auth(app): registers blueprint + before_request hook + secret key (later task)
 """
+import time
+
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
@@ -29,3 +31,54 @@ def verify_password(stored_hash, plain):
         return check_password_hash(stored_hash, plain)
     except (ValueError, TypeError):
         return False
+
+
+# ---- Brute-force lockout (per-IP, in-memory, this-process-only) ----
+#
+# Threat model: a 3-person dashboard. We're not at internet scale; per-IP
+# in-memory is plenty. State lost on restart = acceptable; an attacker that
+# can crash the service to reset counters has bigger leverage anyway.
+
+LOCKOUT_THRESHOLD = 5      # failed attempts within the window → lock
+LOCKOUT_WINDOW_SECS = 60   # rolling window length
+
+# {ip: (count, first_failure_ts)} — the timestamp is when the *first*
+# failure in this window happened, so the whole window resets together
+# rather than the count drifting forever.
+_LOCKOUT_STATE = {}
+
+
+def _prune_lockout(ip):
+    """Drop the entry if its window has expired. Return remaining entry or None."""
+    entry = _LOCKOUT_STATE.get(ip)
+    if not entry:
+        return None
+    _, first_ts = entry
+    if time.time() - first_ts > LOCKOUT_WINDOW_SECS:
+        _LOCKOUT_STATE.pop(ip, None)
+        return None
+    return entry
+
+
+def record_failed_login(ip):
+    """Bump the failure counter for this IP."""
+    entry = _prune_lockout(ip)
+    if entry is None:
+        _LOCKOUT_STATE[ip] = (1, time.time())
+    else:
+        count, first_ts = entry
+        _LOCKOUT_STATE[ip] = (count + 1, first_ts)
+
+
+def is_locked_out(ip):
+    """True iff this IP has hit LOCKOUT_THRESHOLD failures in the window."""
+    entry = _prune_lockout(ip)
+    if entry is None:
+        return False
+    count, _ = entry
+    return count >= LOCKOUT_THRESHOLD
+
+
+def clear_lockout(ip):
+    """Called on successful login to reset the counter."""
+    _LOCKOUT_STATE.pop(ip, None)

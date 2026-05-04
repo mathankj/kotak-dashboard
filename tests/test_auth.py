@@ -81,3 +81,47 @@ def test_reset_script_rejects_mismatch(tmp_auth_file):
     )
     assert result.returncode != 0
     assert "match" in result.stderr.lower()
+
+
+# ----- Task 3: brute-force lockout -----
+
+from backend.auth import (
+    LOCKOUT_THRESHOLD,
+    LOCKOUT_WINDOW_SECS,
+    _LOCKOUT_STATE,
+    is_locked_out,
+    record_failed_login,
+)
+
+
+def setup_function():
+    # Each test starts with a clean lockout dict so they don't interfere.
+    _LOCKOUT_STATE.clear()
+
+
+def test_lockout_triggers_after_threshold():
+    for _ in range(LOCKOUT_THRESHOLD):
+        record_failed_login("1.2.3.4")
+    assert is_locked_out("1.2.3.4")
+
+
+def test_lockout_does_not_affect_other_ips():
+    for _ in range(LOCKOUT_THRESHOLD):
+        record_failed_login("1.2.3.4")
+    assert not is_locked_out("5.6.7.8")
+
+
+def test_lockout_clears_after_window(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr("backend.auth.time.time", lambda: now[0])
+    for _ in range(LOCKOUT_THRESHOLD):
+        record_failed_login("1.2.3.4")
+    assert is_locked_out("1.2.3.4")
+    now[0] += LOCKOUT_WINDOW_SECS + 1
+    assert not is_locked_out("1.2.3.4")
+
+
+def test_lockout_threshold_is_5_window_60s():
+    # Concrete numbers per spec.
+    assert LOCKOUT_THRESHOLD == 5
+    assert LOCKOUT_WINDOW_SECS == 60
