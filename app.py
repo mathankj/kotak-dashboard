@@ -66,6 +66,7 @@ from backend.safety.orders import (
     RESULT_BLOCKED_MARGIN, RESULT_KOTAK_ERROR,
 )
 from backend.safety.audit import audit, read_audit_tail, read_audit_page
+from backend.auto_login_scheduler import start_auto_login_scheduler
 
 app = Flask(__name__,
             template_folder="frontend/templates",
@@ -1770,5 +1771,8 @@ if __name__ == "__main__":
     # Start the SnapshotStore producer — pre-builds /api/option-prices-v2
     # payload bytes every 2s so HTTP requests are O(1) reads.
     _snapshot.start()
+    # Auto-login scheduler — fresh Kotak TOTP login at 08:45 IST every day,
+    # then signals WS reconnect with the new token. Replaces cron entirely.
+    start_auto_login_scheduler(quote_feed=_feed)
     # threaded=True: don't block other requests while a slow search_scrip runs
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
