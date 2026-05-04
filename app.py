@@ -203,7 +203,7 @@ def fmt_duration(seconds):
 # books to review, then risk + account at the end.
 TABS = [
     # Live — what the bot is trading right now
-    {"key": "gann",         "url": "/gann",         "label": "Gann Trader"},
+    {"key": "gann",         "url": "/gann",         "label": "Levels"},
     # Books — ledgers (paper next to real, real first)
     {"key": "trades",       "url": "/trades",       "label": "Trade Log"},
     {"key": "paper_trades", "url": "/paper-trades", "label": "Paper Log"},
@@ -843,14 +843,16 @@ def paper_trades_xlsx():
     wb = Workbook()
     ws = wb.active
     ws.title = "Paper Ledger"
-    # Phase 3: Engine column (current/reverse) inserted after Order Type so
-    # Ganesh can filter the export by engine in Excel. Legacy rows that
-    # predate Phase 2 don't have an "engine" key and get rendered as
-    # 'current' to match the HTML table behaviour.
-    headers = ["Date", "Scrip", "Order Type", "Engine", "Entry Time (IST)",
-               "Entry Price", "Target Level Reached", "Max/Min Target Price",
-               "Exit Time (IST)", "Exit Price", "Exit Reason",
-               "P&L Points", "P&L %", "Duration"]
+    # Columns mirror the /paper-trades HTML table 1:1 so the Excel export
+    # contains every value the user can see in the UI. Profit ₹ is
+    # pnl_points × qty (rupees, not points), matching how the table's
+    # Profit ₹ cell is computed in JS.
+    headers = ["Mode", "Date", "Asset", "Scrip", "Side", "Qty",
+               "Engine", "Entry Reason", "Trigger Lvl", "Trigger Spot",
+               "Entry Time (IST)", "Entry Price",
+               "Target Level Reached", "Max/Min Target Price",
+               "Exit Time (IST)", "Exit Price", "Exit Spot", "Exit Reason",
+               "P&L Points", "Profit ₹", "P&L %", "Trail SL", "Duration"]
     ws.append(headers)
     hdr_fill = PatternFill("solid", fgColor="FFEB3B")
     for c, _ in enumerate(headers, start=1):
@@ -867,39 +869,62 @@ def paper_trades_xlsx():
     range_key, custom_date = _resolve_date_range(request.args)
     _paper_rows = _filter_trades_by_range(read_paper_ledger(),
                                           range_key, custom_date)
+    SIDE_COL = 5
+    PNL_PTS_COL = 19
+    PROFIT_INR_COL = 20
+    PNL_PCT_COL = 21
     for t in _paper_rows:
+        try:
+            qty_val = int(t.get("qty") or 0)
+        except (TypeError, ValueError):
+            qty_val = 0
+        try:
+            pnl_pts = float(t.get("pnl_points")) if t.get("pnl_points") is not None else None
+        except (TypeError, ValueError):
+            pnl_pts = None
+        profit_inr = round(pnl_pts * qty_val, 2) if pnl_pts is not None and qty_val else ""
         ws.append([
+            t.get("mode", "") or "",
             t.get("date", ""),
+            t.get("asset_type", "") or "",
             t.get("scrip", ""),
             t.get("order_type", ""),
+            qty_val or "",
             t.get("engine") or "current",
+            t.get("entry_reason", "") or "",
+            t.get("trigger_level", "") or "",
+            t.get("trigger_spot", "") if t.get("trigger_spot") is not None else "",
             t.get("entry_time", ""),
             t.get("entry_price", ""),
             t.get("target_level_reached", "") or "",
             t.get("max_min_target_price", "") or "",
             t.get("exit_time", "") or "",
             t.get("exit_price", "") or "",
+            t.get("exit_spot", "") if t.get("exit_spot") is not None else "",
             t.get("exit_reason", "") or "",
-            t.get("pnl_points", "") if t.get("pnl_points") is not None else "",
+            pnl_pts if pnl_pts is not None else "",
+            profit_inr,
             t.get("pnl_pct", "") if t.get("pnl_pct") is not None else "",
+            t.get("trail_sl_price", "") if t.get("trail_sl_price") is not None else "",
             fmt_duration(t.get("duration_seconds")),
         ])
         r = ws.max_row
-        otype_cell = ws.cell(row=r, column=3)
+        side_cell = ws.cell(row=r, column=SIDE_COL)
         if t.get("order_type") == "SELL":
-            otype_cell.fill = sell_fill
+            side_cell.fill = sell_fill
         else:
-            otype_cell.fill = buy_fill
-        otype_cell.alignment = Alignment(horizontal="center")
-        ws.cell(row=r, column=4).alignment = Alignment(horizontal="center")
+            side_cell.fill = buy_fill
+        side_cell.alignment = Alignment(horizontal="center")
+        ws.cell(row=r, column=7).alignment = Alignment(horizontal="center")
         try:
-            pl = float(t.get("pnl_points") or 0)
-            # P&L points is now col 12, P&L % col 13 after Engine insert.
-            ws.cell(row=r, column=12).font = pos_font if pl >= 0 else neg_font
-            ws.cell(row=r, column=13).font = pos_font if pl >= 0 else neg_font
+            pl = pnl_pts if pnl_pts is not None else 0.0
+            ws.cell(row=r, column=PNL_PTS_COL).font = pos_font if pl >= 0 else neg_font
+            ws.cell(row=r, column=PROFIT_INR_COL).font = pos_font if pl >= 0 else neg_font
+            ws.cell(row=r, column=PNL_PCT_COL).font = pos_font if pl >= 0 else neg_font
         except (TypeError, ValueError):
             pass
-    widths = [12, 12, 12, 10, 18, 14, 20, 20, 18, 12, 14, 12, 10, 12]
+    widths = [12, 12, 10, 22, 8, 8, 10, 18, 12, 14, 18, 14, 18, 18,
+              18, 12, 14, 14, 12, 12, 10, 12, 12]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")

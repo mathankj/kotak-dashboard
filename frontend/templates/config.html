@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Config - Kotak Neo Dashboard</title>
+<title>Config - Trading Dashboard</title>
 <style>
   * { box-sizing: border-box; }
   body { font-family: -apple-system, 'Segoe UI', sans-serif;
@@ -124,7 +124,7 @@
 </head>
 <body>
 <header>
-  <h1>Kotak Neo Dashboard</h1>
+  <h1>Trading Dashboard</h1>
   <div style="display:flex;align-items:center;gap:0">
     {% include "_safety_header.html" %}
     <form method="post" action="/refresh" style="margin:0">
@@ -246,7 +246,7 @@
 <div class="card">
   <h2>2. Entry (Buy) Logic</h2>
   <div class="sub">Tick which signal paths are allowed to enter trades. Both can run together.
-    Each row picks WHICH Gann level fires bullish (BUY or BUY-WA) and WHICH fires bearish (SELL or SELL-WA).</div>
+    Each row picks WHICH level fires bullish (BUY or BUY-WA) and WHICH fires bearish (SELL or SELL-WA).</div>
 
   <div class="row">
     <div class="lbl">Path A — Market-Open Snapshot
@@ -375,7 +375,7 @@
     <label>
       <input type="radio" name="stoploss.active" value="C" {% if cfg.stoploss.active=='C' %}checked{% endif %}>
       <span style="flex:1">
-        <span class="name">Variant C — Opposite Gann level</span>
+        <span class="name">Variant C — Opposite level</span>
         <span class="desc">CE/long: exit if spot drops below the SELL pick.
           PE/short: exit if spot rises above the BUY pick.</span>
         <div class="pickers">
@@ -402,7 +402,7 @@
     <label>
       <input type="radio" name="stoploss.active" value="D" {% if cfg.stoploss.active=='D' %}checked{% endif %}>
       <span style="flex:1">
-        <span class="name">Variant D — Trailing along Gann ladder</span>
+        <span class="name">Variant D — Trailing along ladder</span>
         <span class="desc">SL trails one rung BEHIND the spot's current rung.
           Initial SL = entry price (breakeven). Triggers on spot crossing
           trail SL; close fills at instrument LTP.</span>
@@ -415,7 +415,7 @@
 <!-- 4. Profit target -->
 <div class="card">
   <h2>4. Profit Target</h2>
-  <div class="sub">Which Gann level closes a winning trade. CE/long uses the BUY-side level;
+  <div class="sub">Which level closes a winning trade. CE/long uses the BUY-side level;
     PE/short uses the SELL-side level. Same picks drive both options and futures targets.</div>
   <div class="row">
     <div class="lbl">CE / long target
