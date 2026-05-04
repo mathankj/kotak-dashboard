@@ -56,7 +56,10 @@ from backend.strategy.futures import (
 from backend.strategy.paper_book import (
     paper_options_tick, paper_futures_tick,
 )
-from backend.safety.kill_switch import is_halted, halt, halt_info
+from backend.safety.kill_switch import (
+    is_halted, halt, halt_info,
+    is_engine_halted, halt_engine, engine_halt_info,
+)
 from backend.safety.orders import (
     place_order_safe,
     RESULT_OK, RESULT_PAPER, RESULT_BLOCKED_HALTED,
@@ -840,9 +843,14 @@ def paper_trades_xlsx():
     wb = Workbook()
     ws = wb.active
     ws.title = "Paper Ledger"
-    headers = ["Date", "Scrip", "Order Type", "Entry Time (IST)", "Entry Price",
-               "Target Level Reached", "Max/Min Target Price", "Exit Time (IST)",
-               "Exit Price", "Exit Reason", "P&L Points", "P&L %", "Duration"]
+    # Phase 3: Engine column (current/reverse) inserted after Order Type so
+    # Ganesh can filter the export by engine in Excel. Legacy rows that
+    # predate Phase 2 don't have an "engine" key and get rendered as
+    # 'current' to match the HTML table behaviour.
+    headers = ["Date", "Scrip", "Order Type", "Engine", "Entry Time (IST)",
+               "Entry Price", "Target Level Reached", "Max/Min Target Price",
+               "Exit Time (IST)", "Exit Price", "Exit Reason",
+               "P&L Points", "P&L %", "Duration"]
     ws.append(headers)
     hdr_fill = PatternFill("solid", fgColor="FFEB3B")
     for c, _ in enumerate(headers, start=1):
@@ -864,6 +872,7 @@ def paper_trades_xlsx():
             t.get("date", ""),
             t.get("scrip", ""),
             t.get("order_type", ""),
+            t.get("engine") or "current",
             t.get("entry_time", ""),
             t.get("entry_price", ""),
             t.get("target_level_reached", "") or "",
@@ -882,13 +891,15 @@ def paper_trades_xlsx():
         else:
             otype_cell.fill = buy_fill
         otype_cell.alignment = Alignment(horizontal="center")
+        ws.cell(row=r, column=4).alignment = Alignment(horizontal="center")
         try:
             pl = float(t.get("pnl_points") or 0)
-            ws.cell(row=r, column=11).font = pos_font if pl >= 0 else neg_font
+            # P&L points is now col 12, P&L % col 13 after Engine insert.
             ws.cell(row=r, column=12).font = pos_font if pl >= 0 else neg_font
+            ws.cell(row=r, column=13).font = pos_font if pl >= 0 else neg_font
         except (TypeError, ValueError):
             pass
-    widths = [12, 12, 12, 18, 14, 20, 20, 18, 12, 14, 12, 10, 12]
+    widths = [12, 12, 12, 10, 18, 14, 20, 20, 18, 12, 14, 12, 10, 12]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -924,9 +935,13 @@ def trades_xlsx():
     wb = Workbook()
     ws = wb.active
     ws.title = "Trade Ledger"
-    headers = ["Date", "Scrip", "Order Type", "Entry Time (IST)", "Entry Price",
-               "Target Level Reached", "Max/Min Target Price", "Exit Time (IST)",
-               "Exit Price", "Exit Reason", "P&L Points", "P&L %", "Duration"]
+    # Phase 3: Engine column (current/reverse) — see /paper-trades.xlsx for
+    # the rationale. Inserted after Order Type; legacy rows fall back to
+    # 'current' to match the HTML rendering.
+    headers = ["Date", "Scrip", "Order Type", "Engine", "Entry Time (IST)",
+               "Entry Price", "Target Level Reached", "Max/Min Target Price",
+               "Exit Time (IST)", "Exit Price", "Exit Reason",
+               "P&L Points", "P&L %", "Duration"]
     ws.append(headers)
     # Header styling
     hdr_fill = PatternFill("solid", fgColor="FFEB3B")
@@ -949,6 +964,7 @@ def trades_xlsx():
             t.get("date", ""),
             t.get("scrip", ""),
             t.get("order_type", ""),
+            t.get("engine") or "current",
             t.get("entry_time", ""),
             t.get("entry_price", ""),
             t.get("target_level_reached", "") or "",
@@ -968,15 +984,16 @@ def trades_xlsx():
         else:
             otype_cell.fill = buy_fill
         otype_cell.alignment = Alignment(horizontal="center")
-        # P&L colouring
+        ws.cell(row=r, column=4).alignment = Alignment(horizontal="center")
+        # P&L colouring (cols shifted right by 1 after Engine insert)
         try:
             pl = float(t.get("pnl_points") or 0)
-            ws.cell(row=r, column=11).font = pos_font if pl >= 0 else neg_font
             ws.cell(row=r, column=12).font = pos_font if pl >= 0 else neg_font
+            ws.cell(row=r, column=13).font = pos_font if pl >= 0 else neg_font
         except (TypeError, ValueError):
             pass
     # Column widths
-    widths = [12, 12, 12, 18, 14, 20, 20, 18, 12, 14, 12, 10, 12]
+    widths = [12, 12, 12, 10, 18, 14, 20, 20, 18, 12, 14, 12, 10, 12]
     from openpyxl.utils import get_column_letter
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
@@ -1353,9 +1370,35 @@ def stop_confirm():
 # in Python — collapsing repeated calls during a 5 s window cuts CPU on the
 # request thread without losing freshness (the tile already updates on the
 # next page nav, and a closed-position P&L change is not real-time anyway).
-_TODAY_PNL_CACHE = {"ts": 0.0, "value": None}
+_TODAY_PNL_CACHE = {"ts": 0.0, "value": None, "by_engine": None}
 _TODAY_PNL_LOCK = threading.Lock()
 _TODAY_PNL_TTL = 5.0
+
+
+def _compute_today_pnl():
+    """Walk both ledgers once, return (combined_pnl, {engine: pnl}).
+    Used by both _today_pnl_cached and the per-engine drawdown check
+    so a single ledger pass populates both views."""
+    from backend.storage.paper_ledger import read_paper_ledger
+    real_today  = _filter_trades_by_range(read_trade_ledger(),  "today", "")
+    paper_today = _filter_trades_by_range(read_paper_ledger(),  "today", "")
+    combined = 0.0
+    by_engine = {"current": 0.0, "reverse": 0.0}
+    for t in (real_today + paper_today):
+        if t.get("status") != "CLOSED" or t.get("pnl_points") is None:
+            continue
+        try:
+            rs = float(t["pnl_points"]) * int(t.get("qty", 1))
+        except (TypeError, ValueError):
+            continue
+        combined += rs
+        eng = t.get("engine") or "current"
+        if eng in by_engine:
+            by_engine[eng] += rs
+        else:
+            # Future-proof: any new engine name shows up as its own bucket.
+            by_engine[eng] = by_engine.get(eng, 0.0) + rs
+    return round(combined, 2), {k: round(v, 2) for k, v in by_engine.items()}
 
 
 def _today_pnl_cached():
@@ -1364,35 +1407,127 @@ def _today_pnl_cached():
         if (now - _TODAY_PNL_CACHE["ts"]) < _TODAY_PNL_TTL:
             return _TODAY_PNL_CACHE["value"]
     try:
-        from backend.storage.paper_ledger import read_paper_ledger
-        real_today  = _filter_trades_by_range(read_trade_ledger(),  "today", "")
-        paper_today = _filter_trades_by_range(read_paper_ledger(),  "today", "")
-        s = 0.0
-        for t in (real_today + paper_today):
-            if t.get("status") == "CLOSED" and t.get("pnl_points") is not None:
-                try:
-                    s += float(t["pnl_points"]) * int(t.get("qty", 1))
-                except (TypeError, ValueError):
-                    pass
-        value = round(s, 2)
+        value, by_engine = _compute_today_pnl()
     except Exception:
-        value = None
+        value, by_engine = None, None
     with _TODAY_PNL_LOCK:
         _TODAY_PNL_CACHE["ts"] = now
         _TODAY_PNL_CACHE["value"] = value
+        _TODAY_PNL_CACHE["by_engine"] = by_engine
     return value
+
+
+def _today_pnl_by_engine_cached():
+    """Per-engine P&L for today, dict keyed by engine name. Shares the
+    same 5s cache as _today_pnl_cached — calling either populates both."""
+    _today_pnl_cached()
+    with _TODAY_PNL_LOCK:
+        return dict(_TODAY_PNL_CACHE["by_engine"] or {})
+
+
+def _parse_halt_info(text):
+    """Parse a halt-flag file body (key=value lines) into a small dict.
+    Returns None for None/empty input. Tolerates missing keys — used by
+    the /config halt banner (P1.1) so reason + timestamp display
+    cleanly instead of as a raw multiline blob."""
+    if not text:
+        return None
+    out = {"halted_at": "", "reason": "", "engine": ""}
+    for line in text.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            k = k.strip()
+            if k in out:
+                out[k] = v.strip()
+    return out
 
 
 @app.context_processor
 def _inject_safety_state():
     # B.2 — today's combined P&L (real ledger + paper book), summed in points
     # × qty so it matches the per-page Trade Log "Net P&L (₹)" totals.
+    # P1.1 — halt_global / halt_engines feed the /config halt banner.
+    # Cheap to compute (3 stat() calls + tiny file reads); fine in the
+    # context processor since every page already pays the is_halted() stat.
     return {
         "live_mode": LIVE_MODE,
         "halted": is_halted(),
+        "halt_global": _parse_halt_info(halt_info()),
+        "halt_engines": {
+            eng: _parse_halt_info(engine_halt_info(eng))
+            for eng in ("current", "reverse")
+        },
         "ucc": os.getenv("KOTAK_UCC", ""),
         "today_pnl": _today_pnl_cached(),
+        "ui_theme": os.getenv("KOTAK_UI_THEME", "dark"),
     }
+
+
+def _ui_theme_is_light():
+    """True when env var KOTAK_UI_THEME=light. Env var instead of
+    config.yaml because config_loader.get() filters out unknown
+    keys via its defaults schema. Env var is also a cleaner
+    per-deployment switch — no risk of one app instance picking
+    up the other's config flag if config.yaml gets shared."""
+    return os.getenv("KOTAK_UI_THEME", "dark").lower() == "light"
+
+
+def _paper_banner_enabled():
+    """True when env var KOTAK_PAPER_BANNER=1 (rev deployment).
+    Decoupled from KOTAK_UI_THEME so the banner can ride on the
+    dark theme too — Ganesh prefers dark cells but still wants
+    the 'this is paper' visual distinction."""
+    return os.getenv("KOTAK_PAPER_BANNER", "").lower() in ("1", "true", "yes")
+
+
+# Inline banner styles so the banner stands out on the dark base
+# theme without needing theme-light.css. Amber-on-dark stays
+# legible and signals "warning / non-prod".
+_PAPER_BANNER_HTML = (
+    '<div style="background:#3b2a07;border:2px solid #f59e0b;'
+    'color:#fbbf24;padding:10px 16px;border-radius:8px;'
+    'margin:8px 12px;font-weight:700;font-size:14px;'
+    'letter-spacing:0.5px;text-align:center;" '
+    'class="review-banner">'
+    'PAPER REVIEW DASHBOARD - reverse engine, no real orders'
+    '</div>'
+)
+
+
+@app.after_request
+def _inject_theme_and_banner(response):
+    """Visual differentiator for the paper-only review deployment.
+    Two independent injections, each gated by its own env var:
+      - KOTAK_UI_THEME=light → inject theme-light.css
+      - KOTAK_PAPER_BANNER=1 → inject the 'PAPER REVIEW' banner
+    Single point of injection so each page template stays untouched
+    and any new pages we add later automatically pick this up.
+    Skips non-HTML, redirects, and any response without a </head>."""
+    light = _ui_theme_is_light()
+    banner = _paper_banner_enabled()
+    if not light and not banner:
+        return response
+    ctype = response.content_type or ""
+    if not ctype.startswith("text/html"):
+        return response
+    if response.status_code >= 300 and response.status_code < 400:
+        return response
+    try:
+        body = response.get_data(as_text=True)
+    except (UnicodeDecodeError, RuntimeError):
+        return response
+    if "</head>" not in body:
+        return response
+    if light:
+        link = ('<link rel="stylesheet" '
+                'href="/static/theme-light.css">')
+        body = body.replace("</head>", link + "</head>", 1)
+    # Insert review banner immediately after <body>. Skip if the
+    # page already added one (so re-injection is idempotent).
+    if banner and "<body>" in body and "review-banner" not in body:
+        body = body.replace("<body>", "<body>" + _PAPER_BANNER_HTML, 1)
+    response.set_data(body)
+    return response
 
 
 @app.route("/refresh", methods=["POST", "GET"])
@@ -1433,30 +1568,66 @@ def _check_drawdown_halt():
     repeatedly within a single tick. Audit + halt-flag write happen
     exactly once per breach because is_halted() flips True after the
     first call and short-circuits subsequent ticks.
+
+    Phase 3 — also checks per-engine thresholds. Each logic engine
+    (current/reverse) has its own max_daily_drawdown in config; if
+    that engine's P&L breaches its threshold and the OTHER engine is
+    still healthy, only that engine gets halted (halt_engine) rather
+    than the whole bot. The global threshold is unchanged — it still
+    halts everything when combined P&L is bad enough.
     """
     try:
-        if is_halted():
-            return
-        threshold = config_loader.max_daily_drawdown()
-        if not threshold:
-            return
+        # Always populate the per-engine cache so we get both views
+        # off a single ledger pass, even when global is already halted.
         pnl = _today_pnl_cached()
-        if pnl is None:
-            return
-        if pnl <= -float(threshold):
-            # Reason string is ASCII-only — halt() opens the flag file
-            # without an explicit encoding, and on Windows that's cp1252
-            # which would crash on the rupee glyph. "Rs." matches the
-            # convention already used in safety/orders.py messages.
-            reason = (f"auto-drawdown: today P&L Rs.{pnl:.2f} <= "
-                      f"-Rs.{int(threshold)} threshold")
-            halt(reason=reason)
-            try:
-                audit("AUTO_HALT_DRAWDOWN", today_pnl=pnl,
-                      threshold=int(threshold))
-            except Exception:
-                pass
-            print(f"[ticker] {reason} — kill switch engaged")
+        by_engine = _today_pnl_by_engine_cached()
+
+        # 1. Global combined-P&L threshold (unchanged from H.2).
+        if not is_halted():
+            threshold = config_loader.max_daily_drawdown()
+            if threshold and pnl is not None and pnl <= -float(threshold):
+                # Reason string is ASCII-only — halt() opens the flag file
+                # without an explicit encoding, and on Windows that's cp1252
+                # which would crash on the rupee glyph. "Rs." matches the
+                # convention already used in safety/orders.py messages.
+                reason = (f"auto-drawdown: today P&L Rs.{pnl:.2f} <= "
+                          f"-Rs.{int(threshold)} threshold")
+                halt(reason=reason)
+                try:
+                    audit("AUTO_HALT_DRAWDOWN", today_pnl=pnl,
+                          threshold=int(threshold))
+                except Exception:
+                    pass
+                print(f"[ticker] {reason} — kill switch engaged")
+
+        # 2. Per-engine threshold — independent of global. If the engine
+        # is already halted (via global flag OR its own per-engine flag)
+        # is_engine_halted short-circuits; we don't re-engage on every
+        # tick. Per-engine halt blocks NEW entries from that engine
+        # only — exits + square-off + the other engine keep running.
+        for eng in ("current", "reverse"):
+            if not config_loader.engine_enabled(eng):
+                continue
+            if is_engine_halted(eng):
+                continue
+            eng_threshold = config_loader.engine_max_daily_drawdown(eng)
+            if not eng_threshold:
+                continue
+            eng_pnl = by_engine.get(eng) if by_engine else None
+            if eng_pnl is None:
+                continue
+            if eng_pnl <= -float(eng_threshold):
+                reason = (f"auto-drawdown ({eng}): engine P&L "
+                          f"Rs.{eng_pnl:.2f} <= -Rs.{int(eng_threshold)} "
+                          f"threshold")
+                halt_engine(eng, reason=reason)
+                try:
+                    audit("AUTO_HALT_ENGINE_DRAWDOWN", engine=eng,
+                          engine_pnl=eng_pnl,
+                          threshold=int(eng_threshold))
+                except Exception:
+                    pass
+                print(f"[ticker] {reason} — {eng} engine halted")
     except Exception as e:
         # Best-effort guard. A drawdown-check failure must NOT kill the
         # ticker — strategy logic still needs to run for stoploss/exit.
@@ -1481,18 +1652,48 @@ def _strategy_ticker_loop():
                             client_for_strategy = ensure_client()
                         except Exception:
                             client_for_strategy = None
-                        option_auto_strategy_tick(
-                            data, meta, gann_quotes,
-                            client=client_for_strategy,
-                        )
-                        # Paper book — runs the same strategy logic
-                        # against an independent ledger. Never sends
-                        # real orders; not gated by the kill switch.
-                        try:
-                            paper_options_tick(data, meta, gann_quotes)
-                        except Exception as e:
-                            print(f"[ticker] paper options tick failed: "
-                                  f"{type(e).__name__}: {e}")
+                        # Phase 2c — run each enabled logic engine in
+                        # turn. current + reverse are independent: own
+                        # state slots, own config block, own per-engine
+                        # ledger filtering. Each tick short-circuits
+                        # internally if its master flag is off, so this
+                        # loop is cheap when only one is enabled.
+                        active_engines = [
+                            e for e in ("current", "reverse")
+                            if config_loader.engine_enabled(e)
+                        ]
+                        for _eng in active_engines:
+                            # REVERSE engine is paper-only by design:
+                            # it exists to validate the reverse-Gann
+                            # ladder logic against today's market
+                            # without risking capital. Only the
+                            # `current` engine routes through the
+                            # real-order path. The reverse engine
+                            # still runs its full strategy logic — but
+                            # only the paper book sees its signals.
+                            if _eng == "current":
+                                try:
+                                    option_auto_strategy_tick(
+                                        data, meta, gann_quotes,
+                                        client=client_for_strategy,
+                                        engine=_eng,
+                                    )
+                                except Exception as e:
+                                    print(f"[ticker] real options tick "
+                                          f"engine={_eng} failed: "
+                                          f"{type(e).__name__}: {e}")
+                            # Paper book — runs the same strategy logic
+                            # against an independent ledger. Never sends
+                            # real orders; not gated by the kill switch.
+                            try:
+                                paper_options_tick(
+                                    data, meta, gann_quotes,
+                                    engine=_eng,
+                                )
+                            except Exception as e:
+                                print(f"[ticker] paper options tick "
+                                      f"engine={_eng} failed: "
+                                      f"{type(e).__name__}: {e}")
                         # Futures runs alongside options. Independent ledger
                         # rows (asset_type=future). Fetch futures quotes
                         # only if at least one engine (paper OR real)
@@ -1502,17 +1703,34 @@ def _strategy_ticker_loop():
                             try:
                                 fut_data, _fut_err = fetch_future_quotes()
                                 if fut_data:
-                                    future_auto_strategy_tick(
-                                        fut_data, gann_quotes,
-                                        client=client_for_strategy,
-                                    )
-                                    try:
-                                        paper_futures_tick(
-                                            fut_data, gann_quotes)
-                                    except Exception as e:
-                                        print(f"[ticker] paper futures tick"
-                                              f" failed: "
-                                              f"{type(e).__name__}: {e}")
+                                    for _eng in active_engines:
+                                        # REVERSE engine is paper-only by
+                                        # design — same rationale as the
+                                        # options branch above. Skip the
+                                        # real-order path entirely; the
+                                        # paper tick below still runs.
+                                        if _eng == "current":
+                                            try:
+                                                future_auto_strategy_tick(
+                                                    fut_data, gann_quotes,
+                                                    client=client_for_strategy,
+                                                    engine=_eng,
+                                                )
+                                            except Exception as e:
+                                                print(f"[ticker] real futures "
+                                                      f"tick engine={_eng} "
+                                                      f"failed: "
+                                                      f"{type(e).__name__}: {e}")
+                                        try:
+                                            paper_futures_tick(
+                                                fut_data, gann_quotes,
+                                                engine=_eng,
+                                            )
+                                        except Exception as e:
+                                            print(f"[ticker] paper futures "
+                                                  f"tick engine={_eng} "
+                                                  f"failed: "
+                                                  f"{type(e).__name__}: {e}")
                             except Exception as e:
                                 print(f"[ticker] futures tick failed: "
                                       f"{type(e).__name__}: {e}")
