@@ -71,6 +71,14 @@ class QuoteFeed:
         self._thread = None
         self._client = None
 
+        # Reconnect signalling. Set by on_error/on_close (SDK thread);
+        # cleared by _run after a successful reconnect attempt. Plain
+        # bool reads/writes are atomic in CPython, so no extra lock.
+        # Pre-this-flag, on_error logged the disconnect but the socket
+        # was never restarted — dashboard would go dark until manual
+        # systemctl restart (observed Fri May 1 13:30 IST production).
+        self._needs_reconnect = False
+
     # ---------- public subscription setters ----------
     @staticmethod
     def _sub_key(s):
@@ -230,6 +238,10 @@ class QuoteFeed:
             self._errors.append(f"{int(time.time())} on_error: {err}")
             if len(self._errors) > 50:
                 self._errors = self._errors[-50:]
+        # Signal the monitor loop to reconnect — Kotak SDK does NOT
+        # auto-reconnect after socket errors; the prior assumption that
+        # run_forever(reconnect=5) handled this was wrong.
+        self._needs_reconnect = True
 
     def _on_open(self, *args, **kwargs):
         # SDK passes a banner string like "The Session has been Opened!"
@@ -241,6 +253,7 @@ class QuoteFeed:
         self._log(f"[quote_feed] socket closed ({args[0] if args else ''})")
         with self._lock:
             self._connected = False
+        self._needs_reconnect = True
 
     def _attach_callbacks(self, client):
         # The NeoAPI client exposes these as plain attributes that the SDK
@@ -275,9 +288,19 @@ class QuoteFeed:
         self._last_subscribed_at = time.time()
 
     def _run(self):
-        """Subscribe once. The Kotak SDK runs the WS in its own daemon thread
-        with run_forever(reconnect=5), so we don't need an outer reconnect
-        loop — just monitor for option-sub changes (ATM drift) and resubscribe.
+        """Subscribe once, then monitor in a loop.
+
+        Two responsibilities per iteration:
+          (1) Reconnect-on-disconnect. The Kotak SDK does NOT auto-
+              reconnect after socket errors — earlier assumption that
+              run_forever(reconnect=5) handled it was wrong (proven by
+              Fri May 1 13:30 IST production drop: on_error logged,
+              dashboard went dark for 65+ hours until manual restart).
+              When _needs_reconnect is set by on_error/on_close, walk
+              an exponential backoff (2s, 4s, 8s, 16s, capped 30s),
+              re-fetch client (handles login refresh), reattach
+              callbacks, re-subscribe all sets, increment _reconnects.
+          (2) Option/future ATM drift — resubscribe deltas.
         """
         try:
             client = self._client_provider()
@@ -297,8 +320,49 @@ class QuoteFeed:
         # data/app.log.
         last_opt_set = self._subs_set(last_opt_subs)
         last_fut_set = self._subs_set(last_fut_subs)
+        reconnect_attempt = 0
         while not self._stop.is_set():
             self._stop.wait(2.0)
+
+            # ---- (1) Reconnect on dead socket ----
+            if self._needs_reconnect and not self._stop.is_set():
+                reconnect_attempt += 1
+                # Exponential backoff: 2, 4, 8, 16, 30, 30, ...
+                backoff = min(2.0 * (2 ** (reconnect_attempt - 1)), 30.0)
+                self._log(f"[quote_feed] WS disconnected; reconnect "
+                          f"attempt #{reconnect_attempt} in {backoff:.0f}s")
+                if self._stop.wait(backoff):
+                    break
+                try:
+                    client = self._client_provider()
+                    self._client = client
+                    self._attach_callbacks(client)
+                    self._do_subscribe(client)
+                    with self._lock:
+                        self._reconnects += 1
+                    self._needs_reconnect = False
+                    reconnect_attempt = 0
+                    self._log(f"[quote_feed] reconnect #"
+                              f"{self._reconnects} subscribed")
+                    # Reset delta-tracking sets so we don't trigger a
+                    # spurious option/future re-subscribe on next iter
+                    # (we just full-subscribed everything).
+                    last_opt_subs = list(self._option_subs)
+                    last_fut_subs = list(self._future_subs)
+                    last_opt_set = self._subs_set(last_opt_subs)
+                    last_fut_set = self._subs_set(last_fut_subs)
+                    # No tick-flow verification on purpose: off-hours
+                    # the socket is healthy but no ticks come. If the
+                    # socket actually died, on_error / on_close will
+                    # re-trigger _needs_reconnect on the next failure.
+                except Exception as e:
+                    self._record_error(
+                        f"reconnect#{reconnect_attempt}", e)
+                # Skip the option/future delta block this iter so we
+                # don't redundantly resubscribe on top of the full
+                # _do_subscribe we just ran.
+                continue
+
             with self._subs_lock:
                 cur_opts = list(self._option_subs)
                 cur_futs = list(self._future_subs)
