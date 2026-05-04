@@ -64,10 +64,23 @@ from backend.safety.orders import (
 )
 from backend.safety.audit import audit, read_audit_tail, read_audit_page
 from backend.auto_login_scheduler import start_auto_login_scheduler
+from backend.auth import install_auth
 
 app = Flask(__name__,
             template_folder="frontend/templates",
             static_folder="frontend/static")
+
+# Wire app-level auth (login page, change-password, before_request hook).
+# Reads SECRET_KEY from .env (loaded earlier by backend.kotak.client). Raises
+# RuntimeError if SECRET_KEY is missing — refuses to start with no signing key.
+install_auth(app)
+
+
+# Liveness probe — exempt from auth so monitoring can hit it without a cookie.
+# (See _EXEMPT_PREFIXES in backend/auth.py.)
+@app.route("/healthz")
+def healthz():
+    return {"status": "ok"}
 
 
 # Jinja filter — render numbers as Indian rupees with thousand separators.
