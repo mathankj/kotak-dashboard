@@ -82,3 +82,99 @@ def is_locked_out(ip):
 def clear_lockout(ip):
     """Called on successful login to reset the counter."""
     _LOCKOUT_STATE.pop(ip, None)
+
+
+# ---- Flask blueprint + login route ----
+
+from flask import (  # noqa: E402  (kept after lockout block for readability)
+    Blueprint,
+    redirect,
+    render_template,
+    request,
+    session,
+)
+
+from backend.auth_storage import (  # noqa: E402
+    AUTH_VERSION_UNINITIALIZED,
+    read_auth,
+)
+
+bp = Blueprint("auth", __name__)
+
+# Brute-force friction on every wrong-password POST. Cheap and effective at
+# 3-user scale; shaved out of unit tests via monkeypatch.
+WRONG_PASSWORD_DELAY_SECS = 1.5
+
+
+def _client_ip():
+    # request.remote_addr is the proxy in our nginx setup, but we don't
+    # currently set X-Forwarded-For trust. For lockout this is fine — the
+    # proxy IP is constant, so a flood from any single nginx worker still
+    # locks out *that conduit*. Acceptable for v1. Revisit when adding
+    # X-Forwarded-For trust.
+    return request.remote_addr or "?"
+
+
+def _is_safe_next(target):
+    """Only allow same-origin paths to prevent open-redirect."""
+    return (
+        isinstance(target, str)
+        and target.startswith("/")
+        and not target.startswith("//")
+    )
+
+
+@bp.route("/login", methods=["GET", "POST"])
+def login_view():
+    next_url = request.args.get("next") or request.form.get("next") or "/"
+    if not _is_safe_next(next_url):
+        next_url = "/"
+
+    if request.method == "GET":
+        expired = request.args.get("expired") == "1"
+        return render_template("login.html", error=None, next=next_url, expired=expired)
+
+    ip = _client_ip()
+    if is_locked_out(ip):
+        return (
+            render_template(
+                "login.html",
+                error=f"Too many failed attempts. Try again in {LOCKOUT_WINDOW_SECS}s.",
+                next=next_url,
+                expired=False,
+            ),
+            429,
+        )
+
+    submitted = request.form.get("password", "")
+    state = read_auth()
+    if state["session_version"] == AUTH_VERSION_UNINITIALIZED:
+        return (
+            render_template(
+                "login.html",
+                error="Auth not initialized. Admin must run the reset script.",
+                next=next_url,
+                expired=False,
+            ),
+            503,
+        )
+
+    if not verify_password(state["password_hash"], submitted):
+        record_failed_login(ip)
+        if WRONG_PASSWORD_DELAY_SECS:
+            time.sleep(WRONG_PASSWORD_DELAY_SECS)
+        return render_template(
+            "login.html",
+            error="Invalid password.",
+            next=next_url,
+            expired=False,
+        )
+
+    # Success.
+    clear_lockout(ip)
+    session.clear()
+    session["sid"] = state["session_version"]
+    session["mark"] = "ok"
+    if request.form.get("remember_me"):
+        session.permanent = True  # uses app.permanent_session_lifetime
+    return redirect(next_url)
