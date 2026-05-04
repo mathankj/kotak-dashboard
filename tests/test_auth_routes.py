@@ -12,6 +12,11 @@ def app(tmp_path, monkeypatch):
     monkeypatch.setenv("KOTAK_AUTH_FILE", auth_path)
     write_auth(auth_path, password_hash=hash_password("secret123"), session_version=1)
 
+    # _VERSION_CACHE is module-level — clear between tests so a previous
+    # test's bump doesn't leak into this fixture's fresh auth file.
+    from backend.auth import _invalidate_version_cache
+    _invalidate_version_cache()
+
     app = Flask(__name__, template_folder="../frontend/templates")
     app.secret_key = "test-secret-key"
     app.config["TESTING"] = True
@@ -116,3 +121,85 @@ def test_stale_session_version_redirects(client):
     assert r.status_code == 302
     assert "/login" in r.headers["Location"]
     assert "expired=1" in r.headers["Location"]
+
+
+# ----- Task 6: logout + change-password -----
+
+def test_logout_clears_session(client):
+    client.post("/login", data={"password": "secret123"})
+    r = client.post("/logout")
+    assert r.status_code == 302
+    assert "/login" in r.headers["Location"]
+    # Subsequent request should redirect to /login.
+    r2 = client.get("/")
+    assert r2.status_code == 302
+
+
+def test_change_password_get_renders_form(client):
+    client.post("/login", data={"password": "secret123"})
+    r = client.get("/change-password")
+    assert r.status_code == 200
+    assert b"current" in r.data.lower()
+    assert b"new" in r.data.lower()
+
+
+def test_change_password_happy_path(client):
+    client.post("/login", data={"password": "secret123"})
+    r = client.post(
+        "/change-password",
+        data={"current": "secret123", "new": "newpass1234", "confirm": "newpass1234"},
+    )
+    assert r.status_code == 302
+    # Current browser still works (re-issued cookie with new sid).
+    r2 = client.get("/")
+    assert r2.status_code == 200
+    # New password works on a fresh client.
+    fresh = client.application.test_client()
+    r3 = fresh.post("/login", data={"password": "newpass1234"})
+    assert r3.status_code == 302
+
+
+def test_change_password_wrong_current(client):
+    client.post("/login", data={"password": "secret123"})
+    r = client.post(
+        "/change-password",
+        data={"current": "wrong", "new": "newpass1234", "confirm": "newpass1234"},
+    )
+    assert r.status_code == 200
+    assert b"current password is incorrect" in r.data.lower()
+
+
+def test_change_password_mismatch(client):
+    client.post("/login", data={"password": "secret123"})
+    r = client.post(
+        "/change-password",
+        data={"current": "secret123", "new": "newpass1234", "confirm": "different"},
+    )
+    assert r.status_code == 200
+    assert b"do not match" in r.data.lower()
+
+
+def test_change_password_too_short(client):
+    client.post("/login", data={"password": "secret123"})
+    r = client.post(
+        "/change-password",
+        data={"current": "secret123", "new": "abc", "confirm": "abc"},
+    )
+    assert r.status_code == 200
+    assert b"at least 8" in r.data.lower()
+
+
+def test_change_password_force_logout_other_browsers(client, app):
+    """Other browsers (other test clients) should be kicked out after pw change."""
+    other = app.test_client()
+    other.post("/login", data={"password": "secret123"})
+    # Other client is logged in; now main client changes password.
+    client.post("/login", data={"password": "secret123"})
+    client.post(
+        "/change-password",
+        data={"current": "secret123", "new": "newpass1234", "confirm": "newpass1234"},
+    )
+    # other now has stale cookie.
+    r = other.get("/")
+    assert r.status_code == 302
+    assert "/login" in r.headers["Location"]

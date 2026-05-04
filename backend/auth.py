@@ -100,7 +100,10 @@ from flask import (  # noqa: E402  (kept after lockout block for readability)
 from backend.auth_storage import (  # noqa: E402
     AUTH_VERSION_UNINITIALIZED,
     read_auth,
+    write_auth,
 )
+
+MIN_PASSWORD_LEN = 8
 
 bp = Blueprint("auth", __name__)
 
@@ -249,3 +252,50 @@ def install_auth(app):
 
     app.register_blueprint(bp)
     app.before_request(enforce_login)
+
+
+# ---- Logout + change-password ----
+
+@bp.route("/logout", methods=["POST", "GET"])
+def logout_view():
+    session.clear()
+    return redirect(url_for("auth.login_view"))
+
+
+@bp.route("/change-password", methods=["GET", "POST"])
+def change_password_view():
+    if request.method == "GET":
+        return render_template("change_password.html", error=None)
+
+    current = request.form.get("current", "")
+    new = request.form.get("new", "")
+    confirm = request.form.get("confirm", "")
+
+    state = read_auth()
+    if not verify_password(state["password_hash"], current):
+        return render_template(
+            "change_password.html", error="Current password is incorrect."
+        )
+    if new != confirm:
+        return render_template(
+            "change_password.html", error="New passwords do not match."
+        )
+    if len(new) < MIN_PASSWORD_LEN:
+        return render_template(
+            "change_password.html",
+            error=f"New password must be at least {MIN_PASSWORD_LEN} characters.",
+        )
+
+    # Write new hash + bump version. The window between read_auth above and
+    # write_auth here is microseconds; for a 3-user app, racing with the
+    # admin reset CLI is not a real concern. If two browsers POST
+    # /change-password concurrently, one of them wins and the other gets
+    # kicked to /login on the next request — that's the desired behavior.
+    new_version = state["session_version"] + 1
+    write_auth(password_hash=hash_password(new), session_version=new_version)
+    _invalidate_version_cache()
+
+    # Re-issue THIS browser's cookie with the new sid so we don't log
+    # ourselves out — only the *other* browsers get kicked.
+    session["sid"] = new_version
+    return redirect("/")
