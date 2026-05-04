@@ -39,25 +39,6 @@ _feed = QuoteFeed(client_provider=ensure_client)
 _feed_started = {"flag": False, "lock": threading.Lock()}
 WS_FRESH_SECONDS = 5.0   # WS tick considered fresh if newer than this
 
-# ---- Index-spot open-price REST fallback ----
-# Kotak's WS feed is broken for the NSE-CM "Nifty 50" symbol: it ships
-# op=0.0 in every tick, while h/lo/c are valid (BANKNIFTY and SENSEX
-# work fine on the same WS pipeline — broker-side bug specific to that
-# one symbol). Without a valid `open` we cannot anchor the Gann ladder.
-# Recovery: once per day per affected symbol, fetch the official open
-# via the same broker over REST `quotes(quote_type="ohlc")`. This is
-# real broker data — same source as WS, just a different transport.
-# Gated to >= 09:30 IST because Kotak's REST OHLC returns yesterday's
-# candle pre-market and during the first ~15 minutes of the session.
-# A small retry budget handles the case where REST itself is still
-# serving yesterday's candle (detected by open == prev-close); we back
-# off and try again on the next snapshot tick.
-_index_open_rest_cache = {}   # {symbol: {date, open, tries, last_try_ts}}
-INDEX_OPEN_REST_GATE_HOUR = 9
-INDEX_OPEN_REST_GATE_MIN = 30
-INDEX_OPEN_REST_MAX_TRIES = 12
-INDEX_OPEN_REST_RETRY_SECS = 30.0
-
 # Option chain cache (keyed by "<INDEX> <STRIKE> CE/PE")
 _option_quote_cache = {"ts": 0.0, "data": {}, "error": None, "meta": {}}
 
@@ -151,101 +132,6 @@ def _ws_overlay(out_dict, key_to_token_exch):
     return overlaid
 
 
-def _recover_index_open_via_rest(symbol, exchange, token, prev_close):
-    """Once-per-day REST OHLC recovery for index spots whose WS feed
-    ships op=0/None. Returns the recovered open price (float) or None.
-
-    Real broker data — same Kotak API as WS, just a different transport.
-    Time-gated to >= 09:30 IST to dodge the well-known
-    "REST OHLC returns yesterday's candle pre-market" issue. If REST
-    itself returns yesterday's candle (detected by open == prev_close
-    within 0.01), back off and retry on the next snapshot tick. Caches
-    the recovered open for the rest of the trading day so we make at
-    most one successful REST call per symbol per day."""
-    today = now_ist().strftime("%Y-%m-%d")
-    nowts = time.time()
-    state = _index_open_rest_cache.get(symbol)
-    if not state or state.get("date") != today:
-        state = {"date": today, "open": None,
-                 "tries": 0, "last_try_ts": 0.0}
-        _index_open_rest_cache[symbol] = state
-    if state.get("open"):
-        return state["open"]
-    ist = now_ist()
-    if (ist.hour, ist.minute) < (INDEX_OPEN_REST_GATE_HOUR,
-                                 INDEX_OPEN_REST_GATE_MIN):
-        return None
-    if state["tries"] >= INDEX_OPEN_REST_MAX_TRIES:
-        return None
-    if nowts - state.get("last_try_ts", 0.0) < INDEX_OPEN_REST_RETRY_SECS:
-        return None
-    state["tries"] += 1
-    state["last_try_ts"] = nowts
-    try:
-        client = ensure_client()
-        r = client.quotes(
-            instrument_tokens=[{"instrument_token": token,
-                                "exchange_segment": exchange}],
-            quote_type="ohlc")
-    except Exception as e:
-        print(f"[quote_feed] REST OHLC fetch failed for {symbol}: "
-              f"{type(e).__name__}: {e}")
-        return None
-    items = []
-    if isinstance(r, list):
-        items = r
-    elif isinstance(r, dict):
-        for k in ("data", "result", "quotes"):
-            v = r.get(k)
-            if isinstance(v, list):
-                items = v
-                break
-        if not items and any(k in r for k in ("ohlc", "open",
-                                              "exchange_token")):
-            items = [r]
-    if not items or not isinstance(items[0], dict):
-        return None
-    it = items[0]
-    raw_open = it.get("open")
-    if raw_open is None:
-        ohlc = it.get("ohlc")
-        if isinstance(ohlc, dict):
-            raw_open = ohlc.get("open")
-    try:
-        open_v = float(raw_open) if raw_open not in (None, "", "0") else None
-    except (TypeError, ValueError):
-        open_v = None
-    if not open_v or open_v <= 0:
-        return None
-    # Reject yesterday's candle: REST sometimes still serves yesterday's
-    # OHLC during the first session window. open == prev_close means it
-    # has not refreshed yet — back off and retry.
-    if prev_close and abs(open_v - float(prev_close)) < 0.01:
-        return None
-    state["open"] = open_v
-    print(f"[quote_feed] recovered {symbol} open={open_v} via REST OHLC "
-          f"(WS shipped op=0)")
-    return open_v
-
-
-def _apply_index_open_rest_fallback(out_dict):
-    """For each SCRIPS entry whose WS overlay left open=0/None, attempt
-    a REST OHLC recovery. Builds the Gann ladder when a value is
-    recovered. Idempotent — safe to call on every fetch_quotes path."""
-    for s in SCRIPS:
-        rec = out_dict.get(s["symbol"])
-        if not rec:
-            continue
-        cur_open = rec.get("open")
-        if cur_open and cur_open > 0:
-            continue
-        recovered = _recover_index_open_via_rest(
-            s["symbol"], s["exchange"], s["token"], rec.get("close"))
-        if recovered:
-            rec["open"] = recovered
-            rec["levels"] = gann_levels(recovered)
-
-
 def fetch_quotes(force=False):
     """Fetch quotes for all SCRIPS via Kotak. Returns (dict, error_str)."""
     now = time.time()
@@ -257,11 +143,6 @@ def fetch_quotes(force=False):
                         {s["symbol"]: (s["exchange"], s["token"]) for s in SCRIPS})
         except Exception as e:
             print(f"[quote_feed] overlay (stocks, cached) failed: "
-                  f"{type(e).__name__}: {e}")
-        try:
-            _apply_index_open_rest_fallback(_quote_cache["data"])
-        except Exception as e:
-            print(f"[quote_feed] open-rest fallback (cached) failed: "
                   f"{type(e).__name__}: {e}")
         return _quote_cache["data"], _quote_cache["error"]
 
@@ -345,15 +226,6 @@ def fetch_quotes(force=False):
         _ws_overlay(out, {s["symbol"]: (s["exchange"], s["token"]) for s in SCRIPS})
     except Exception as e:
         print(f"[quote_feed] overlay (stocks) failed: {type(e).__name__}: {e}")
-
-    # WS-bug fallback: Kotak ships op=0 in WS ticks for nse_cm|nifty 50
-    # (other indices unaffected). Recover today's open via REST OHLC so
-    # the Gann ladder can anchor. Idempotent + once-per-day cached.
-    try:
-        _apply_index_open_rest_fallback(out)
-    except Exception as e:
-        print(f"[quote_feed] open-rest fallback (fresh) failed: "
-              f"{type(e).__name__}: {e}")
 
     _quote_cache["data"] = out
     _quote_cache["ts"] = now
