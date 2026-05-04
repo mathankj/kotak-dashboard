@@ -9,7 +9,9 @@ This module exposes (added incrementally per the implementation plan):
   - bp: a Flask Blueprint with /login, /logout, /change-password (added in later tasks)
   - install_auth(app): registers blueprint + before_request hook + secret key (later task)
 """
+import os
 import time
+from datetime import timedelta
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -92,6 +94,7 @@ from flask import (  # noqa: E402  (kept after lockout block for readability)
     render_template,
     request,
     session,
+    url_for,
 )
 
 from backend.auth_storage import (  # noqa: E402
@@ -178,3 +181,71 @@ def login_view():
     if request.form.get("remember_me"):
         session.permanent = True  # uses app.permanent_session_lifetime
     return redirect(next_url)
+
+
+# ---- before_request hook + install_auth ----
+
+# Per-process cache: avoid disk hit on every request. Also bounds the
+# cross-service propagation lag of a session_version bump to ≤TTL.
+_VERSION_CACHE = {"value": None, "ts": 0.0}
+_VERSION_CACHE_TTL = 5.0  # seconds — see spec; ≤5s cross-service propagation
+
+
+def _current_session_version():
+    now = time.time()
+    if _VERSION_CACHE["value"] is None or now - _VERSION_CACHE["ts"] > _VERSION_CACHE_TTL:
+        _VERSION_CACHE["value"] = read_auth()["session_version"]
+        _VERSION_CACHE["ts"] = now
+    return _VERSION_CACHE["value"]
+
+
+def _invalidate_version_cache():
+    """Force the next request to re-read auth.json. Called by /change-password
+    so the changing browser does not need to wait out the 5s TTL."""
+    _VERSION_CACHE["value"] = None
+
+
+# Paths exempt from login enforcement. Trailing slash on /static/ matters —
+# /static is unlikely but /static-foo would otherwise match if we did
+# startswith("/static").
+_EXEMPT_PREFIXES = ("/login", "/logout", "/static/", "/healthz")
+
+
+def _is_exempt(path):
+    return any(path == p or path.startswith(p) for p in _EXEMPT_PREFIXES)
+
+
+def enforce_login():
+    """Flask before_request hook — gates every non-exempt route."""
+    if _is_exempt(request.path):
+        return None
+    sid = session.get("sid")
+    if sid is None or sid != _current_session_version():
+        session.clear()
+        return redirect(url_for("auth.login_view", next=request.path, expired=1))
+    return None
+
+
+def install_auth(app):
+    """Wire auth into the Flask app: secret key + lifetime + blueprint + hook."""
+    secret = os.environ.get("SECRET_KEY")
+    if not secret and not app.config.get("TESTING"):
+        raise RuntimeError(
+            "SECRET_KEY env var is required (generate via "
+            "`python -c 'import secrets; print(secrets.token_hex(32))'`)."
+        )
+    if secret:
+        app.secret_key = secret
+
+    # 30-day lifetime applies when session.permanent=True (set on login by
+    # the remember_me checkbox). Without remember_me the cookie is a default
+    # browser-session cookie that dies when the browser closes.
+    app.permanent_session_lifetime = timedelta(days=30)
+    app.config.setdefault("SESSION_REFRESH_EACH_REQUEST", False)
+    app.config.setdefault("SESSION_COOKIE_HTTPONLY", True)
+    app.config.setdefault("SESSION_COOKIE_SAMESITE", "Lax")
+    # HTTP-only deployment for now; flip to True when HTTPS lands.
+    app.config.setdefault("SESSION_COOKIE_SECURE", False)
+
+    app.register_blueprint(bp)
+    app.before_request(enforce_login)

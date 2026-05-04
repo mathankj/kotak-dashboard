@@ -1,10 +1,8 @@
 """Flask test-client integration tests for auth routes."""
-from datetime import timedelta
-
 import pytest
 from flask import Flask
 
-from backend.auth import bp, hash_password
+from backend.auth import hash_password, install_auth
 from backend.auth_storage import write_auth
 
 
@@ -17,10 +15,7 @@ def app(tmp_path, monkeypatch):
     app = Flask(__name__, template_folder="../frontend/templates")
     app.secret_key = "test-secret-key"
     app.config["TESTING"] = True
-    # Set explicitly so the "remember me" test can observe Max-Age on the cookie
-    # (Task 5 will replace this fixture with install_auth(app) which sets it too).
-    app.permanent_session_lifetime = timedelta(days=30)
-    app.register_blueprint(bp)
+    install_auth(app)
 
     @app.route("/")
     def home():
@@ -66,3 +61,58 @@ def test_post_login_remember_me_extends_cookie(client):
     set_cookie = r.headers.get("Set-Cookie", "")
     # Permanent cookie has Expires or Max-Age set; default session has neither.
     assert "max-age" in set_cookie.lower() or "expires" in set_cookie.lower()
+
+
+# ----- Task 5: before_request hook -----
+
+def test_unauthenticated_get_redirects_to_login(client):
+    r = client.get("/")
+    assert r.status_code == 302
+    assert "/login" in r.headers["Location"]
+
+
+def test_authenticated_get_passes_through(client):
+    client.post("/login", data={"password": "secret123"})
+    r = client.get("/")
+    assert r.status_code == 200
+    assert r.data == b"home"
+
+
+def test_login_path_is_exempt(client):
+    # Already covered by test_get_login_renders_form, but assert no redirect.
+    r = client.get("/login")
+    assert r.status_code == 200
+
+
+def test_static_path_is_exempt(client):
+    # Flask already provides /static/<filename>. We just verify the
+    # before_request hook lets it through (no /login redirect). The 404
+    # is fine — it proves auth didn\'t intercept and the static handler did.
+    r = client.get("/static/does-not-exist.css")
+    assert r.status_code == 404
+    assert "Location" not in r.headers or "/login" not in r.headers["Location"]
+
+
+def test_healthz_is_exempt(client, app):
+    @app.route("/healthz")
+    def healthz():
+        return {"status": "ok"}
+
+    r = client.get("/healthz")
+    assert r.status_code == 200
+
+
+def test_stale_session_version_redirects(client):
+    from backend.auth import _invalidate_version_cache
+    from backend.auth_storage import bump_session_version
+
+    client.post("/login", data={"password": "secret123"})
+    # Bump version — simulates another browser changing the password.
+    bump_session_version()
+    # Bypass the 5s cache so the test sees the bump immediately rather than
+    # depending on cache being empty by accident.
+    _invalidate_version_cache()
+    r = client.get("/")
+    assert r.status_code == 302
+    assert "/login" in r.headers["Location"]
+    assert "expired=1" in r.headers["Location"]
