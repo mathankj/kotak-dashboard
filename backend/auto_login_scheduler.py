@@ -41,9 +41,17 @@ from backend.storage.history import append_history
 
 LOGIN_HOUR_IST = 8
 LOGIN_MIN_IST = 45
-RETRY_DEADLINE_HOUR = 9       # stop retrying once we hit
-RETRY_DEADLINE_MIN = 14       # 09:14 IST (1 min before market open)
+RETRY_DEADLINE_HOUR = 9
+RETRY_DEADLINE_MIN = 14
 RETRY_INTERVAL_SECS = 60
+
+
+def _flush_print(*args, **kwargs):
+    """print() wrapper that flushes immediately. Required because systemd
+    StandardOutput=append:file makes Python stdout block-buffered, hiding
+    [auto_login] log lines until ~4 KB accumulate."""
+    kwargs.setdefault("flush", True)
+    print(*args, **kwargs)
 
 
 def _seconds_until_next(hour, minute):
@@ -56,16 +64,65 @@ def _seconds_until_next(hour, minute):
     return (target - now).total_seconds()
 
 
-def _do_login_and_reconnect_ws(quote_feed):
-    """Fresh Kotak TOTP login + signal WS reconnect.
+def _clear_previous_day_caches(log_fn, quote_feed=None):
+    """Drop every TTL-cached price dict so the dashboard never displays
+    yesterday's values past 08:45 IST. The caches will be repopulated
+    by the next REST/WS fetch — and once WS ticks resume at 09:15 IST,
+    only today's data flows through.
 
-    Updates _state in place — the same dict ensure_client() reads, so
-    every subsequent request sees the new client. Then flips
-    quote_feed._needs_reconnect = True; the QuoteFeed monitor thread
-    will tear down the old WS (built with yesterday's token) and
-    reconnect using the fresh session via its existing reconnect path.
+    Two layers of cache get wiped here:
+      1. REST output caches (_quote_cache, _option_quote_cache,
+         _future_quote_cache) — backstop for cold-start UI loads.
+      2. WS QuoteFeed in-memory tick cache (quote_feed._cache) —
+         the source of truth for live op/lo/h/c. CRITICAL for
+         NIFTY 50: Kotak's WS does not always push a fresh `op` on
+         resubscribe, so without an explicit wipe yesterday's NIFTY 50
+         OPEN survives into today's session, anchors the Gann ladder
+         to yesterday's number, and silently produces wrong
+         stop-losses for the whole day.
+
+    Imported lazily to avoid a hard import-time dependency on backend.quotes
+    (the scheduler module is loaded earlier than quotes during app boot)."""
+    try:
+        from backend.quotes import (
+            _quote_cache, _option_quote_cache, _future_quote_cache,
+        )
+        _quote_cache.update({"data": {}, "ts": 0, "error": None})
+        _option_quote_cache.update({"data": {}, "ts": 0.0,
+                                    "error": None, "meta": {}})
+        _future_quote_cache.update({"data": {}, "ts": 0.0, "error": None})
+        log_fn("[auto_login] cleared previous-day price caches "
+               "(_quote_cache, _option_quote_cache, _future_quote_cache)")
+    except Exception as e:
+        log_fn(f"[auto_login] REST cache clear failed (non-fatal): "
+               f"{type(e).__name__}: {e}")
+
+    if quote_feed is not None:
+        try:
+            n = quote_feed.clear_cache()
+            log_fn(f"[auto_login] cleared WS tick cache "
+                   f"(quote_feed._cache, removed {n} entries)")
+        except Exception as e:
+            log_fn(f"[auto_login] WS cache clear failed (non-fatal): "
+                   f"{type(e).__name__}: {e}")
+
+
+def _do_login_and_reconnect_ws(quote_feed, log_fn):
+    """Fresh Kotak TOTP login + clear stale caches + signal WS reconnect.
+
+    Order matters:
+      1. Login first (fail fast if broker auth is down).
+      2. Clear previous-day caches BEFORE flipping the WS reconnect flag,
+         so any in-flight request sees empty caches rather than yesterday's
+         values during the brief reconnect window.
+      3. Update _state — the same dict ensure_client() reads, so every
+         subsequent request sees the new client.
+      4. Flip quote_feed._needs_reconnect = True; the QuoteFeed monitor
+         thread tears down the old WS (built with yesterday's token) and
+         reconnects via its existing reconnect path.
     """
     client, greeting = kotak_login()
+    _clear_previous_day_caches(log_fn, quote_feed=quote_feed)
     _state["client"] = client
     _state["greeting"] = greeting
     _state["login_time"] = now_ist()
@@ -86,7 +143,7 @@ def _loop(quote_feed, log_fn):
         # Retry loop — every RETRY_INTERVAL_SECS until 09:14 IST.
         while True:
             try:
-                _do_login_and_reconnect_ws(quote_feed)
+                _do_login_and_reconnect_ws(quote_feed, log_fn)
                 log_fn(f"[auto_login] success at "
                        f"{now_ist().strftime('%H:%M:%S')} IST "
                        f"(WS reconnect signalled)")
@@ -105,7 +162,7 @@ def _loop(quote_feed, log_fn):
                 time.sleep(RETRY_INTERVAL_SECS)
 
 
-def start_auto_login_scheduler(quote_feed=None, log_fn=print):
+def start_auto_login_scheduler(quote_feed=None, log_fn=_flush_print):
     """Start the daemon thread. Idempotent-friendly (caller is expected
     to call once at app startup; daemon=True so it dies with the process)."""
     t = threading.Thread(target=_loop, args=(quote_feed, log_fn),
