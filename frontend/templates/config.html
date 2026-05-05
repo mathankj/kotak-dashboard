@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Config - Kotak Neo Dashboard</title>
+<title>Config - Trading Dashboard</title>
 <style>
   * { box-sizing: border-box; }
   body { font-family: -apple-system, 'Segoe UI', sans-serif;
@@ -142,7 +142,7 @@
 </head>
 <body>
 <header>
-  <h1>Kotak Neo Dashboard</h1>
+  <h1>Trading Dashboard</h1>
   <div style="display:flex;align-items:center;gap:0">
     {% include "_safety_header.html" %}
     <form method="post" action="/refresh" style="margin:0">
@@ -218,7 +218,7 @@
      logic engines are enabled here. -->
 <div class="card apply-card">
   <h2>Logic Engines — current vs reverse</h2>
-  <div class="sub">Pick which Gann logic to run. Both can run in parallel
+  <div class="sub">Pick which logic to run. Both can run in parallel
     (each writes its own ledger rows, tagged with engine=current/reverse).
     Each engine has its own entry/stoploss/target/lots/cap/drawdown
     block lower down — sections marked <em>(current)</em> drive the
@@ -226,7 +226,7 @@
 
   {% for lkey, lname, ldesc in [
     ('current', 'Current (open-anchored)',
-     'Original strategy. Levels anchored to the opening Gann square. Default ON.'),
+     'Original strategy. Levels anchored to the opening square. Default ON.'),
     ('reverse',  'Reverse (low/high-anchored)',
      'Buy ladder anchored to today running low; sell ladder to today running high. Default OFF.'),
   ] %}
@@ -341,7 +341,7 @@
 <div class="card">
   <h2>2. Entry (Buy) Logic <span style="color:#a1a1aa;font-weight:400;font-size:14px">(current engine)</span></h2>
   <div class="sub">Tick which signal paths are allowed to enter trades. Both can run together.
-    Each row picks WHICH Gann level fires bullish (BUY or BUY-WA) and WHICH fires bearish (SELL or SELL-WA).</div>
+    Each row picks WHICH level fires bullish (BUY or BUY-WA) and WHICH fires bearish (SELL or SELL-WA).</div>
 
   <div class="row">
     <div class="lbl">Path A — Market-Open Snapshot
@@ -470,7 +470,7 @@
     <label>
       <input type="radio" name="stoploss.active" value="C" {% if cfg.stoploss.active=='C' %}checked{% endif %}>
       <span style="flex:1">
-        <span class="name">Variant C — Opposite Gann level</span>
+        <span class="name">Variant C — Opposite level</span>
         <span class="desc">CE/long: exit if spot drops below the SELL pick.
           PE/short: exit if spot rises above the BUY pick.</span>
         <div class="pickers">
@@ -497,7 +497,7 @@
     <label>
       <input type="radio" name="stoploss.active" value="D" {% if cfg.stoploss.active=='D' %}checked{% endif %}>
       <span style="flex:1">
-        <span class="name">Variant D — Trailing along Gann ladder</span>
+        <span class="name">Variant D — Trailing along ladder</span>
         <span class="desc">SL trails one rung BEHIND the spot's current rung.
           Initial SL = entry price (breakeven). Triggers on spot crossing
           trail SL; close fills at instrument LTP.</span>
@@ -510,7 +510,7 @@
 <!-- 4. Profit target -->
 <div class="card">
   <h2>4. Profit Target <span style="color:#a1a1aa;font-weight:400;font-size:14px">(current engine)</span></h2>
-  <div class="sub">Which Gann level closes a winning trade. CE/long uses the BUY-side level;
+  <div class="sub">Which level closes a winning trade. CE/long uses the BUY-side level;
     PE/short uses the SELL-side level. Same picks drive both options and futures targets.</div>
   <div class="row">
     <div class="lbl">CE / long target
@@ -595,7 +595,7 @@
 <div class="card" style="background:#1c1917;border-color:#78350f">
   <h2 style="color:#fed7aa">Reverse Engine — separate tuning</h2>
   <div class="sub">These mirror the cards above but apply to the
-    reverse-anchored Gann logic (buy ladder anchored to today's running
+    reverse-anchored logic (buy ladder anchored to today's running
     low; sell ladder to today's running high). Edits here only take
     effect once the Reverse logic engine is enabled at the top.</div>
 </div>
@@ -735,7 +735,7 @@
     <label>
       <input type="radio" name="reverse_engine.stoploss.active" value="C" {% if cfg.reverse_engine.stoploss.active=='C' %}checked{% endif %}>
       <span style="flex:1">
-        <span class="name">Variant C — Opposite Gann level</span>
+        <span class="name">Variant C — Opposite level</span>
         <span class="desc">CE/long: exit if spot drops below the SELL pick.
           PE/short: exit if spot rises above the BUY pick.</span>
         <div class="pickers">
@@ -762,7 +762,7 @@
     <label>
       <input type="radio" name="reverse_engine.stoploss.active" value="D" {% if cfg.reverse_engine.stoploss.active=='D' %}checked{% endif %}>
       <span style="flex:1">
-        <span class="name">Variant D — Trailing along Gann ladder</span>
+        <span class="name">Variant D — Trailing along ladder</span>
         <span class="desc">SL trails one rung BEHIND spot's reverse-ladder rung.
           Initial SL = entry price (breakeven).</span>
       </span>
@@ -869,7 +869,7 @@
      will be stale. -->
 <div class="card" id="snapStatsCard" style="margin-top:24px">
   <h2>Snapshot Producer (diagnostic)</h2>
-  <div class="sub">Background thread builds JSON payloads for /gann, /options, /futures
+  <div class="sub">Background thread builds JSON payloads for /levels, /options, /futures
     every {{ '~' }}<span id="snapInterval">…</span>s so requests don't pay the build cost.
     If <em>age</em> grows much beyond the refresh interval, the producer is starved.</div>
   <div id="snapStatsBody" style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.6;color:#d4d4d8">

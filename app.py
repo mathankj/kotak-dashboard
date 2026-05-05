@@ -67,10 +67,23 @@ from backend.safety.orders import (
 )
 from backend.safety.audit import audit, read_audit_tail, read_audit_page
 from backend.auto_login_scheduler import start_auto_login_scheduler
+from backend.auth import install_auth
 
 app = Flask(__name__,
             template_folder="frontend/templates",
             static_folder="frontend/static")
+
+# Wire app-level auth (login page, change-password, before_request hook).
+# Reads SECRET_KEY from .env (loaded earlier by backend.kotak.client). Raises
+# RuntimeError if SECRET_KEY is missing — refuses to start with no signing key.
+install_auth(app)
+
+
+# Liveness probe — exempt from auth so monitoring can hit it without a cookie.
+# (See _EXEMPT_PREFIXES in backend/auth.py.)
+@app.route("/healthz")
+def healthz():
+    return {"status": "ok"}
 
 
 # Jinja filter — render numbers as Indian rupees with thousand separators.
@@ -190,7 +203,7 @@ def fmt_duration(seconds):
 # books to review, then risk + account at the end.
 TABS = [
     # Live — what the bot is trading right now
-    {"key": "gann",         "url": "/gann",         "label": "Gann Trader"},
+    {"key": "gann",         "url": "/levels",       "label": "Levels"},
     # Books — ledgers (paper next to real, real first)
     {"key": "trades",       "url": "/trades",       "label": "Trade Log"},
     {"key": "paper_trades", "url": "/paper-trades", "label": "Paper Log"},
@@ -202,6 +215,11 @@ TABS = [
     {"key": "positions",    "url": "/positions",    "label": "Positions"},
     {"key": "config",       "url": "/config",       "label": "Config"},
     {"key": "history",      "url": "/history",      "label": "Login History"},
+    # Auth — user account actions. Logout is GET so a plain link works; the
+    # change-password page collects current+new and bumps session_version
+    # which kicks every other browser back to /login.
+    {"key": "change_password", "url": "/change-password", "label": "Change Password"},
+    {"key": "logout",          "url": "/logout",          "label": "Logout"},
 ]
 
 
@@ -490,7 +508,7 @@ def history_view():
     )
 
 
-@app.route("/gann")
+@app.route("/levels")
 def gann_view():
     return render_template(
         "gann.html",
@@ -500,6 +518,13 @@ def gann_view():
         ucc=os.getenv("KOTAK_UCC", ""),
         level_colors=LEVEL_COLORS,
     )
+
+
+# Permanent redirect for the legacy /gann URL — keeps any existing browser
+# bookmarks, keyboard shortcuts, or external links working after the rename.
+@app.route("/gann")
+def gann_view_legacy():
+    return redirect("/levels", code=301)
 
 
 @app.route("/api/feed-status")
@@ -830,14 +855,16 @@ def paper_trades_xlsx():
     wb = Workbook()
     ws = wb.active
     ws.title = "Paper Ledger"
-    # Phase 3: Engine column (current/reverse) inserted after Order Type so
-    # Ganesh can filter the export by engine in Excel. Legacy rows that
-    # predate Phase 2 don't have an "engine" key and get rendered as
-    # 'current' to match the HTML table behaviour.
-    headers = ["Date", "Scrip", "Order Type", "Engine", "Entry Time (IST)",
-               "Entry Price", "Target Level Reached", "Max/Min Target Price",
-               "Exit Time (IST)", "Exit Price", "Exit Reason",
-               "P&L Points", "P&L %", "Duration"]
+    # Columns mirror the /paper-trades HTML table 1:1 so the Excel export
+    # contains every value the user can see in the UI. Profit ₹ is
+    # pnl_points × qty (rupees, not points), matching how the table's
+    # Profit ₹ cell is computed in JS.
+    headers = ["Mode", "Date", "Asset", "Scrip", "Side", "Qty",
+               "Engine", "Entry Reason", "Trigger Lvl", "Trigger Spot",
+               "Entry Time (IST)", "Entry Price",
+               "Target Level Reached", "Max/Min Target Price",
+               "Exit Time (IST)", "Exit Price", "Exit Spot", "Exit Reason",
+               "P&L Points", "Profit ₹", "P&L %", "Trail SL", "Duration"]
     ws.append(headers)
     hdr_fill = PatternFill("solid", fgColor="FFEB3B")
     for c, _ in enumerate(headers, start=1):
@@ -854,39 +881,62 @@ def paper_trades_xlsx():
     range_key, custom_date = _resolve_date_range(request.args)
     _paper_rows = _filter_trades_by_range(read_paper_ledger(),
                                           range_key, custom_date)
+    SIDE_COL = 5
+    PNL_PTS_COL = 19
+    PROFIT_INR_COL = 20
+    PNL_PCT_COL = 21
     for t in _paper_rows:
+        try:
+            qty_val = int(t.get("qty") or 0)
+        except (TypeError, ValueError):
+            qty_val = 0
+        try:
+            pnl_pts = float(t.get("pnl_points")) if t.get("pnl_points") is not None else None
+        except (TypeError, ValueError):
+            pnl_pts = None
+        profit_inr = round(pnl_pts * qty_val, 2) if pnl_pts is not None and qty_val else ""
         ws.append([
+            t.get("mode", "") or "",
             t.get("date", ""),
+            t.get("asset_type", "") or "",
             t.get("scrip", ""),
             t.get("order_type", ""),
+            qty_val or "",
             t.get("engine") or "current",
+            t.get("entry_reason", "") or "",
+            t.get("trigger_level", "") or "",
+            t.get("trigger_spot", "") if t.get("trigger_spot") is not None else "",
             t.get("entry_time", ""),
             t.get("entry_price", ""),
             t.get("target_level_reached", "") or "",
             t.get("max_min_target_price", "") or "",
             t.get("exit_time", "") or "",
             t.get("exit_price", "") or "",
+            t.get("exit_spot", "") if t.get("exit_spot") is not None else "",
             t.get("exit_reason", "") or "",
-            t.get("pnl_points", "") if t.get("pnl_points") is not None else "",
+            pnl_pts if pnl_pts is not None else "",
+            profit_inr,
             t.get("pnl_pct", "") if t.get("pnl_pct") is not None else "",
+            t.get("trail_sl_price", "") if t.get("trail_sl_price") is not None else "",
             fmt_duration(t.get("duration_seconds")),
         ])
         r = ws.max_row
-        otype_cell = ws.cell(row=r, column=3)
+        side_cell = ws.cell(row=r, column=SIDE_COL)
         if t.get("order_type") == "SELL":
-            otype_cell.fill = sell_fill
+            side_cell.fill = sell_fill
         else:
-            otype_cell.fill = buy_fill
-        otype_cell.alignment = Alignment(horizontal="center")
-        ws.cell(row=r, column=4).alignment = Alignment(horizontal="center")
+            side_cell.fill = buy_fill
+        side_cell.alignment = Alignment(horizontal="center")
+        ws.cell(row=r, column=7).alignment = Alignment(horizontal="center")
         try:
-            pl = float(t.get("pnl_points") or 0)
-            # P&L points is now col 12, P&L % col 13 after Engine insert.
-            ws.cell(row=r, column=12).font = pos_font if pl >= 0 else neg_font
-            ws.cell(row=r, column=13).font = pos_font if pl >= 0 else neg_font
+            pl = pnl_pts if pnl_pts is not None else 0.0
+            ws.cell(row=r, column=PNL_PTS_COL).font = pos_font if pl >= 0 else neg_font
+            ws.cell(row=r, column=PROFIT_INR_COL).font = pos_font if pl >= 0 else neg_font
+            ws.cell(row=r, column=PNL_PCT_COL).font = pos_font if pl >= 0 else neg_font
         except (TypeError, ValueError):
             pass
-    widths = [12, 12, 12, 10, 18, 14, 20, 20, 18, 12, 14, 12, 10, 12]
+    widths = [12, 12, 10, 22, 8, 8, 10, 18, 12, 14, 18, 14, 18, 18,
+              18, 12, 14, 14, 12, 12, 10, 12, 12]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -1459,15 +1509,40 @@ def _ui_theme_is_light():
     return os.getenv("KOTAK_UI_THEME", "dark").lower() == "light"
 
 
+def _paper_banner_enabled():
+    """True when env var KOTAK_PAPER_BANNER=1 (rev deployment).
+    Decoupled from KOTAK_UI_THEME so the banner can ride on the
+    dark theme too — Ganesh prefers dark cells but still wants
+    the 'this is paper' visual distinction."""
+    return os.getenv("KOTAK_PAPER_BANNER", "").lower() in ("1", "true", "yes")
+
+
+# Inline banner styles so the banner stands out on the dark base
+# theme without needing theme-light.css. Amber-on-dark stays
+# legible and signals "warning / non-prod".
+_PAPER_BANNER_HTML = (
+    '<div style="background:#3b2a07;border:2px solid #f59e0b;'
+    'color:#fbbf24;padding:10px 16px;border-radius:8px;'
+    'margin:8px 12px;font-weight:700;font-size:14px;'
+    'letter-spacing:0.5px;text-align:center;" '
+    'class="review-banner">'
+    'PAPER REVIEW DASHBOARD - reverse engine, no real orders'
+    '</div>'
+)
+
+
 @app.after_request
-def _inject_light_theme(response):
+def _inject_theme_and_banner(response):
     """Visual differentiator for the paper-only review deployment.
-    When config.yaml has ui.theme: light, inject the light-theme
-    stylesheet + a 'PAPER REVIEW' banner into every HTML response.
+    Two independent injections, each gated by its own env var:
+      - KOTAK_UI_THEME=light → inject theme-light.css
+      - KOTAK_PAPER_BANNER=1 → inject the 'PAPER REVIEW' banner
     Single point of injection so each page template stays untouched
     and any new pages we add later automatically pick this up.
     Skips non-HTML, redirects, and any response without a </head>."""
-    if not _ui_theme_is_light():
+    light = _ui_theme_is_light()
+    banner = _paper_banner_enabled()
+    if not light and not banner:
         return response
     ctype = response.content_type or ""
     if not ctype.startswith("text/html"):
@@ -1480,17 +1555,14 @@ def _inject_light_theme(response):
         return response
     if "</head>" not in body:
         return response
-    link = ('<link rel="stylesheet" '
-            'href="/static/theme-light.css">')
-    body = body.replace("</head>", link + "</head>", 1)
+    if light:
+        link = ('<link rel="stylesheet" '
+                'href="/static/theme-light.css">')
+        body = body.replace("</head>", link + "</head>", 1)
     # Insert review banner immediately after <body>. Skip if the
     # page already added one (so re-injection is idempotent).
-    if "<body>" in body and "review-banner" not in body:
-        banner = ('<div class="review-banner">'
-                  'PAPER REVIEW DASHBOARD - reverse engine, '
-                  'no real orders'
-                  '</div>')
-        body = body.replace("<body>", "<body>" + banner, 1)
+    if banner and "<body>" in body and "review-banner" not in body:
+        body = body.replace("<body>", "<body>" + _PAPER_BANNER_HTML, 1)
     response.set_data(body)
     return response
 
