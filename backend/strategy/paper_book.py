@@ -99,7 +99,7 @@ def _paper_execute_exit(open_row, ltp, reason, spot=None):
 
 
 # ---------- high-level ticks ----------
-def paper_options_tick(option_data, option_index_meta, gann_quotes):
+def paper_options_tick(option_data, option_index_meta, gann_quotes, engine=None):  # engine kwarg accepted+ignored (rev-leak shim)
     """Paper analogue of option_auto_strategy_tick.
 
     No `client` param — never sends orders. Reuses the SAME entry
@@ -285,7 +285,7 @@ def paper_options_tick(option_data, option_index_meta, gann_quotes):
             _paper_state["options_last_spot"][idx_name] = spot
 
 
-def paper_futures_tick(future_data, gann_quotes):
+def paper_futures_tick(future_data, gann_quotes, engine=None):  # engine kwarg accepted+ignored (rev-leak shim)
     """Paper analogue of future_auto_strategy_tick. See above."""
     from backend.strategy.futures import (
         _compute_futures_entry_signal, _check_futures_exit_reason,

@@ -343,6 +343,22 @@ def _coerce(raw):
             risk["max_daily_drawdown"] = None
     merged["risk"] = risk
 
+    # reverse_engine default block — main is single-engine, but the
+    # rev-leak config.html template still references cfg.reverse_engine.*
+    # When the loaded yaml has no reverse_engine, mirror the top-level
+    # blocks so the template renders without UndefinedError. The actual
+    # strategy never reads these (engine_enabled('reverse') == False).
+    # Added 2026-05-05 alongside the other rev-leak shims.
+    if not merged.get("reverse_engine"):
+        merged["reverse_engine"] = {
+            "entry":       dict(merged.get("entry") or {}),
+            "stoploss":    dict(merged.get("stoploss") or {}),
+            "target":      dict(merged.get("target") or {}),
+            "lots":        dict(merged.get("lots") or {}),
+            "per_day_cap": dict(merged.get("per_day_cap") or {}),
+            "risk":        dict(merged.get("risk") or {}),
+        }
+
     return merged
 
 
@@ -585,3 +601,43 @@ def resolve_buy_level(levels, choice):
 def resolve_sell_level(levels, choice):
     """choice in {SELL, SELL_WA}. Returns numeric level or None."""
     return (levels.get("sell") or {}).get(choice)
+
+
+def engine_enabled(engine):
+    """True if the named logic engine should run.
+    Main branch is single-engine ("current" only). Reverse is rev-branch only.
+    Added 2026-05-05 to fix AttributeError in ticker (rev-branch app.py
+    leaked into main during a wholesale-copy deploy)."""
+    if engine == "current":
+        return True
+    return False
+
+
+def engine_block(engine):
+    """Stub for compatibility with code paths that expect the rev-branch
+    engine_block(). On main there is only the current engine; return the
+    top-level config dict shape it already used pre-rev."""
+    cfg = get()
+    return {
+        "entry":       cfg.get("entry") or {},
+        "stoploss":    cfg.get("stoploss") or {},
+        "target":      cfg.get("target") or {},
+        "indices":     cfg.get("indices") or {},
+        "lots":        cfg.get("lots") or {},
+        "per_day_cap": cfg.get("per_day_cap") or {},
+        "risk":        cfg.get("risk") or {},
+    }
+
+
+def engine_max_daily_drawdown(engine):
+    """Per-engine drawdown threshold shim (2026-05-05 rev-leak fix).
+
+    Main branch is single-engine. The rev-style ticker in app.py iterates
+    ('current', 'reverse') and looks up a per-engine threshold. We delegate
+    to the global max_daily_drawdown() for the 'current' engine and return
+    None for any other engine name so the ticker's drawdown loop simply
+    skips it (see app.py around line 1650 — None short-circuits via
+    'if not eng_threshold: continue')."""
+    if engine == "current":
+        return max_daily_drawdown()
+    return None

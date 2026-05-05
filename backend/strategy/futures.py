@@ -239,7 +239,7 @@ def _compute_futures_entry_signal(idx_name, spot, prev_spot, levels, cfg,
 
 
 # ---------- main tick ----------
-def future_auto_strategy_tick(future_data, gann_quotes, client=None):
+def future_auto_strategy_tick(future_data, gann_quotes, client=None, engine=None):  # engine kwarg accepted+ignored (rev-leak shim)
     """One tick of the futures auto-strategy.
 
     future_data:   {idx_name: {trading_symbol, token, exchange, expiry,

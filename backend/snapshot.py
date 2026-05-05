@@ -156,8 +156,10 @@ def _build_gann_payload():
     data, err = fetch_quotes(force=True)  # D.7 — see _build_options_payload.
     try:
         update_open_trades_mfe(data)
-    except Exception:
-        pass
+    except Exception as e:
+        import traceback
+        print(f"[snapshot] update_open_trades_mfe failed: {type(e).__name__}: {e}", flush=True)
+        traceback.print_exc()
     ordered = []
     for s in SCRIPS:
         row = data.get(s["symbol"], {

@@ -290,8 +290,8 @@ def _compute_entry_signal(idx_name, spot, prev_spot, levels, cfg,
     return side, stamp_now
 
 
-def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,
-                              client=None):
+def option_auto_strategy_tick(option_data, option_index_meta, gann_quotes,  # engine kwarg accepted+ignored (rev-leak shim 2026-05-05)
+                              client=None, engine=None):
     """One tick of the option auto-strategy.
 
     option_data:        {key: {index, strike, option_type, ltp, ...}}

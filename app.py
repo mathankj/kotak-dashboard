@@ -203,7 +203,7 @@ def fmt_duration(seconds):
 # books to review, then risk + account at the end.
 TABS = [
     # Live — what the bot is trading right now
-    {"key": "gann",         "url": "/gann",         "label": "Levels"},
+    {"key": "gann",         "url": "/levels",       "label": "Levels"},
     # Books — ledgers (paper next to real, real first)
     {"key": "trades",       "url": "/trades",       "label": "Trade Log"},
     {"key": "paper_trades", "url": "/paper-trades", "label": "Paper Log"},
@@ -215,6 +215,11 @@ TABS = [
     {"key": "positions",    "url": "/positions",    "label": "Positions"},
     {"key": "config",       "url": "/config",       "label": "Config"},
     {"key": "history",      "url": "/history",      "label": "Login History"},
+    # Auth — user account actions. Logout is GET so a plain link works; the
+    # change-password page collects current+new and bumps session_version
+    # which kicks every other browser back to /login.
+    {"key": "change_password", "url": "/change-password", "label": "Change Password"},
+    {"key": "logout",          "url": "/logout",          "label": "Logout"},
 ]
 
 
@@ -503,7 +508,7 @@ def history_view():
     )
 
 
-@app.route("/gann")
+@app.route("/levels")
 def gann_view():
     return render_template(
         "gann.html",
@@ -513,6 +518,13 @@ def gann_view():
         ucc=os.getenv("KOTAK_UCC", ""),
         level_colors=LEVEL_COLORS,
     )
+
+
+# Permanent redirect for the legacy /gann URL — keeps any existing browser
+# bookmarks, keyboard shortcuts, or external links working after the rename.
+@app.route("/gann")
+def gann_view_legacy():
+    return redirect("/levels", code=301)
 
 
 @app.route("/api/feed-status")

@@ -1,16 +1,32 @@
-apply_to: both
+engines:
+  paper:
+    enabled: true
+    apply_to: options
+  real:
+    enabled: true
+    apply_to: options
+indices:
+  NIFTY:
+    paper: true
+    real: false
+  BANKNIFTY:
+    paper: true
+    real: false
+  SENSEX:
+    paper: true
+    real: false
 timings:
   market_start: 09:15
   square_off: '15:15'
 entry:
   market_open_path: true
-  market_open_buy_level: BUY
-  market_open_sell_level: SELL
+  market_open_buy_level: BUY_WA
+  market_open_sell_level: SELL_WA
   crossing_path: true
-  crossing_buy_level: BUY
-  crossing_sell_level: SELL
+  crossing_buy_level: BUY_WA
+  crossing_sell_level: SELL_WA
 stoploss:
-  active: C
+  active: D
   variant_a_drop_rs: 5.0
   variant_a_buy_level: BUY
   variant_a_sell_level: SELL
@@ -20,8 +36,8 @@ stoploss:
   variant_c_buy_level: BUY
   variant_c_sell_level: SELL
 target:
-  ce_level: T1
-  pe_level: S1
+  ce_level: T9
+  pe_level: S9
 lots:
   NIFTY: 1
   BANKNIFTY: 1
@@ -30,6 +46,8 @@ per_day_cap:
   NIFTY: null
   BANKNIFTY: null
   SENSEX: null
+risk:
+  max_daily_drawdown: null
 futures_round_step:
   NIFTY: 50
   BANKNIFTY: 100

@@ -113,22 +113,33 @@ def _ws_overlay(out_dict, key_to_token_exch):
             continue
         rest_ltp = rec.get("ltp")
         is_fresh = age <= WS_FRESH_SECONDS
+        # ---- LTP overlay (gated on freshness) ----
+        # LTP must be fresh — a stale LTP would mislead the trader. Fall
+        # through to REST LTP if the tick is stale and REST has a value.
         if is_fresh or rest_ltp is None:
             rec["ltp"] = tick["ltp"]
             rec["ws_age"] = round(age, 2)
-            prev_open = rec.get("open")
-            # WS is the sole OHLC source — copy whatever it has.
-            # `c` is Kotak's previous-day close (used for change% on
-            # options and as off-hours LTP fallback in the UI).
-            for src, dst in (("op", "open"), ("lo", "low"),
-                             ("h", "high"), ("c", "close")):
-                if tick.get(src) is not None:
-                    rec[dst] = tick[src]
-            new_open = rec.get("open")
-            if new_open and (new_open != prev_open
-                             or not rec.get("levels", {}).get("buy")):
-                rec["levels"] = gann_levels(new_open)
             overlaid += 1
+        # ---- OHLC overlay (NOT gated on freshness) ----
+        # Today's open/low/high/close are intraday-stable: once received
+        # in the session-open snapshot frame, they remain the correct
+        # values for the rest of the day. Gating this copy on tick
+        # freshness used to wipe OHLC within seconds of WS going quiet
+        # (markets closed, weekend, brief reconnect gaps), because
+        # fetch_quotes() rebuilds `out` with open/low/high=None every
+        # call and depends on this overlay to refill them. Keep the
+        # copy unconditional — if the tick has the field, use it.
+        prev_open = rec.get("open")
+        # `c` is Kotak's previous-day close (used for change% on
+        # options and as off-hours LTP fallback in the UI).
+        for src, dst in (("op", "open"), ("lo", "low"),
+                         ("h", "high"), ("c", "close")):
+            if tick.get(src) is not None:
+                rec[dst] = tick[src]
+        new_open = rec.get("open")
+        if new_open and (new_open != prev_open
+                         or not rec.get("levels", {}).get("buy")):
+            rec["levels"] = gann_levels(new_open)
     return overlaid
 
 

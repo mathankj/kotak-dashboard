@@ -64,11 +64,22 @@ def _seconds_until_next(hour, minute):
     return (target - now).total_seconds()
 
 
-def _clear_previous_day_caches(log_fn):
+def _clear_previous_day_caches(log_fn, quote_feed=None):
     """Drop every TTL-cached price dict so the dashboard never displays
     yesterday's values past 08:45 IST. The caches will be repopulated
     by the next REST/WS fetch — and once WS ticks resume at 09:15 IST,
     only today's data flows through.
+
+    Two layers of cache get wiped here:
+      1. REST output caches (_quote_cache, _option_quote_cache,
+         _future_quote_cache) — backstop for cold-start UI loads.
+      2. WS QuoteFeed in-memory tick cache (quote_feed._cache) —
+         the source of truth for live op/lo/h/c. CRITICAL for
+         NIFTY 50: Kotak's WS does not always push a fresh `op` on
+         resubscribe, so without an explicit wipe yesterday's NIFTY 50
+         OPEN survives into today's session, anchors the Gann ladder
+         to yesterday's number, and silently produces wrong
+         stop-losses for the whole day.
 
     Imported lazily to avoid a hard import-time dependency on backend.quotes
     (the scheduler module is loaded earlier than quotes during app boot)."""
@@ -83,8 +94,17 @@ def _clear_previous_day_caches(log_fn):
         log_fn("[auto_login] cleared previous-day price caches "
                "(_quote_cache, _option_quote_cache, _future_quote_cache)")
     except Exception as e:
-        log_fn(f"[auto_login] cache clear failed (non-fatal): "
+        log_fn(f"[auto_login] REST cache clear failed (non-fatal): "
                f"{type(e).__name__}: {e}")
+
+    if quote_feed is not None:
+        try:
+            n = quote_feed.clear_cache()
+            log_fn(f"[auto_login] cleared WS tick cache "
+                   f"(quote_feed._cache, removed {n} entries)")
+        except Exception as e:
+            log_fn(f"[auto_login] WS cache clear failed (non-fatal): "
+                   f"{type(e).__name__}: {e}")
 
 
 def _do_login_and_reconnect_ws(quote_feed, log_fn):
@@ -102,7 +122,7 @@ def _do_login_and_reconnect_ws(quote_feed, log_fn):
          reconnects via its existing reconnect path.
     """
     client, greeting = kotak_login()
-    _clear_previous_day_caches(log_fn)
+    _clear_previous_day_caches(log_fn, quote_feed=quote_feed)
     _state["client"] = client
     _state["greeting"] = greeting
     _state["login_time"] = now_ist()

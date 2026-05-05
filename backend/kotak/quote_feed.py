@@ -79,6 +79,22 @@ class QuoteFeed:
         # systemctl restart (observed Fri May 1 13:30 IST production).
         self._needs_reconnect = False
 
+        # OHLC snapshot state. Kotak's index WS pushes only LTP-only ticks
+        # for indices most of the time; OHLC fields (op/lo/h/c) arrive
+        # sporadically — typically a single snapshot frame around session
+        # open. After a mid-session restart we never see that frame, so
+        # OPEN stays None and Gann levels can't compute. Fix: explicitly
+        # request an OHLC snapshot via the SDK's SNAP_IF protocol message
+        # ("ifsp") right after subscribe. Pure WS, no REST. Gated to fire
+        # only after 09:15 IST so we never pick up a pre-market /
+        # previous-day candle which would corrupt today's stop-loss
+        # ladders. _snap_pending stays True across loop iterations until
+        # the WS is open AND time has crossed 09:15 — so a pre-market
+        # auto-login subscribe still gets its OHLC the moment the bell
+        # rings.
+        self._snap_pending = False
+        self._last_snap_at = 0.0
+
     # ---------- public subscription setters ----------
     @staticmethod
     def _sub_key(s):
@@ -133,6 +149,33 @@ class QuoteFeed:
         with self._lock:
             v = self._cache.get(k)
             return dict(v) if v else None
+
+    def clear_cache(self):
+        """Wipe the in-memory tick cache atomically. Called from the
+        08:45 IST auto-login routine so yesterday's op/lo/h/c can never
+        bleed into today's session.
+
+        Why this matters: Kotak's WebSocket is unreliable about pushing
+        a fresh `op` for NIFTY 50 — most days it sends today's open in
+        the session-open snapshot frame, but on bad days (or after a
+        mid-session reconnect) it sends only LTP-only ticks. If the
+        process has been running across midnight without restart, the
+        cache still holds yesterday's op for NIFTY 50, and without an
+        explicit wipe at 08:45 it will silently surface yesterday's
+        OPEN as today's — which in turn anchors the wrong Gann ladder
+        and triggers wrong stop-loss orders.
+
+        BANKNIFTY and SENSEX usually get a fresh op on subscribe, so
+        for them the wipe is belt-and-suspenders. For NIFTY 50 it is
+        the only line of defence (until the Kotak NIFTY-50-OPEN bug
+        is solved at the source).
+
+        Returns the number of cache entries removed (for logging)."""
+        with self._lock:
+            n = len(self._cache)
+            self._cache.clear()
+            self._last_tick_ts = 0
+            return n
 
     def status(self):
         with self._lock:
@@ -286,6 +329,83 @@ class QuoteFeed:
             except Exception as e:
                 self._record_error("subscribe(scrip+option+future)", e)
         self._last_subscribed_at = time.time()
+        # SNAP_IF disabled — the raw "ifsp" hs_send caused Kotak to
+        # close the WS immediately on every reconnect, putting the
+        # feed in a tight reconnect→snap→disconnect loop (observed
+        # 2026-05-04, ~16:50 IST in data/app.log). Until we figure
+        # out the correct snapshot path (likely needs the SDK's
+        # call_quotes / get_live_feed wrappers, not raw hs_send),
+        # leave _snap_pending=False so the deferred-pending block in
+        # _run() stays a no-op. _try_send_index_snap is kept for
+        # reference but never called.
+        self._snap_pending = False
+
+    def _try_send_index_snap(self):
+        """Fire a one-shot OHLC snapshot request for index subs over WS.
+
+        Returns True if the request was sent, False if deferred (socket
+        not open yet, pre-market, or no index subs). Caller (the run
+        loop) should leave _snap_pending=True on a False return so the
+        next iteration retries.
+
+        Why SNAP_IF: Kotak's regular index subscription only carries
+        OHLC in occasional snapshot frames; a mid-session reconnect
+        therefore sees LTP-only ticks indefinitely. SNAP_IF ("ifsp")
+        is a Kotak protocol message that demands a current OHLC frame
+        — the SDK uses it internally for `quotes(quote_type="ohlc")`
+        when the WS is up. We hit hsWebsocket.hs_send directly because
+        the public SDK surface doesn't expose a snap-only call. The
+        response arrives via the same on_hsm_message path our
+        existing _on_message handler already parses (extracts op, lo,
+        h, c into _cache).
+        """
+        client = self._client
+        if not client:
+            return False
+        try:
+            ws = client.NeoWebSocket
+            if not ws or getattr(ws, "is_hsw_open", 0) != 1:
+                return False
+            hsm = ws.hsWebsocket
+            if not hsm:
+                return False
+        except AttributeError:
+            return False
+
+        # Gate by IST clock — pre-market SNAP can return previous-day
+        # OHLC, which would seed wrong open/low/high into the cache and
+        # corrupt every Gann level + stop-loss for the rest of the day.
+        # 09:15 is NSE/BSE cash open; anything earlier we defer.
+        try:
+            from backend.utils import now_ist
+            ist = now_ist()
+            if (ist.hour, ist.minute) < (9, 15):
+                return False
+        except Exception:
+            return False
+
+        idx_subs = list(self._index_subs)
+        if not idx_subs:
+            # No index tokens means nothing to snap. We don't snap
+            # options/futures here — Gann levels are computed off
+            # spot OPEN, which only indices need. Live LTP for the
+            # F&O legs comes through normal subscribe ticks.
+            return False
+
+        scrips = "&".join(
+            f"{s['exchange_segment']}|{s['instrument_token']}"
+            for s in idx_subs
+        )
+        try:
+            hsm.hs_send(json.dumps(
+                {"type": "ifsp", "scrips": scrips, "channelnum": 1}))
+            self._last_snap_at = time.time()
+            self._log(f"[quote_feed] SNAP_IF sent for {len(idx_subs)} "
+                      f"indices ({scrips})")
+            return True
+        except Exception as e:
+            self._record_error("snap_if", e)
+            return False
 
     def _run(self):
         """Subscribe once, then monitor in a loop.
@@ -323,6 +443,16 @@ class QuoteFeed:
         reconnect_attempt = 0
         while not self._stop.is_set():
             self._stop.wait(2.0)
+
+            # ---- (0) Deferred OHLC snapshot ----
+            # _snap_pending was set by _do_subscribe; we keep retrying
+            # until the WS handshake completes AND the IST clock is past
+            # 09:15. Once a SNAP_IF goes out, _try_send_index_snap returns
+            # True and we clear the flag. Polled every 2s — well under the
+            # latency a human would notice on the dashboard.
+            if self._snap_pending and not self._stop.is_set():
+                if self._try_send_index_snap():
+                    self._snap_pending = False
 
             # ---- (1) Reconnect on dead socket ----
             if self._needs_reconnect and not self._stop.is_set():
