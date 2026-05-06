@@ -297,7 +297,10 @@ def _rest_seed_missing_opens(out, client):
         it = idx.get(key)
         if not it:
             continue
-        raw = it.get("open") or it.get("openPrice") or it.get("op")
+        # Kotak ohlc response nests the values: {"ohlc": {"open":...}}
+        ohlc = it.get("ohlc") or {}
+        raw = (ohlc.get("open") or ohlc.get("openPrice") or
+               it.get("open") or it.get("openPrice") or it.get("op"))
         try:
             op = float(raw) if raw not in (None, "", "0", 0) else None
         except (TypeError, ValueError):
