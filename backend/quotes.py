@@ -172,8 +172,9 @@ def _ws_overlay(out_dict, key_to_token_exch):
         # options and as off-hours LTP fallback in the UI).
         for src, dst in (("op", "open"), ("lo", "low"),
                          ("h", "high"), ("c", "close")):
-            if tick.get(src) is not None:
-                rec[dst] = tick[src]
+            v = tick.get(src)
+            if v is not None and v != 0 and v != 0.0:
+                rec[dst] = v
         new_open = rec.get("open")
         if new_open and (new_open != prev_open
                          or not rec.get("levels", {}).get("buy")):
@@ -276,6 +277,9 @@ def fetch_quotes(force=False):
     except Exception as e:
         print(f"[quote_feed] overlay (stocks) failed: {type(e).__name__}: {e}")
 
+    # REST OHLC fallback — fires only during market hours (09:16-15:30 IST)
+    _rest_seed_missing_opens(out, client)
+
     # Phase 1 — reverse Gann ladders. Stepped anchor: rev-buy anchored to
     # today's running low (only updates on a new lower low); rev-sell to
     # today's running high. Computed AFTER the WS overlay so we use the
@@ -297,6 +301,68 @@ def fetch_quotes(force=False):
     _quote_cache["ts"] = now
     _quote_cache["error"] = last_err
     return out, last_err
+
+
+def _rest_seed_missing_opens(out, client):
+    """Fill open=None scrips from REST ohlc during market hours only."""
+    ist = now_ist()
+    mins = ist.hour * 60 + ist.minute
+    if mins < 9 * 60 + 16 or mins >= 15 * 60 + 30:
+        return  # outside window — REST gives stale data before 09:16
+
+    missing = [s for s in SCRIPS
+               if not out.get(s["symbol"], {}).get("open")]  # None or 0
+    if not missing:
+        return
+
+    tokens = [{"instrument_token": s["token"], "exchange_segment": s["exchange"]}
+              for s in missing]
+    try:
+        r = client.quotes(instrument_tokens=tokens, quote_type="ohlc")
+    except Exception as e:
+        print(f"[quotes] REST open seed call failed: {type(e).__name__}: {e}")
+        return
+    if not r:
+        return
+    if isinstance(r, dict):
+        for key in ("data", "result", "quotes"):
+            v = r.get(key)
+            if isinstance(v, list):
+                r = v
+                break
+        else:
+            r = [r] if any(k in r for k in ("ohlc", "open", "exchange_token")) else []
+    if not isinstance(r, list):
+        return
+
+    idx = {}
+    for it in r:
+        if not isinstance(it, dict):
+            continue
+        key = (str(it.get("exchange", "")).strip().lower(),
+               str(it.get("exchange_token", "")).strip().lower())
+        idx[key] = it
+
+    for s in missing:
+        key = (s["exchange"].lower(), str(s["token"]).lower())
+        it = idx.get(key)
+        if not it:
+            continue
+        # Kotak ohlc response nests the values: {"ohlc": {"open":...}}
+        ohlc = it.get("ohlc") or {}
+        raw = (ohlc.get("open") or ohlc.get("openPrice") or
+               it.get("open") or it.get("openPrice") or it.get("op"))
+        try:
+            op = float(raw) if raw not in (None, "", "0", 0) else None
+        except (TypeError, ValueError):
+            op = None
+        if not op:
+            continue
+        out[s["symbol"]]["open"] = op
+        out[s["symbol"]]["levels"] = gann_levels(op)
+        # Also seed WS cache so next call's _ws_overlay sees it without REST
+        _feed.seed_index_op(s["exchange"], s["token"], op)
+        print(f"[quotes] REST-seeded open for {s['symbol']}: {op}", flush=True)
 
 
 def build_option_chain(index_name):
