@@ -150,6 +150,22 @@ class QuoteFeed:
             v = self._cache.get(k)
             return dict(v) if v else None
 
+    def seed_index_op(self, exchange, token, op):
+        """Seed an index opening price into the WS cache only if WS has not
+        already written one.  Called from the REST-OHLC fallback in quotes.py
+        when Kotak's WS fails to deliver openingPrice for NIFTY 50 (known
+        broker bug).  WS ticks always win: if the cache already has a non-zero
+        op this is a silent no-op."""
+        key = (str(exchange).lower(), str(token).lower())
+        with self._lock:
+            prev = self._cache.get(key, {})
+            if prev.get("op"):
+                return  # WS already populated it — don't overwrite
+            merged = dict(prev)
+            merged["op"] = float(op)
+            merged.setdefault("ts", time.time())
+            self._cache[key] = merged
+
     def clear_cache(self):
         """Wipe the in-memory tick cache atomically. Called from the
         08:45 IST auto-login routine so yesterday's op/lo/h/c can never
