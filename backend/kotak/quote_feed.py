@@ -262,12 +262,19 @@ class QuoteFeed:
                     def _f(*names):
                         for n in names:
                             v = item.get(n)
+                            # Reject explicit zeros — Kotak sends openingPrice=0
+                            # when the session-open frame hasn't been published
+                            # yet (NIFTY 50 known bug).  float(0) == 0 so catch
+                            # both the string "0" and any numeric zero.
                             if v in (None, "", "0"):
                                 continue
                             try:
-                                return float(v)
+                                fv = float(v)
                             except (TypeError, ValueError):
-                                pass
+                                continue
+                            if fv == 0.0:
+                                continue
+                            return fv
                         return None
                     # Stocks emit: ltp/op/lo/h/c
                     # Indices emit: iv/openingPrice/lowPrice/highPrice/ic

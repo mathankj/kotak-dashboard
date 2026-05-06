@@ -134,8 +134,9 @@ def _ws_overlay(out_dict, key_to_token_exch):
         # options and as off-hours LTP fallback in the UI).
         for src, dst in (("op", "open"), ("lo", "low"),
                          ("h", "high"), ("c", "close")):
-            if tick.get(src) is not None:
-                rec[dst] = tick[src]
+            v = tick.get(src)
+            if v is not None and v != 0 and v != 0.0:
+                rec[dst] = v
         new_open = rec.get("open")
         if new_open and (new_open != prev_open
                          or not rec.get("levels", {}).get("buy")):
@@ -258,7 +259,8 @@ def _rest_seed_missing_opens(out, client):
     if mins < 9 * 60 + 16 or mins >= 15 * 60 + 30:
         return  # outside window — REST gives stale data before 09:16
 
-    missing = [s for s in SCRIPS if out.get(s["symbol"], {}).get("open") is None]
+    missing = [s for s in SCRIPS
+               if not out.get(s["symbol"], {}).get("open")]  # None or 0
     if not missing:
         return
 
