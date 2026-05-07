@@ -8,13 +8,13 @@ engines:
 indices:
   NIFTY:
     paper: true
-    real: false
+    real: true
   BANKNIFTY:
     paper: true
-    real: false
+    real: true
   SENSEX:
     paper: true
-    real: false
+    real: true
 timings:
   market_start: 09:15
   square_off: '15:15'
